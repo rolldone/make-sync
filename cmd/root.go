@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"make-sync/internal/config"
+	"make-sync/internal/devsync"
 	"make-sync/internal/history"
 
 	"github.com/manifoldco/promptui"
@@ -153,6 +154,36 @@ var initCmd = &cobra.Command{
 					}
 
 					fmt.Printf("Config loaded from template.yaml to %s\n", config.GetConfigPath())
+
+					// Create .sync_ignore file with default extended ignores (gitignore style)
+					syncIgnoreContent := `# Development files
+.git
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules
+
+# IDE files
+.vscode
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+
+# SSH
+.ssh`
+
+					err = os.WriteFile(".sync_ignore", []byte(syncIgnoreContent), 0644)
+					if err != nil {
+						fmt.Printf("⚠️  Warning: Failed to create .sync_ignore file: %v\n", err)
+					} else {
+						fmt.Println("✅ Created .sync_ignore file with default ignore patterns")
+					}
 
 					// Add to history
 					cwd, _ := os.Getwd()
@@ -399,7 +430,10 @@ func showDirectAccessMenu(loadedCfg *config.Config) bool {
 		return true
 	case "devsync :: Open Devsync":
 		fmt.Println("Opening devsync...")
-		// TODO: Implement devsync opening
+		err := devsync.RunDevSync(cfg)
+		if err != nil {
+			fmt.Printf("❌ DevSync error: %v\n", err)
+		}
 		return true
 	case "clean :: Git clean up":
 		fmt.Println("Running git clean up...")
@@ -493,8 +527,49 @@ var dataCmd = &cobra.Command{
 	},
 }
 
+var devsyncCmd = &cobra.Command{
+	Use:   "devsync",
+	Short: "Start file watching in devsync mode",
+	Long:  `Watch files for changes and display real-time notifications based on configuration.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		cwd, _ := os.Getwd()
+
+		// Create .sync_temp directory if it doesn't exist
+		syncTempDir := filepath.Join(cwd, ".sync_temp")
+		if err := os.MkdirAll(syncTempDir, 0755); err != nil {
+			fmt.Printf("❌ Failed to create .sync_temp directory: %v\n", err)
+			return
+		}
+
+		fmt.Printf("📁 Log directory: %s\n", syncTempDir)
+		fmt.Printf("You are in: %s\n", cwd)
+		fmt.Println("Initialize Bootstrap Is Done!")
+		fmt.Printf("process.execPath :: %s\n", os.Args[0])
+		fmt.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
+		fmt.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
+
+		// Validate and render configuration before proceeding
+		fmt.Println("🔍 Validating and rendering configuration...")
+		cfg, err := config.LoadAndRenderConfig() // Use LoadAndRenderConfig to render templates
+		if err != nil {
+			fmt.Printf("❌ Configuration validation/rendering failed:\n%v\n", err)
+			fmt.Println("💡 Please fix the configuration issues or run 'make-sync init' to recreate the config")
+			return
+		}
+		fmt.Println("✅ Configuration is valid and rendered!")
+
+		// Run devsync
+		err = devsync.RunDevSync(cfg)
+		if err != nil {
+			fmt.Printf("❌ DevSync error: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(dataCmd)
+	rootCmd.AddCommand(devsyncCmd)
 }
 
 func showSaveMenu() error {

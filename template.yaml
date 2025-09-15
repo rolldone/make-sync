@@ -13,10 +13,17 @@ local_path: "."
 remote_path: "/home/user/project"
 devsync:
   os_target: "linux"
+  auth:
+    username: =username
+    privateKey: =privateKey
+    host: =host
+    port: =port
+    localPath: =localPath
+    remotePath: =remotePath
   ignores: []
-  downloads:
+  agent_watchs:
     - "storage/logs/"
-  single_sync:
+  manual_transfer:
     - ".ssh"
     - "node_modules"
   script:

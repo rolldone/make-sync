@@ -37,11 +37,21 @@ type SyncCollection struct {
 }
 
 type Devsync struct {
-	OSTarget   string   `yaml:"os_target"`
-	Ignores    []string `yaml:"ignores"`
-	Downloads  []string `yaml:"downloads"`
-	SingleSync []string `yaml:"single_sync"`
-	Script     Script   `yaml:"script"`
+	OSTarget       string   `yaml:"os_target"`
+	Auth           Auth     `yaml:"auth"`
+	Ignores        []string `yaml:"ignores"`
+	AgentWatchs    []string `yaml:"agent_watchs"`
+	ManualTransfer []string `yaml:"manual_transfer"`
+	Script         Script   `yaml:"script"`
+}
+
+type Auth struct {
+	Username   string `yaml:"username"`
+	PrivateKey string `yaml:"privateKey"`
+	Host       string `yaml:"host"`
+	Port       string `yaml:"port"`
+	LocalPath  string `yaml:"localPath"`
+	RemotePath string `yaml:"remotePath"`
 }
 
 type Script struct {
@@ -99,7 +109,7 @@ type TemplateConfig struct {
 	LocalPath      string                 `yaml:"local_path"`
 	RemotePath     string                 `yaml:"remote_path"`
 	Devsync        TemplateDevsync        `yaml:"devsync"`
-	TriggerPerm    TemplateTriggerPerm    `yaml:"trigger_perm"`
+	TriggerPerm    TemplateTriggerPerm    `yaml:"trigger_permission"`
 	DirectAccess   TemplateDirectAccess   `yaml:"direct_access"`
 }
 
@@ -109,11 +119,21 @@ type TemplateSyncCollection struct {
 }
 
 type TemplateDevsync struct {
-	OSTarget   string         `yaml:"os_target"`
-	Ignores    []string       `yaml:"ignores"`
-	Downloads  []string       `yaml:"downloads"`
-	SingleSync []string       `yaml:"single_sync"`
-	Script     TemplateScript `yaml:"script"`
+	OSTarget       string         `yaml:"os_target"`
+	Auth           TemplateAuth   `yaml:"auth"`
+	Ignores        []string       `yaml:"ignores"`
+	AgentWatchs    []string       `yaml:"agent_watchs"`
+	ManualTransfer []string       `yaml:"manual_transfer"`
+	Script         TemplateScript `yaml:"script"`
+}
+
+type TemplateAuth struct {
+	Username   string `yaml:"username"`
+	PrivateKey string `yaml:"privateKey"`
+	Host       string `yaml:"host"`
+	Port       string `yaml:"port"`
+	LocalPath  string `yaml:"localPath"`
+	RemotePath string `yaml:"remotePath"`
 }
 
 type TemplateScript struct {
@@ -192,10 +212,18 @@ func MapTemplateToConfig(template TemplateConfig) Config {
 
 	// Map Devsync
 	config.Devsync = Devsync{
-		OSTarget:   template.Devsync.OSTarget,
-		Ignores:    template.Devsync.Ignores,
-		Downloads:  template.Devsync.Downloads,
-		SingleSync: template.Devsync.SingleSync,
+		OSTarget: template.Devsync.OSTarget,
+		Auth: Auth{
+			Username:   template.Devsync.Auth.Username,
+			PrivateKey: template.Devsync.Auth.PrivateKey,
+			Host:       template.Devsync.Auth.Host,
+			Port:       template.Devsync.Auth.Port,
+			LocalPath:  template.Devsync.Auth.LocalPath,
+			RemotePath: template.Devsync.Auth.RemotePath,
+		},
+		Ignores:        template.Devsync.Ignores,
+		AgentWatchs:    template.Devsync.AgentWatchs,
+		ManualTransfer: template.Devsync.ManualTransfer,
 	}
 
 	// Map Script
@@ -483,6 +511,44 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 			fmt.Printf("🔧 Rendered SSH config[%d].ProxyCommand: %s → %s\n", i, oldValue, sshConfig.ProxyCommand)
 			renderCount++
 		}
+	}
+
+	// Render Devsync Auth fields
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.Username, "=") {
+		oldValue := renderedCfg.Devsync.Auth.Username
+		renderedCfg.Devsync.Auth.Username = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Username)
+		fmt.Printf("🔧 Rendered Devsync.Auth.Username: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Username)
+		renderCount++
+	}
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.PrivateKey, "=") {
+		oldValue := renderedCfg.Devsync.Auth.PrivateKey
+		renderedCfg.Devsync.Auth.PrivateKey = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.PrivateKey)
+		fmt.Printf("🔧 Rendered Devsync.Auth.PrivateKey: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.PrivateKey)
+		renderCount++
+	}
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.Host, "=") {
+		oldValue := renderedCfg.Devsync.Auth.Host
+		renderedCfg.Devsync.Auth.Host = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Host)
+		fmt.Printf("🔧 Rendered Devsync.Auth.Host: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Host)
+		renderCount++
+	}
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.Port, "=") {
+		oldValue := renderedCfg.Devsync.Auth.Port
+		renderedCfg.Devsync.Auth.Port = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Port)
+		fmt.Printf("🔧 Rendered Devsync.Auth.Port: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Port)
+		renderCount++
+	}
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.LocalPath, "=") {
+		oldValue := renderedCfg.Devsync.Auth.LocalPath
+		renderedCfg.Devsync.Auth.LocalPath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.LocalPath)
+		fmt.Printf("🔧 Rendered Devsync.Auth.LocalPath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.LocalPath)
+		renderCount++
+	}
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.RemotePath, "=") {
+		oldValue := renderedCfg.Devsync.Auth.RemotePath
+		renderedCfg.Devsync.Auth.RemotePath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.RemotePath)
+		fmt.Printf("🔧 Rendered Devsync.Auth.RemotePath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.RemotePath)
+		renderCount++
 	}
 
 	// Render SSH commands

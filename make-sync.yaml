@@ -15,7 +15,7 @@ var:
     password: "secret123"
 project_name: Workspaces Digital Ocean
 username: root
-privateKey: C:/Users/test/.ssh/id_rsa_no_password
+privateKey: .ssh/openssh_nopassword
 host: localhost
 port: "221"
 localPath: .
@@ -23,9 +23,9 @@ remotePath: /home/ubuntu/workspaces
 devsync:
   os_target: linux
   ignores: []
-  downloads:
+  agent_watchs:
     - artywiz_hotfix/storage/logs/
-  single_sync:
+  manual_transfer:
     - artywiz_broadcast_service/node_modules
     - .ssh
     - artywiz_hotfix_webapp
