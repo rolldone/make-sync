@@ -596,6 +596,14 @@ func (w *Watcher) processAgentOutput(output string) {
 						if remoteBase == "" {
 							remoteBase = "."
 						}
+						currentHash, err := w.fileCache.CalculateFileHash(filePath)
+						if err != nil {
+							fmt.Printf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
+						}
+						if currentHash == hashValue {
+							fmt.Printf("✅ Remote file %s already in cache with matching hash, skipping download\n", filePath)
+							continue
+						}
 						fmt.Println("💾 Downloading remote file to local:", filePath, "->", localPath)
 						if err := w.fileCache.UpdateMetaDataFromDownload(localPath, hashValue); err != nil {
 							fmt.Printf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
