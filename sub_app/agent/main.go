@@ -186,36 +186,14 @@ func setupWatcher(watchPaths []string) {
 }
 
 func tryNotifyWatcher(watchPaths []string) bool {
-	fmt.Println("🔍 Testing notify-based file watching...")
+	fmt.Println("🔍 Starting notify-based file watching (async, will retry missing paths)...")
 
-	// Create a channel to receive events
-	c := make(chan notify.EventInfo, 10)
+	// Channel to receive events from notify
+	c := make(chan notify.EventInfo, 100)
 
-	// Register each watch path. Use recursive pattern by appending "..." when supported.
-	for _, p := range watchPaths {
-		// Ensure path exists
-		if _, err := os.Stat(p); os.IsNotExist(err) {
-			fmt.Printf("⚠️  Watch path does not exist: %s\n", p)
-			// Unregister any watches we may have created
-			notify.Stop(c)
-			return false
-		}
-
-		// For recursive watching, notify package uses "..." suffix on the path
-		pattern := filepath.Join(p, "...")
-		fmt.Printf("📋 Registering watch: %s\n", pattern)
-		if err := notify.Watch(pattern, c, notify.All); err != nil {
-			fmt.Printf("❌ Failed to register watch for %s: %v\n", p, err)
-			notify.Stop(c)
-			return false
-		}
-	}
-
-	// Start a goroutine to handle events from the channel
+	// Start event handler goroutine immediately (it will block until events arrive)
 	go func() {
 		for e := range c {
-			// Some events may be nil if the channel is closed; guard against it
-			// fmt.Println("🔔 DEBUG: Received event:", e) // Debug line to trace events
 			if e == nil {
 				continue
 			}
@@ -223,82 +201,66 @@ func tryNotifyWatcher(watchPaths []string) bool {
 		}
 	}()
 
-	fmt.Println("✅ Notify-based file watching is ready — listening for events...")
+	// Registration goroutine: try to register each path independently
+	go func() {
+		// Track which paths have been successfully registered
+		registered := make([]bool, len(watchPaths))
 
-	// Block here; notify events will be delivered to the goroutine above.
-	// Return true so caller doesn't fall back to polling.
+		for {
+			allRegistered := true
+
+			for i, p := range watchPaths {
+				if registered[i] {
+					continue // already registered
+				}
+
+				// Check path existence; if missing, we'll retry later but continue
+				if _, err := os.Stat(p); os.IsNotExist(err) {
+					fmt.Printf("⚠️  Watch path does not exist yet: %s\n", p)
+					allRegistered = false
+					continue
+				}
+
+				// Attempt to register this individual path
+				pattern := filepath.Join(p, "...")
+				fmt.Printf("📋 Registering watch: %s\n", pattern)
+				if err := notify.Watch(pattern, c, notify.All); err != nil {
+					// Log error and try again later for this path; do not stop other registrations
+					fmt.Printf("❌ Failed to register watch for %s: %v\n", p, err)
+					allRegistered = false
+					continue
+				}
+
+				// Mark as registered
+				fmt.Printf("✅ Registered watch for: %s\n", p)
+				registered[i] = true
+			}
+
+			// Check if everything is registered; if not, sleep then retry only unregistered ones
+			for _, v := range registered {
+				if !v {
+					allRegistered = false
+					break
+				}
+			}
+
+			if allRegistered {
+				fmt.Println("✅ All notify-based watches registered and active")
+				return
+			}
+
+			// Wait before next retry iteration for unregistered paths
+			fmt.Println("⏳ Some watches not ready yet, retrying in 5s...")
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	// Registration goroutine started and event handler running.
+	// Block here so the agent process stays alive (as previous behavior) —
+	// registration still runs asynchronously in background.
+	fmt.Println("⏳ Waiting for events (agent will keep running)...")
 	select {}
 }
-
-// func pollingWatcher(watchPaths []string) {
-// 	fmt.Println("✅ Agent ready and watching for file changes (polling)...")
-// 	fmt.Printf("🎯 Total watch paths: %d\n", len(watchPaths))
-// 	fmt.Println("💡 Press Ctrl+C to stop")
-
-// 	// Create context for cancellation
-// 	ctx, cancel := context.WithCancel(context.Background())
-// 	defer cancel()
-
-// 	// Simple polling implementation
-// 	ticker := time.NewTicker(5 * time.Second) // Check every 1 second for testing
-// 	defer ticker.Stop()
-
-// 	fileHashes := make(map[string]string)
-
-// 	// Initial scan
-// 	for _, watchPath := range watchPaths {
-// 		checkDirectoryChanges(watchPath, fileHashes)
-// 	}
-
-// 	// Continuous polling with context
-// 	for {
-// 		select {
-// 		case <-ctx.Done():
-// 			return
-// 		case <-ticker.C:
-// 			for _, watchPath := range watchPaths {
-// 				checkDirectoryChanges(watchPath, fileHashes)
-// 			}
-// 		}
-// 	}
-// }
-
-// func checkDirectoryChanges(dirPath string, fileHashes map[string]string) {
-// 	fmt.Println("Checking directory:", dirPath)
-// 	filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
-// 		if err != nil {
-// 			return nil
-// 		}
-
-// 		// Skip directories and hidden files
-// 		if info.IsDir() || strings.HasPrefix(info.Name(), ".") {
-// 			return nil
-// 		}
-// 		// Calculate current hash
-// 		currentHash, err := calculateFileHash(path)
-// 		if err != nil {
-// 			return nil
-// 		}
-
-// 		// Check if file changed
-// 		lastHash, exists := fileHashes[path]
-// 		if !exists {
-// 			// New file
-// 			timestamp := time.Now().Format("2006-01-02 15:04:05")
-// 			fmt.Printf("[%s] EVENT|Create|%s\n", timestamp, path)
-// 			fmt.Printf("[%s] HASH|%s|%s\n", timestamp, path, currentHash)
-// 			fileHashes[path] = currentHash
-// 		} else if lastHash != currentHash {
-// 			// Modified file
-// 			timestamp := time.Now().Format("2006-01-02 15:04:05")
-// 			fmt.Printf("[%s] EVENT|Write|%s\n", timestamp, path)
-// 			fmt.Printf("[%s] HASH|%s|%s\n", timestamp, path, currentHash)
-// 			fileHashes[path] = currentHash
-// 		}
-
-// 		return nil
-// 	})
-// }
 
 func handleFileEvent(event notify.EventInfo) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
