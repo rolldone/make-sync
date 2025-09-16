@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -15,12 +16,13 @@ import (
 
 // SSHClient represents an SSH client connection
 type SSHClient struct {
-	client     *ssh.Client
-	config     *ssh.ClientConfig
-	host       string
-	port       string
-	persistent bool
-	session    *ssh.Session // Persistent session for continuous commands
+	client       *ssh.Client
+	config       *ssh.ClientConfig
+	host         string
+	port         string
+	persistent   bool
+	session      *ssh.Session // Persistent session for continuous commands
+	agentSession *ssh.Session // Persistent session for agent monitoring
 }
 
 // NewSSHClient creates a new SSH client
@@ -436,6 +438,14 @@ func (c *SSHClient) StopPersistentSession() error {
 	return nil
 }
 
+func (c *SSHClient) StopAgentSession() error {
+	if c.agentSession != nil {
+		err := c.agentSession.Close()
+		return err
+	}
+	return nil
+}
+
 // RunCommandPersistent executes a command using the persistent session
 func (c *SSHClient) RunCommandPersistent(cmd string) error {
 	if c.session == nil {
@@ -451,7 +461,7 @@ func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan erro
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create session: %v", err)
 	}
-
+	c.agentSession = session
 	// Request a pty so remote process is attached to the session's terminal
 	// This helps ensure the remote process receives SIGHUP when the session closes.
 	// Requesting a pty is best-effort; ignore error if not supported.
@@ -477,6 +487,9 @@ func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan erro
 	outputChan := make(chan string, 100)
 	errorChan := make(chan error, 10)
 
+	// Use sync.Once to ensure session is closed only once
+	var closeSessionOnce sync.Once
+
 	// Start the command
 	if err := session.Start(cmd); err != nil {
 		session.Close()
@@ -485,6 +498,11 @@ func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan erro
 
 	// Handle stdout in a goroutine
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Ignore panic from sending on closed channel
+			}
+		}()
 		defer close(outputChan)
 		buf := make([]byte, 1024)
 		for {
@@ -497,7 +515,7 @@ func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan erro
 					default:
 					}
 					// close session to ensure remote process is signaled
-					session.Close()
+					closeSessionOnce.Do(func() { session.Close() })
 				}
 				break
 			}
@@ -514,6 +532,11 @@ func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan erro
 
 	// Handle stderr in a goroutine
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Ignore panic from sending on closed channel
+			}
+		}()
 		defer close(errorChan)
 		buf := make([]byte, 1024)
 		for {
@@ -525,7 +548,7 @@ func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan erro
 					default:
 					}
 					// close session to ensure remote process is signaled
-					session.Close()
+					closeSessionOnce.Do(func() { session.Close() })
 				}
 				break
 			}
@@ -541,10 +564,19 @@ func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan erro
 
 	// Handle session completion in a goroutine
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Ignore panic from sending on closed channel
+			}
+		}()
 		err := session.Wait()
-		session.Close()
+		closeSessionOnce.Do(func() { session.Close() })
 		if err != nil {
-			errorChan <- fmt.Errorf("command completed with error: %v", err)
+			select {
+			case errorChan <- fmt.Errorf("command completed with error: %v", err):
+			default:
+				// Channel might be closed, skip sending
+			}
 		}
 	}()
 

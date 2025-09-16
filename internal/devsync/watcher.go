@@ -143,7 +143,6 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 		return // Skip duplicate event
 	}
 
-	fmt.Println("1.3333333333", event.Event().String())
 	// Store this event for debouncing
 	w.storeEvent(fileEvent)
 
@@ -421,8 +420,8 @@ func (w *Watcher) executeScripts(event FileEvent) {
 func (w *Watcher) isDuplicateEvent(event FileEvent) bool {
 	key := event.Path + string(rune(event.EventType))
 	if lastEvent, exists := w.lastEvents[key]; exists {
-		// If same event type for same path within 100ms, consider it duplicate
-		if time.Since(lastEvent.Timestamp) < 100*time.Millisecond {
+		// If same event type for same path within 1000ms, consider it duplicate
+		if time.Since(lastEvent.Timestamp) < 1*time.Second {
 			return true
 		}
 	}
@@ -620,10 +619,12 @@ func (w *Watcher) handleReloadCommand() {
 		fmt.Printf("⚠️  Failed to sync config to remote: %v\n", err)
 	}
 
+	// time.Sleep(2 * time.Second)
+
 	// Start continuous agent monitoring
-	if err := w.startAgentMonitoring(); err != nil {
-		fmt.Printf("⚠️  Failed to start agent monitoring: %v\n", err)
-	}
+	// if err := w.startAgentMonitoring(); err != nil {
+	// 	fmt.Printf("⚠️  Failed to start agent monitoring: %v\n", err)
+	// }
 
 	fmt.Printf("✅ .sync_ignore reloaded successfully\n")
 }

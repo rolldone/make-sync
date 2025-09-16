@@ -174,8 +174,8 @@ func (w *Watcher) deployAgentToRemote(agentPath string) error {
 		// return nil
 	} else {
 		fmt.Println("📦 Uploading new agent to remote server...")
-		fmt.Println("absolute agent path:", absAgentPath)
-		fmt.Println("remote agent path:", remoteAgentPath)
+		// fmt.Println("absolute agent path:", absAgentPath)
+		// fmt.Println("remote agent path:", remoteAgentPath)
 		if err := w.sshClient.SyncFile(absAgentPath, remoteAgentPath); err != nil {
 			fmt.Println("err:", err)
 			return fmt.Errorf("failed to upload agent: %v", err)
@@ -452,7 +452,7 @@ func (w *Watcher) startAgentMonitoring() error {
 				// If session failed, try to restart
 				if strings.Contains(err.Error(), "session") || strings.Contains(err.Error(), "broken pipe") {
 					fmt.Println("🔌 SSH session broken, stopping current session...")
-					w.sshClient.StopPersistentSession()
+					w.sshClient.StopAgentSession()
 					time.Sleep(3 * time.Second)
 					continue
 				}
@@ -483,13 +483,23 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 	// Process output in real-time
 	for {
 		select {
-		case output := <-outputChan:
+		case output, ok := <-outputChan:
+			if !ok {
+				// Channel closed, agent command finished
+				fmt.Println("📡 Agent output channel closed")
+				return nil
+			}
 			if output == "" {
 				continue
 			}
 			w.processAgentOutput(output)
 
-		case err := <-errorChan:
+		case err, ok := <-errorChan:
+			if !ok {
+				// Channel closed
+				fmt.Println("📡 Agent error channel closed")
+				return nil
+			}
 			if err != nil {
 				fmt.Printf("⚠️  Agent output error: %v\n", err)
 				return err
@@ -554,7 +564,9 @@ func (w *Watcher) processAgentOutput(output string) {
 							localHash = ""
 						}
 					}
-					fmt.Println("🧾 Received hash info - Remote:", filePath, "Local:", localPath, "Remote Hash:", hashValue, "Local Hash:", localHash)
+
+					// fmt.Println("🧾 Received hash info - Remote:", filePath, "Local:", localPath, "Remote Hash:", hashValue, "Local Hash:", localHash)
+
 					if localHash == hashValue {
 						// If hashes match, no action needed
 						return
@@ -577,7 +589,6 @@ func (w *Watcher) processAgentOutput(output string) {
 						}
 						if err := w.sshClient.DownloadFile(localPath, filePath); err != nil {
 							fmt.Printf("❌ Failed to download file %s from remote %s: \n", localPath, err)
-
 						}
 					}
 				}
@@ -596,30 +607,17 @@ func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 
 		// Map remote path to local path
 		relPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
-		localPath := filepath.Join(w.watchPath, relPath)
-
-		// Ensure the localPath is within watchPath to avoid accidental deletes
-		absLocalPath, err := filepath.Abs(localPath)
-		if err != nil {
-			fmt.Printf("⚠️  Could not resolve absolute path for %s: %v\n", localPath, err)
-			return
-		}
-		absWatchPath := w.watchPath
-		if !strings.HasPrefix(absLocalPath, absWatchPath) {
-			fmt.Printf("⚠️  Refusing to delete path outside watch directory: %s\n", absLocalPath)
-			return
-		}
 
 		// Attempt to remove local file or directory
-		if err := os.RemoveAll(absLocalPath); err != nil {
-			fmt.Printf("❌ Failed to delete local path %s: %v\n", absLocalPath, err)
+		if err := os.RemoveAll(relPath); err != nil {
+			fmt.Printf("❌ Failed to delete local path %s: %v\n", relPath, err)
 		} else {
-			fmt.Printf("✅ Deleted local path: %s\n", absLocalPath)
+			fmt.Printf("✅ Deleted local path: %s\n", relPath)
 
 			// Remove metadata from cache if available
 			if w.fileCache != nil {
-				if err := w.fileCache.DeleteFileMetadata(absLocalPath); err != nil {
-					fmt.Printf("⚠️  Failed to delete metadata for %s: %v\n", absLocalPath, err)
+				if err := w.fileCache.DeleteFileMetadata(relPath); err != nil {
+					fmt.Printf("⚠️  Failed to delete metadata for %s: %v\n", relPath, err)
 				}
 			}
 		}
@@ -631,7 +629,7 @@ func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 // StopAgentMonitoring stops the continuous agent monitoring
 func (w *Watcher) StopAgentMonitoring() error {
 	if w.sshClient != nil {
-		return w.sshClient.StopPersistentSession()
+		return w.sshClient.StopAgentSession()
 	}
 	return nil
 }
