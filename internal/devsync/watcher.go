@@ -2,6 +2,8 @@ package devsync
 
 import (
 	"fmt"
+	"make-sync/internal/config"
+	"make-sync/internal/devsync/sshclient"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -88,9 +90,11 @@ func (w *Watcher) Stop() {
 
 // processEvents processes file system events
 func (w *Watcher) processEvents() {
+
 	for {
 		select {
 		case event := <-w.watchChan:
+			// fmt.Println("Received event:", event)
 			w.handleEvent(event)
 		case <-w.done:
 			return
@@ -139,6 +143,7 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 		return // Skip duplicate event
 	}
 
+	fmt.Println("1.3333333333", event.Event().String())
 	// Store this event for debouncing
 	w.storeEvent(fileEvent)
 
@@ -149,7 +154,8 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 	}
 
 	// Display the event
-	w.displayEvent(fileEvent)
+	// Disable for a while to reduce noise
+	// w.displayEvent(fileEvent)
 
 	// Execute scripts if configured
 	w.executeScripts(fileEvent)
@@ -342,7 +348,7 @@ func (w *Watcher) displayEvent(event FileEvent) {
 		emoji = "📋"
 		action = "Renamed"
 	}
-
+	fmt.Println("EventCreated:", event.EventType, "Path:", event.Path) // Debug line
 	if event.IsDir {
 		fmt.Printf("%s %s %s [DIR] %s\n", timestamp, emoji, action, relativePath)
 	} else {
@@ -367,9 +373,37 @@ func (w *Watcher) executeScripts(event FileEvent) {
 		}
 	}
 
-	// Handle SSH sync if SSH client is available and event is not delete
-	if w.sshClient != nil && event.EventType != EventRemove {
-		w.syncFileViaSSH(event)
+	// Handle SSH sync / delete if SSH client is available
+	if w.sshClient != nil {
+		if event.EventType == EventRemove {
+			// Map local path to remote path and attempt to remove remotely
+			remotePath := strings.ReplaceAll(event.Path, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
+			// Final failsafe: don't try to delete .sync_temp on remote
+			if strings.Contains(remotePath, ".sync_temp") {
+				fmt.Printf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remotePath)
+			} else {
+				// Use rm -rf to remove files or directories on remote side
+				cmd := fmt.Sprintf("rm -rf '%s'", remotePath)
+				fmt.Printf("📤 Deleting remote path: %s\n", remotePath)
+				if err := w.sshClient.RunCommand(cmd); err != nil {
+					fmt.Printf("❌ Failed to delete remote path %s: %v\n", remotePath, err)
+				} else {
+					fmt.Printf("✅ Remote delete succeeded: %s\n", remotePath)
+				}
+			}
+
+			// Remove metadata from file cache if available
+			if w.fileCache != nil {
+				if err := w.fileCache.DeleteFileMetadata(event.Path); err != nil {
+					fmt.Printf("⚠️  Failed to delete metadata for %s: %v\n", event.Path, err)
+				} else {
+					fmt.Printf("🗑️  Deleted cache metadata for %s\n", event.Path)
+				}
+			}
+		} else {
+			// For create/write events, sync file normally
+			w.syncFileViaSSH(event)
+		}
 	}
 
 	// Execute remote commands if configured
@@ -419,7 +453,7 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 		return
 	}
 
-	fmt.Println("event.Path:", event.Path)
+	// fmt.Println("event.Path:", event.Path)
 	// FINAL FAILSAFE: Never sync files in .sync_temp folder
 	if strings.Contains(event.Path, ".sync_temp") {
 		fmt.Printf("🚫 BLOCKED: File in .sync_temp folder: %s\n", event.Path)
@@ -436,7 +470,7 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 	}
 
 	// Check file cache to see if file has changed
-	fmt.Println("w.fileCache:", w.fileCache)
+	// fmt.Println("w.fileCache:", w.fileCache)
 
 	time.Sleep(300 * time.Millisecond)
 
@@ -451,21 +485,13 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 		}
 	}
 
-	// Construct remote path - ensure it's relative to remote working directory
-	remoteBase := w.config.Devsync.Auth.RemotePath
-	if remoteBase == "" {
-		remoteBase = "."
-	}
-
-	// Join remote base with relative path
-	remotePath := filepath.Join(remoteBase, relativePath)
-
-	// Ensure the remote path uses forward slashes for remote server
-	remotePath = filepath.ToSlash(remotePath)
+	// Replace local base path with remote base path
+	remotePath := strings.ReplaceAll(event.Path, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
 
 	fmt.Printf("📤 Syncing file: %s -> %s\n", event.Path, remotePath)
-	fmt.Printf("   Relative path: %s\n", relativePath)
-	fmt.Printf("   Remote base: %s\n", remoteBase)
+
+	// fmt.Printf("   Relative path: %s\n", relativePath)
+	// fmt.Printf("   Remote base: %s\n", remoteBase)
 
 	// Upload file via SSH
 	if err := w.sshClient.SyncFile(event.Path, remotePath); err != nil {
@@ -508,6 +534,68 @@ func (w *Watcher) handleKeyboardInput() {
 	}
 }
 
+// watcher.go (pseudo code snippet)
+func (w *Watcher) ReloadConfig() error {
+	// 1. Load config from disk (renders variables in-memory)
+	newCfg, err := config.LoadAndRenderConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// 2. If watch path changed, update watchPath and (re)start watcher patterns if needed
+	newWatch := newCfg.LocalPath
+	if newWatch == "" {
+		newWatch = "."
+	}
+	absNewWatch, _ := filepath.Abs(newWatch)
+	if absNewWatch != w.watchPath {
+		// NOTE: this is simplified: proper implementation must stop notify.Watch and re-register
+		fmt.Printf("🔁 Watch path changed: %s -> %s\n", w.watchPath, absNewWatch)
+		w.watchPath = absNewWatch
+		// TODO: re-register notify watcher pattern (requires access to watch subscription)
+	}
+
+	// 3. If SSH auth changed, recreate SSH client
+	oldAuth := w.config.Devsync.Auth
+	newAuth := newCfg.Devsync.Auth
+	if oldAuth.Host != newAuth.Host || oldAuth.Username != newAuth.Username || oldAuth.PrivateKey != newAuth.PrivateKey || oldAuth.Port != newAuth.Port {
+		fmt.Println("🔁 SSH auth changed - recreating SSH client")
+		if w.sshClient != nil {
+			_ = w.sshClient.Close()
+		}
+		// Create new client (handle errors)
+		sshClient, err := sshclient.NewPersistentSSHClient(newAuth.Username, newAuth.PrivateKey, newAuth.Host, newAuth.Port)
+		if err != nil {
+			return fmt.Errorf("failed new ssh client: %w", err)
+		}
+		w.sshClient = sshClient
+		if err := w.sshClient.Connect(); err != nil {
+			return fmt.Errorf("failed to connect new ssh client: %w", err)
+		}
+		if err := w.sshClient.StartPersistentSession(); err != nil {
+			return fmt.Errorf("failed to start persistent session on new ssh client: %w", err)
+		}
+	}
+
+	// 4. Assign new config
+	w.config = newCfg
+
+	// 5. Sync new config to remote and restart agent monitoring
+	if w.sshClient != nil {
+		if err := w.syncConfigToRemote(); err != nil {
+			fmt.Printf("⚠️ failed to sync config to remote: %v\n", err)
+		}
+		// restart monitoring (stop session then start)
+		_ = w.StopAgentMonitoring()
+		time.Sleep(1 * time.Second)
+		if err := w.sshClient.StartPersistentSession(); err == nil {
+			_ = w.startAgentMonitoring()
+		}
+	}
+
+	return nil
+}
+
 // handleReloadCommand handles the R reload command
 func (w *Watcher) handleReloadCommand() {
 	fmt.Printf("\n🔄 Manual reload requested (R key)\n")
@@ -522,6 +610,21 @@ func (w *Watcher) handleReloadCommand() {
 
 	// If validation passes, reload the watch patterns
 	w.reloadWatchPatterns()
+
+	if err := w.StopAgentMonitoring(); err != nil {
+		fmt.Printf("⚠️  Failed to stop agent monitoring: %v\n", err)
+	}
+
+	// Sync configuration to remote
+	if err := w.syncConfigToRemote(); err != nil {
+		fmt.Printf("⚠️  Failed to sync config to remote: %v\n", err)
+	}
+
+	// Start continuous agent monitoring
+	if err := w.startAgentMonitoring(); err != nil {
+		fmt.Printf("⚠️  Failed to start agent monitoring: %v\n", err)
+	}
+
 	fmt.Printf("✅ .sync_ignore reloaded successfully\n")
 }
 

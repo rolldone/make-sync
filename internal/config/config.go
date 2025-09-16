@@ -50,7 +50,7 @@ type Auth struct {
 	PrivateKey string `yaml:"privateKey"`
 	Host       string `yaml:"host"`
 	Port       string `yaml:"port"`
-	LocalPath  string `yaml:"localPath"`
+	LocalPath  string `yaml:"localPath,omitempty"`
 	RemotePath string `yaml:"remotePath"`
 }
 
@@ -301,11 +301,11 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	// Validate local path exists
-	if strings.TrimSpace(cfg.LocalPath) != "" {
-		if _, err := os.Stat(cfg.LocalPath); os.IsNotExist(err) {
-			validationErrors = append(validationErrors, fmt.Sprintf("local path does not exist: %s", cfg.LocalPath))
-		}
-	}
+	// if strings.TrimSpace(cfg.LocalPath) != "" {
+	// 	if _, err := os.Stat(cfg.LocalPath); os.IsNotExist(err) {
+	// 		validationErrors = append(validationErrors, fmt.Sprintf("local path does not exist: %s", cfg.LocalPath))
+	// 	}
+	// }
 
 	// Validate sync collection path
 	if strings.TrimSpace(cfg.SyncCollection.Src) != "" {
@@ -456,6 +456,22 @@ func LoadAndRenderConfig() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("template rendering failed: %v", err)
 	}
+
+	basPath, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("error getting current working directory: %v", err)
+	}
+	realPath, err := filepath.EvalSymlinks(basPath)
+	if err != nil {
+		fmt.Println("Error:", err)
+		os.Exit(1)
+	}
+	absWatchPath, err := filepath.Abs(realPath)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving absolute path: %v", err)
+	}
+	renderedCfg.Devsync.Auth.LocalPath = absWatchPath
+	renderedCfg.LocalPath = absWatchPath
 
 	return renderedCfg, nil
 }

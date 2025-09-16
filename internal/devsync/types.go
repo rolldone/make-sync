@@ -3,7 +3,6 @@ package devsync
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"make-sync/internal/config"
 	"os"
 	"os/exec"
@@ -13,7 +12,6 @@ import (
 
 	"make-sync/internal/devsync/sshclient"
 
-	"github.com/cespare/xxhash/v2"
 	"github.com/rjeczalik/notify"
 )
 
@@ -234,7 +232,7 @@ func (w *Watcher) shouldSkipAgentUpload(localAgentPath, remoteAgentPath string) 
 		fmt.Printf("🔢 Remote agent identity: %s\n", remoteIdentity)
 
 		if localIdentity == remoteIdentity {
-			fmt.Println("✅ Agent identities match, skipping upload")
+			// fmt.Println("✅ Agent identities match, skipping upload")
 			return true // Skip upload
 		} else {
 			fmt.Println("🔄 Agent identities differ, upload required")
@@ -431,7 +429,7 @@ func (w *Watcher) startAgentMonitoring() error {
 	// Start agent watch command in background - run once and keep it running
 	watchCmd := fmt.Sprintf("cd %s && chmod +x %s && %s watch", remoteBase, remoteAgentPath, remoteAgentPath)
 
-	fmt.Printf("🚀 Starting agent with command: %s\n", watchCmd)
+	// fmt.Printf("🚀 Starting agent with command: %s\n", watchCmd)
 
 	// Start the agent in a goroutine and keep it running
 	go func() {
@@ -445,7 +443,7 @@ func (w *Watcher) startAgentMonitoring() error {
 				}
 			}
 
-			fmt.Println("🔄 Starting agent watch command...")
+			// fmt.Println("🔄 Starting agent watch command...")
 
 			// Execute the watch command - this should run continuously
 			if err := w.runAgentWatchCommand(watchCmd); err != nil {
@@ -533,11 +531,8 @@ func (w *Watcher) processAgentOutput(output string) {
 				if len(eventParts) >= 3 {
 					eventType := eventParts[1]
 					filePath := eventParts[2]
-
-					fmt.Println("🔄 File event:", eventType, "->", filePath)
-
 					// Handle file events
-					// w.handleFileEvent(eventType, filePath)
+					w.handleFileDownloadEvent(eventType, filePath)
 				}
 			} else if strings.HasPrefix(content, "HASH|") {
 				// Parse hash: HASH|path|hash_value
@@ -545,65 +540,37 @@ func (w *Watcher) processAgentOutput(output string) {
 				if len(hashParts) >= 3 {
 					filePath := hashParts[1]
 					hashValue := hashParts[2]
-					fmt.Printf("🔢 File hash: %s -> %s\n", filePath, hashValue)
-					// Compare with local file (mapped from remote path) and local cache if available
 
 					// Determine remote base and try to compute relative path
-					relPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
+					localPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
 
 					// Map to local path under watchPath
-					fmt.Println("💾 Mapping remote path to local:", filePath, "->", relPath)
-					localPath := filepath.Join(w.watchPath, relPath)
-					fmt.Println("💾 Local path for hash comparison:", localPath)
+					var err error
 					// Compute local hash
 					var localHash string
-					var localHashErr error
 					if w.fileCache != nil {
-						localHash, localHashErr = w.fileCache.CalculateFileHash(localPath)
-						fmt.Println("💾 Calculated local hash from cache:", localHash)
-						fmt.Println("💾 Local path for hash calculation:", localPath)
-					} else {
-						// calculate inline if cache not available
-						f, err := os.Open(localPath)
+						localHash, err = w.fileCache.CalculateFileHash(localPath)
 						if err != nil {
-							localHashErr = err
-						} else {
-							defer f.Close()
-							h := xxhash.New()
-							if _, err := io.Copy(h, f); err != nil {
-								localHashErr = err
-							} else {
-								localHash = fmt.Sprintf("%x", h.Sum(nil))
-							}
+							localHash = ""
 						}
 					}
-
-					fmt.Println("💾 localHash:", localHash, "hashValue:", hashValue, "localHashErr", localHashErr)
-
+					fmt.Println("🧾 Received hash info - Remote:", filePath, "Local:", localPath, "Remote Hash:", hashValue, "Local Hash:", localHash)
 					if localHash == hashValue {
-						fmt.Printf("✅ Remote hash matches local for %s, skipping sync\n", relPath)
-						// Optionally update cache timestamp
-						if w.fileCache != nil {
-							if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
-								fmt.Printf("⚠️  Failed to refresh cache for %s: %v\n", localPath, err)
-							}
-						}
+						// If hashes match, no action needed
+						return
 					} else {
-						fmt.Printf("🔄 Hash mismatch or local outdated (%s): remote=%s local=%s -> attempting download\n", relPath, hashValue, localHash)
-
 						// Try to download the file from remote to local
 						remoteBase := w.config.Devsync.Auth.RemotePath
 						if remoteBase == "" {
 							remoteBase = "."
 						}
-						currentHash, err := w.fileCache.CalculateFileHash(filePath)
-						if err != nil {
-							fmt.Printf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
-						}
+						currentHash, _ := w.fileCache.CalculateFileHash(filePath)
+
 						if currentHash == hashValue {
 							fmt.Printf("✅ Remote file %s already in cache with matching hash, skipping download\n", filePath)
 							continue
 						}
+
 						fmt.Println("💾 Downloading remote file to local:", filePath, "->", localPath)
 						if err := w.fileCache.UpdateMetaDataFromDownload(localPath, hashValue); err != nil {
 							fmt.Printf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
@@ -611,52 +578,8 @@ func (w *Watcher) processAgentOutput(output string) {
 						if err := w.sshClient.DownloadFile(localPath, filePath); err != nil {
 							fmt.Printf("❌ Failed to download file %s from remote %s: \n", localPath, err)
 
-						} else {
-							// Download successful - update cache
-							// if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
-							// 	fmt.Printf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
-							// }
 						}
 					}
-
-					// // If we couldn't calculate local hash (file missing), sync the file to remote
-					// if localHashErr != nil {
-					// 	fmt.Printf("⚠️  Local file missing or unreadable: %s (%v) - will attempt to sync\n", localPath, localHashErr)
-					// 	if err := w.syncFileToRemote(localPath); err != nil {
-					// 		fmt.Printf("❌ Failed to sync file after remote hash: %s -> %v\n", localPath, err)
-					// 	} else {
-					// 		// Update cache if available
-					// 		if w.fileCache != nil {
-					// 			if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
-					// 				fmt.Printf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
-					// 			}
-					// 		}
-					// 	}
-					// 	continue
-					// }
-
-					// // Compare hashes
-					// if localHash == hashValue {
-					// 	fmt.Printf("✅ Remote hash matches local for %s, skipping sync\n", relPath)
-					// 	// Optionally update cache timestamp
-					// 	if w.fileCache != nil {
-					// 		if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
-					// 			fmt.Printf("⚠️  Failed to refresh cache for %s: %v\n", localPath, err)
-					// 		}
-					// 	}
-					// } else {
-					// 	fmt.Printf("🔄 Hash mismatch or local outdated (%s): remote=%s local=%s -> syncing\n", relPath, hashValue, localHash)
-					// 	if err := w.syncFileToRemote(localPath); err != nil {
-					// 		fmt.Printf("❌ Failed to sync file %s: %v\n", localPath, err)
-					// 	} else {
-					// 		// Update cache
-					// 		if w.fileCache != nil {
-					// 			if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
-					// 				fmt.Printf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
-					// 			}
-					// 		}
-					// 	}
-					// }
 				}
 			}
 		}
@@ -664,80 +587,45 @@ func (w *Watcher) processAgentOutput(output string) {
 }
 
 // handleFileEvent handles individual file events from agent
-func (w *Watcher) handleFileEvent(eventType, filePath string) {
-	fmt.Printf("🔄 Processing event: %s for file: %s\n", eventType, filePath)
+func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 
 	// Only sync for Create and Write events
-	if eventType != "Create" && eventType != "Write" {
-		fmt.Printf("⏭️  Skipping event type: %s\n", eventType)
+	// Handle delete events explicitly - accept common variants from agent
+	if eventType == "Delete" || eventType == "Remove" || strings.HasSuffix(eventType, ".Remove") || strings.Contains(eventType, "Delete") {
+		fmt.Printf("🗑️  Received delete event for %s\n", filePath)
+
+		// Map remote path to local path
+		relPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
+		localPath := filepath.Join(w.watchPath, relPath)
+
+		// Ensure the localPath is within watchPath to avoid accidental deletes
+		absLocalPath, err := filepath.Abs(localPath)
+		if err != nil {
+			fmt.Printf("⚠️  Could not resolve absolute path for %s: %v\n", localPath, err)
+			return
+		}
+		absWatchPath := w.watchPath
+		if !strings.HasPrefix(absLocalPath, absWatchPath) {
+			fmt.Printf("⚠️  Refusing to delete path outside watch directory: %s\n", absLocalPath)
+			return
+		}
+
+		// Attempt to remove local file or directory
+		if err := os.RemoveAll(absLocalPath); err != nil {
+			fmt.Printf("❌ Failed to delete local path %s: %v\n", absLocalPath, err)
+		} else {
+			fmt.Printf("✅ Deleted local path: %s\n", absLocalPath)
+
+			// Remove metadata from cache if available
+			if w.fileCache != nil {
+				if err := w.fileCache.DeleteFileMetadata(absLocalPath); err != nil {
+					fmt.Printf("⚠️  Failed to delete metadata for %s: %v\n", absLocalPath, err)
+				}
+			}
+		}
+
 		return
 	}
-
-	// Sync file to remote .sync_temp
-	if err := w.syncFileToRemote(filePath); err != nil {
-		fmt.Printf("❌ Fffffailed to sync file %s: %v\n", filePath, err)
-	} else {
-		fmt.Printf("✅ Successfully synced file: %s\n", filePath)
-	}
-}
-
-// syncFileToRemote syncs a local file to remote .sync_temp directory
-func (w *Watcher) syncFileToRemote(localFilePath string) error {
-	if w.sshClient == nil {
-		return fmt.Errorf("SSH client not available")
-	}
-
-	// Check if local file exists
-	if _, err := os.Stat(localFilePath); os.IsNotExist(err) {
-		return fmt.Errorf("local file does not exist: %s", localFilePath)
-	}
-
-	// Get absolute path of local file
-	absLocalPath, err := filepath.Abs(localFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path: %v", err)
-	}
-
-	// Get remote base path
-	remoteBase := w.config.Devsync.Auth.RemotePath
-	if remoteBase == "" {
-		remoteBase = "."
-	}
-
-	// Create remote .sync_temp directory
-	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteSyncTemp)
-	if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
-		return fmt.Errorf("failed to create remote .sync_temp: %v", err)
-	}
-
-	// Determine remote file path (preserve relative structure)
-	// Convert local absolute path to relative path from watch directory
-	relPath, err := filepath.Rel(w.watchPath, absLocalPath)
-	if err != nil {
-		// If we can't get relative path, use just the filename
-		relPath = filepath.Base(absLocalPath)
-		fmt.Printf("⚠️  Using filename only: %s\n", relPath)
-	}
-
-	// Create remote file path in .sync_temp
-	remoteFilePath := w.joinRemotePath(remoteSyncTemp, relPath)
-
-	fmt.Printf("📤 Syncing %s -> %s\n", absLocalPath, remoteFilePath)
-
-	// Upload file to remote
-	if err := w.sshClient.SyncFile(absLocalPath, remoteFilePath); err != nil {
-		return fmt.Errorf("failed to upload file: %v", err)
-	}
-
-	// Set proper permissions on remote file
-	remoteCmd := fmt.Sprintf("chmod 644 %s", remoteFilePath)
-	if err := w.sshClient.RunCommand(remoteCmd); err != nil {
-		fmt.Printf("⚠️  Could not set permissions on remote file: %v\n", err)
-		// Don't return error, file is already uploaded
-	}
-
-	return nil
 }
 
 // StopAgentMonitoring stops the continuous agent monitoring
@@ -805,6 +693,15 @@ type RemoteAgentConfig struct {
 
 // generateRemoteConfig generates minimal configuration for remote agent
 func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
+	newCfg, err := config.LoadAndRenderConfig()
+	if err != nil {
+		return &RemoteAgentConfig{}
+	}
+
+	// Update current config reference
+	w.config = newCfg
+
+	// Create remote config with necessary fields
 	config := &RemoteAgentConfig{}
 
 	config.Devsync.Ignores = w.config.Devsync.Ignores

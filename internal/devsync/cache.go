@@ -135,15 +135,9 @@ func (fc *FileCache) UpdateMetaDataFromDownload(filePath string, hash string) er
 	if err != nil {
 		return err
 	}
-	// Update or create metadata
-	// metadata := FileMetadata{
-	// 	Path:     relPath,
-	// 	Hash:     hash,
-	// 	Size:     0,
-	// 	ModTime:  time.Now(),
-	// 	LastSync: time.Now(),
-	// }
-	fmt.Println("💾 Updating cache for", relPath, "with hash", hash)
+
+	// fmt.Println("💾 Updating cache for", relPath, "with hash", hash)
+
 	err = fc.db.Model(&FileMetadata{}).Where("path = ?", relPath).Update("hash", hash).Error
 	return err
 }
@@ -185,6 +179,30 @@ func (fc *FileCache) UpdateFileMetadata(filePath string) error {
 
 	result := fc.db.Where("path = ?", relPath).Assign(metadata).FirstOrCreate(&metadata)
 	return result.Error
+}
+
+// DeleteFileMetadata deletes metadata entry for given file path from the database
+func (fc *FileCache) DeleteFileMetadata(filePath string) error {
+	// Derive relative path from watch directory
+	relPath, err := filepath.Rel(fc.watchPath, filePath)
+	if err != nil {
+		// Fallback to manual extraction similar to UpdateFileMetadata
+		if strings.HasPrefix(filePath, fc.watchPath) {
+			relPath = strings.TrimPrefix(filePath, fc.watchPath)
+			relPath = strings.TrimPrefix(relPath, "/")
+		} else {
+			relPath = filepath.Base(filePath)
+		}
+	}
+
+	// Delete record(s) from database
+	result := fc.db.Unscoped().Where("path = ?", relPath).Delete(&FileMetadata{})
+	if result.Error != nil {
+		return result.Error
+	}
+
+	// fmt.Printf("🗑️  Deleted cache entry for %s (rows=%d)\n", relPath, result.RowsAffected)
+	return nil
 }
 
 // GetFileStats returns statistics about cached files
