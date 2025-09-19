@@ -35,7 +35,7 @@ const (
 
 // executeLocalCommandWithOutput executes a command locally and returns output
 func (w *Watcher) executeLocalCommandWithOutput(cmd string) (string, error) {
-	w.printer.Printf("🔧 Executing: %s\n", cmd)
+	util.Default.Printf("🔧 Executing: %s\n", cmd)
 
 	// Execute the command using bash -c for complex commands
 	command := exec.Command("bash", "-c", cmd)
@@ -43,8 +43,8 @@ func (w *Watcher) executeLocalCommandWithOutput(cmd string) (string, error) {
 
 	output, err := command.CombinedOutput()
 	if err != nil {
-		w.printer.Printf("❌ Command failed: %v\n", err)
-		w.printer.Printf("Output: %s\n", string(output))
+		util.Default.Printf("❌ Command failed: %v\n", err)
+		util.Default.Printf("Output: %s\n", string(output))
 		return "", err
 	}
 
@@ -96,15 +96,17 @@ type Watcher struct {
 	sessionCounter    int                 // For generating unique IDs
 	keyboardStop      chan bool           // Channel to stop keyboard input during sessions
 	keyboardRestart   chan bool           // Channel to restart keyboard input after sessions
+	keyboardStopped   chan struct{}       // Ack channel: keyboard handler signals when it has stopped
 	eventBus          EventBus.Bus        // Event bus for inter-component communication
 	commands          *CommandManager     // Command manager for all command operations
 
 	// notify stop control - used to stop only the file-notify subsystem
 	notifyStopOnce sync.Once
 	notifyStopped  chan struct{}
+	// protect access to notifyStopOnce and notifyStopped
+	notifyMu sync.Mutex
 
-	// Thread-safe printer for output serialization
-	printer *util.SafePrinter
+	// printing is centralized via util.Default
 	// PTY manager for persistent remote sessions (slots 3..9)
 	ptyMgr *PTYManager
 	// NOTE: remote initialization is tracked in package-level registry

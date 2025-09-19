@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/signal"
 
+	"make-sync/internal/util"
+
 	"golang.org/x/term"
 )
 
@@ -19,7 +21,12 @@ func AttachLocalTTY(rwc io.ReadWriteCloser) error {
 	if !isTerm {
 		done := make(chan struct{})
 		go func() { _, _ = io.Copy(rwc, os.Stdin); done <- struct{}{} }()
-		go func() { _, _ = io.Copy(os.Stdout, rwc); done <- struct{}{} }()
+		go func() {
+			// Just copy to stdout in non-tty case (PTY streaming only applies
+			// when TUI is active and a PTY channel is registered).
+			_, _ = io.Copy(os.Stdout, rwc)
+			done <- struct{}{}
+		}()
 		<-done
 		return nil
 	}
@@ -50,6 +57,28 @@ func AttachLocalTTY(rwc io.ReadWriteCloser) error {
 		errCh <- e
 	}()
 	go func() {
+		// If the TUI is active and registered a PTY output channel, stream
+		// bytes into that channel so the TUI can render them. Otherwise fall
+		// back to copying to stdout.
+		if util.TUIActive && ptyOut != nil {
+			buf := make([]byte, 4096)
+			for {
+				n, err := rwc.Read(buf)
+				if n > 0 {
+					bcopy := make([]byte, n)
+					copy(bcopy, buf[:n])
+					select {
+					case ptyOut <- bcopy:
+					default:
+						// drop chunk if UI is busy
+					}
+				}
+				if err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}
 		_, e := io.Copy(os.Stdout, rwc)
 		errCh <- e
 	}()

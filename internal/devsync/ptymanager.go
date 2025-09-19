@@ -3,6 +3,7 @@ package devsync
 import (
 	"fmt"
 	"make-sync/internal/devsync/sshclient"
+	"make-sync/internal/util"
 	"os"
 	"sync"
 	"time"
@@ -77,9 +78,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	// mark running
 	s.Running = true
 
-	if m.w != nil && m.w.printer != nil {
-		m.w.printer.Resume()
-	}
+	util.Default.Resume()
 
 	// Build the bridge callback that handles Ctrl+G and ESC+digit
 	cb := func(gg []byte) {
@@ -184,37 +183,25 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	for msg := range m.Pendingchan {
 		switch msg {
 		case "pause":
-			if m.w != nil && m.w.printer != nil {
-				m.w.printer.PrintBlock("⏸️  Press any key to return to menu...", true)
-				m.w.printer.ClearLine()
-			}
+			util.Default.PrintBlock("⏸️  Press any key to return to menu...", true)
+			util.Default.ClearLine()
 			// clear callback while paused
 			if s.Bridge != nil {
 				s.Bridge.SetStdinCallback(nil)
 			}
 
 			if err := s.Bridge.Pause(); err != nil {
-				if m.w != nil && m.w.printer != nil {
-					m.w.printer.Printf("❌ Failed to pause PTY session: %v\n", err)
-				} else {
-					fmt.Printf("❌ Failed to pause PTY session: %v\n", err)
-				}
+				util.Default.Printf("❌ Failed to pause PTY session: %v\n", err)
 			}
 			close(m.Pendingchan)
 
 		case "unpause":
 			if err := m.ResumeSlot(slot); err != nil {
-				if m.w != nil && m.w.printer != nil {
-					m.w.printer.Printf("❌ Failed to resume PTY session: %v\n", err)
-				} else {
-					fmt.Printf("❌ Failed to resume PTY session: %v\n", err)
-				}
+				util.Default.Printf("❌ Failed to resume PTY session: %v\n", err)
 				os.Exit(1)
 			}
-			if m.w != nil && m.w.printer != nil {
-				m.w.printer.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
-				m.w.printer.ClearLine()
-			}
+			util.Default.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
+			util.Default.ClearLine()
 
 		case "start":
 			go func() {
@@ -268,17 +255,13 @@ func (m *PTYManager) ResumeSlot(slot int) error {
 // CloseSlot closes and removes the session in slot (remote bridge closed).
 func (m *PTYManager) CloseSlot(slot int) error {
 	// show message
-	if m.w != nil && m.w.printer != nil {
-		m.w.printer.ClearScreen()
-		time.Sleep(400 * time.Millisecond)
-		m.w.printer.Resume()
-		m.w.printer.PrintBlock("", true)
-		m.w.printer.PrintBlock("🔌 Remote PTY session closed. Press Enter to return menu...", true)
-		if m.w.eventBus != nil {
-			go func() { m.w.eventBus.Publish("devsync.menu.show") }()
-		}
-	} else {
-		fmt.Println("🔌 Remote PTY session closed. Press Enter to return menu...")
+	util.Default.ClearScreen()
+	time.Sleep(400 * time.Millisecond)
+	util.Default.Resume()
+	util.Default.PrintBlock("", true)
+	util.Default.PrintBlock("🔌 Remote PTY session closed. Press Enter to return menu...", true)
+	if m.w != nil && m.w.eventBus != nil {
+		go func() { m.w.eventBus.Publish("devsync.menu.show") }()
 	}
 
 	// cleanup

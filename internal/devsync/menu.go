@@ -24,15 +24,16 @@ func (w *Watcher) displayMainMenu() {
 		"> ",
 	}
 	for i := range lines {
-		w.printer.Println(lines[i])
-		w.printer.ClearLine()
+		util.Default.Println(lines[i])
+		util.Default.ClearLine()
 	}
 }
 
 // showCommandMenuDisplay moved to view (keeps promptui usage local)
 func (w *Watcher) showCommandMenuDisplay() {
 	callback := func(slotNew int) {
-		// w.ptyMgr.PauseSlot(*w.Slot)
+		// Disable raw mode to allow promptui to work
+		util.RestoreGlobal()
 		w.Slot = &slotNew
 		w.ptyMgr.Pendingchan <- "pause"
 	}
@@ -73,11 +74,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 		items = append(items, "Exit")
 
 		// Suspend background printing while the interactive menu is active
-		if w != nil && w.printer != nil {
-			w.printer.Suspend()
-		} else {
-			fmt.Print("\x1b[2J\x1b[1;1H")
-		}
+		util.Default.Suspend()
 
 		// Ensure terminal is in cooked mode for promptui
 		_ = util.RestoreGlobal()
@@ -97,12 +94,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 
 		i, result, err := prompt.Run()
 		if err != nil {
-			if w != nil && w.printer != nil {
-				w.printer.Resume()
-				w.printer.Printf("❌ Menu selection cancelled: %v\n", err)
-			} else {
-				fmt.Printf("❌ Menu selection cancelled: %v\n", err)
-			}
+			util.Default.Resume()
+			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
 			// re-enable raw mode for keyboard loop and return
 			_, _ = util.EnableRawGlobalAuto()
 			return
@@ -113,26 +106,22 @@ func (w *Watcher) showCommandMenuDisplay() {
 
 		// Handle special items: Exit should return to watcher main menu
 		if result == "Exit" {
-			if w != nil && w.printer != nil {
-				w.printer.PrintBlock("", true)
-				w.printer.Resume()
-				w.displayMainMenu()
-			} else {
-				fmt.Print("\x1b[2J\x1b[1;1H")
-				w.displayMainMenu()
-			}
+			util.Default.PrintBlock("", true)
+			util.Default.Resume()
+			util.RestoreGlobal()
+			w.displayMainMenu()
 			return
 		}
 
-		if w != nil && w.printer != nil {
-			w.printer.Printf("Selected: %s (index %d)\n", result, i)
-		} else {
-			fmt.Printf("Selected: %s (index %d)\n", result, i)
+		if result == "Local Console" {
+			util.Default.PrintBlock("🔗 Attaching to local console ...", true)
+			util.Default.Resume()
+			w.showLocalCommandMenuDisplay()
+			continue
 		}
 
-		if w != nil && w.printer != nil {
-			w.printer.Resume()
-		}
+		util.Default.Printf("Selected: %s (index %d)\n", result, i)
+		util.Default.Resume()
 
 		// PTY slot handling (3..9) or run once
 		if *slot >= 3 && *slot <= 9 && w != nil && w.ptyMgr != nil {
@@ -144,13 +133,9 @@ func (w *Watcher) showCommandMenuDisplay() {
 				shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
 			isExist := false
 			if !w.ptyMgr.HasSlot(*slot) {
-				fmt.Println("➕ Creating new slot", *slot, "...")
+				util.Default.Println("➕ Creating new slot", *slot, "...")
 				if err := w.ptyMgr.OpenRemoteSlot(*slot, initialCmd); err != nil {
-					if w.printer != nil {
-						w.printer.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", *slot, err)
-					} else {
-						fmt.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", *slot, err)
-					}
+					util.Default.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", *slot, err)
 					w.runRemoteCommand(result)
 					continue
 				}
@@ -159,24 +144,85 @@ func (w *Watcher) showCommandMenuDisplay() {
 				isExist = true
 			}
 
-			if w.printer != nil {
-				w.printer.Suspend()
-			}
-			fmt.Println("🔗 Attaching to slot", *slot, "...")
+			util.Default.Suspend()
+			util.Default.PrintBlock(fmt.Sprintf("🔗 Attaching to slot %d ...", *slot), true)
 			if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
-				if w.printer != nil {
-					w.printer.Printf("⚠️  Failed to focus slot %d: %v\n", *slot, err)
-					w.printer.Resume()
-				} else {
-					fmt.Printf("⚠️  Failed to focus slot %d: %v\n", *slot, err)
-				}
+				util.Default.Printf("⚠️  Failed to focus slot %d: %v\n", *slot, err)
+				util.Default.Resume()
 			} else {
-				if w.printer != nil {
-					w.printer.Resume()
-				}
+				util.Default.Resume()
 			}
 		}
 
+		continue
+	}
+}
+
+func (w *Watcher) showLocalCommandMenuDisplay() {
+	for {
+		var localCmds []string
+		if w != nil && w.config != nil && w.config.Devsync.Script.Local.Commands != nil {
+			localCmds = append(localCmds, w.config.Devsync.Script.Local.Commands...)
+		}
+
+		// fallback defaults if none configured
+		if len(localCmds) == 0 {
+			localCmds = []string{
+				"bash -l",
+				"tail -f storage/log/*.log >>> my.log",
+				"echo \"Hello from local\"",
+			}
+		}
+
+		items := make([]string, 0, len(localCmds)+1)
+		items = append(items, localCmds...)
+		items = append(items, "Exit")
+
+		// Suspend background printing while the interactive menu is active
+		util.Default.Suspend()
+
+		// Ensure terminal is in cooked mode for promptui
+		_ = util.RestoreGlobal()
+
+		prompt := promptui.Select{
+			Label: "? Local Console Mode",
+			Items: items,
+			Size:  10,
+			Templates: &promptui.SelectTemplates{
+				Label:    "{{ . }}",
+				Active:   "▸ {{ . | cyan }}",
+				Inactive: "  {{ . }}",
+				Selected: "Selected: {{ . }}",
+			},
+			HideHelp: true,
+		}
+
+		i, result, err := prompt.Run()
+		if err != nil {
+			util.Default.Resume()
+			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
+			// re-enable raw mode for keyboard loop and return
+			_, _ = util.EnableRawGlobalAuto()
+			return
+		}
+
+		// re-enable raw mode after prompt so keyboard loop can continue
+		_, _ = util.EnableRawGlobalAuto()
+
+		// Handle Exit
+		if result == "Exit" {
+			util.Default.PrintBlock("", true)
+			util.Default.Resume()
+			util.RestoreGlobal()
+			return
+		}
+
+		util.Default.Printf("Selected: %s (index %d)\n", result, i)
+		util.Default.Resume()
+
+		// NOTE: eksekusi perintah lokal belum di-run di sini.
+		// Jika mau, kita bisa panggil fungsi eksekusi (mis. w.runLocalCommand(result))
+		// atau membuat helper executeLocalCommandWithOutput.
 		continue
 	}
 }

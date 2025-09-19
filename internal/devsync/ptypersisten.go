@@ -3,7 +3,7 @@ package devsync
 import (
 	"fmt"
 	"make-sync/internal/devsync/sshclient"
-	"os"
+	"make-sync/internal/util"
 )
 
 // runRemoteCommand executes the given command on the existing persistent SSH session
@@ -16,10 +16,8 @@ func (w *Watcher) runRemoteCommand(cmd string) {
 	}
 
 	// Suspend background printing while interactive session is active
-	if w.printer != nil {
-		w.printer.Suspend()
-		defer w.printer.Resume()
-	}
+	util.Default.Suspend()
+	defer util.Default.Resume()
 
 	// Note: keyboard handler is expected to have restored terminal state
 	// before calling this method (showCommandMenuDisplay restores it). We
@@ -27,11 +25,7 @@ func (w *Watcher) runRemoteCommand(cmd string) {
 	// may be the goroutine that invoked the menu; sending could deadlock.
 
 	if w.sshClient == nil {
-		if w.printer != nil {
-			w.printer.PrintBlock("no ssh client available to run remote command\n", true)
-		} else {
-			fmt.Fprintln(os.Stderr, "no ssh client available to run remote command")
-		}
+		util.Default.PrintBlock("no ssh client available to run remote command\n", true)
 		return
 	}
 
@@ -46,11 +40,7 @@ func (w *Watcher) runRemoteCommand(cmd string) {
 	// Create a PTY bridge with the initial command using the existing ssh client
 	bridge, err := sshclient.NewPTYSSHBridgeWithCommand(w.sshClient, initialCmd)
 	if err != nil {
-		if w.printer != nil {
-			w.printer.PrintBlock(fmt.Sprintf("failed to create pty bridge: %v\n", err), true)
-		} else {
-			fmt.Fprintf(os.Stderr, "failed to create pty bridge: %v\n", err)
-		}
+		util.Default.PrintBlock(fmt.Sprintf("failed to create pty bridge: %v\n", err), true)
 		return
 	}
 	defer func() {
@@ -59,10 +49,6 @@ func (w *Watcher) runRemoteCommand(cmd string) {
 
 	// Start interactive shell which runs the initial command and attaches stdio
 	if err := bridge.StartInteractiveShell(nil); err != nil {
-		if w.printer != nil {
-			w.printer.PrintBlock(fmt.Sprintf("remote command failed: %v\n", err), true)
-		} else {
-			fmt.Fprintf(os.Stderr, "remote command failed: %v\n", err)
-		}
+		util.Default.PrintBlock(fmt.Sprintf("remote command failed: %v\n", err), true)
 	}
 }

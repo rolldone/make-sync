@@ -19,15 +19,9 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 	// Loop the menu so when a session exits we return to the menu.
 	for {
 		// Clear screen before showing menu
-		if watcher != nil && watcher.printer != nil {
-			watcher.printer.Print("\033[2J\033[1;1H")
-			watcher.printer.Println("🚀 DevSync Mode Selection")
-			watcher.printer.Println("==========================")
-		} else {
-			fmt.Print("\033[2J\033[1;1H")
-			fmt.Println("🚀 DevSync Mode Selection")
-			fmt.Println("==========================")
-		}
+		util.Default.Print("\033[2J\033[1;1H")
+		util.Default.Println("🚀 DevSync Mode Selection")
+		util.Default.Println("==========================")
 
 		menuItems := []string{
 			"safe_sync :: Basic sync with file watching",
@@ -42,23 +36,26 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 
 		// pause legacy keyboard handler while TUI runs and let TUI own the terminal
 		if watcher != nil {
-			watcher.TUIActive = true
 			select {
 			case watcher.keyboardStop <- true:
 			default:
 			}
+			// wait up to 500ms for keyboard handler to ack that it stopped
+			select {
+			case <-watcher.keyboardStopped:
+				// acknowledged
+			case <-time.After(500 * time.Millisecond):
+				// timeout - continue anyway
+			}
+			watcher.TUIActive = true
 		}
 		// inform util that TUI owns the terminal so global raw-mode helpers are no-ops
 		util.TUIActive = true
 
 		// use TUI menu (bubbletea + bubbles/list) to show selection
-		result, err := tui.ShowMenu(menuItems, "Select DevSync Mode")
+		result, err := tui.ShowMenuWithPrints(menuItems, "Select DevSync Mode")
 		if err != nil {
-			if watcher != nil && watcher.printer != nil {
-				watcher.printer.Printf("❌ Menu selection cancelled: %v\n", err)
-			} else {
-				fmt.Printf("❌ Menu selection cancelled: %v\n", err)
-			}
+			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
 			return "cancelled"
 		}
 
@@ -90,11 +87,7 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			}
 		}
 
-		if watcher != nil && watcher.printer != nil {
-			watcher.printer.Printf("Selected mode: %s\n", result)
-		} else {
-			fmt.Printf("Selected mode: %s\n", result)
-		}
+		util.Default.Printf("Selected mode: %s\n", result)
 
 		// Handle selection
 		switch i {
@@ -104,17 +97,13 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 				var err error
 				watcher, err = NewWatcher(cfg)
 				if err != nil {
-					if watcher != nil && watcher.printer != nil {
-						watcher.printer.Printf("❌ Failed to create watcher: %v\n", err)
-					} else {
-						fmt.Printf("❌ Failed to create watcher: %v\n", err)
-					}
+					util.Default.Printf("❌ Failed to create watcher: %v\n", err)
 					return "error"
 				}
 			}
-			watcher.printer.Println("👀 Starting watcher (safe_sync). Press Ctrl-C to stop and return to menu.")
+			util.Default.Println("👀 Starting watcher (safe_sync). Press Ctrl-C to stop and return to menu.")
 			if err := watcher.Start(); err != nil {
-				watcher.printer.Printf("⚠️  Watcher exited with error: %v\n", err)
+				util.Default.Printf("⚠️  Watcher exited with error: %v\n", err)
 			}
 			// After watcher stops, loop back to the menu
 			continue
@@ -125,22 +114,14 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 		case 3: // force_single_sync
 			return "force_single_sync"
 		case 4: // remote_session
-			if watcher != nil && watcher.printer != nil {
-				watcher.printer.Println("🔗 Creating new remote session...")
-			} else {
-				fmt.Println("🔗 Creating new remote session...")
-			}
+			util.Default.Println("🔗 Creating new remote session...")
 
 			// Get absolute path for private key
 			privateKeyPath := cfg.Devsync.Auth.PrivateKey
 			if !filepath.IsAbs(privateKeyPath) {
 				absPath, err := filepath.Abs(privateKeyPath)
 				if err != nil {
-					if watcher != nil && watcher.printer != nil {
-						watcher.printer.Printf("❌ Failed to get absolute path for private key: %v\n", err)
-					} else {
-						fmt.Printf("❌ Failed to get absolute path for private key: %v\n", err)
-					}
+					util.Default.Printf("❌ Failed to get absolute path for private key: %v\n", err)
 					// continue to menu
 					continue
 				}
@@ -155,31 +136,19 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 				cfg.Devsync.Auth.Port,
 			)
 			if err != nil {
-				if watcher != nil && watcher.printer != nil {
-					watcher.printer.Printf("❌ Failed to initialize SSH client: %v\n", err)
-				} else {
-					fmt.Printf("❌ Failed to initialize SSH client: %v\n", err)
-				}
+				util.Default.Printf("❌ Failed to initialize SSH client: %v\n", err)
 				// continue to menu
 				continue
 			}
 
 			// Connect to SSH server
 			if err := sshClient.Connect(); err != nil {
-				if watcher != nil && watcher.printer != nil {
-					watcher.printer.Printf("❌ Failed to connect SSH server: %v\n", err)
-				} else {
-					fmt.Printf("❌ Failed to connect SSH server: %v\n", err)
-				}
+				util.Default.Printf("❌ Failed to connect SSH server: %v\n", err)
 				sshClient.Close()
 				// continue to menu
 				continue
 			}
-			if watcher != nil && watcher.printer != nil {
-				watcher.printer.Printf("🔗 SSH client connected successfully\n")
-			} else {
-				fmt.Printf("🔗 SSH client connected successfully\n")
-			}
+			util.Default.Printf("🔗 SSH client connected successfully\n")
 
 			// Build the remote command that sets working directory and launches a shell
 			remotePath := cfg.Devsync.Auth.RemotePath
@@ -191,25 +160,17 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			// Create PTY-SSH bridge with initial command so working dir is set
 			bridge, err := sshclient.NewPTYSSHBridgeWithCommand(sshClient, remoteCommand)
 			if err != nil {
-				if watcher != nil && watcher.printer != nil {
-					watcher.printer.Printf("❌ Failed to create PTY-SSH bridge: %v\n", err)
-				} else {
-					fmt.Printf("❌ Failed to create PTY-SSH bridge: %v\n", err)
-				}
+				util.Default.Printf("❌ Failed to create PTY-SSH bridge: %v\n", err)
 				sshClient.Close()
 				// continue to menu
 				continue
 			}
 			// Start the interactive shell
-			if watcher != nil && watcher.printer != nil {
-				watcher.printer.Println("🔗 Starting interactive SSH session with PTY bridge...")
-			} else {
-				fmt.Println("🔗 Starting interactive SSH session with PTY bridge...")
-			}
+			util.Default.Println("🔗 Starting interactive SSH session with PTY bridge...")
 			// Install a small debug callback so we can verify the matcher runs
 			cb := func(_ []byte) {
 				// Print a visible debug marker to stderr
-				fmt.Fprintf(os.Stderr, "DEBUG CALLBACK: Ctrl+G pressed (direct session)\n")
+				util.Default.Printf("DEBUG CALLBACK: Ctrl+G pressed (direct session)\n")
 				// Write a marker file with timestamp
 				fname := "/tmp/make-sync-direct-callback.log"
 				if f, err := os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
@@ -219,11 +180,7 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			}
 
 			if err := bridge.StartInteractiveShell(cb); err != nil {
-				if watcher != nil && watcher.printer != nil {
-					watcher.printer.Printf("❌ Failed to start interactive shell: %v\n", err)
-				} else {
-					fmt.Printf("❌ Failed to start interactive shell: %v\n", err)
-				}
+				util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
 			}
 			// Ensure bridge and client are closed before returning to menu
 			bridge.Close()

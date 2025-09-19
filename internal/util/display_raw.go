@@ -20,6 +20,46 @@ var globalRestore func() error
 // so the TUI remains the single owner of terminal raw mode.
 var TUIActive bool
 
+// IsRaw reports whether the given fd has been put into raw mode by EnableRaw.
+func IsRaw(fd int) bool {
+	rawMu.Lock()
+	defer rawMu.Unlock()
+	_, ok := rawStates[fd]
+	return ok
+}
+
+// IsAnyRaw reports whether any fd is currently in raw mode.
+func IsAnyRaw() bool {
+	rawMu.Lock()
+	defer rawMu.Unlock()
+	return len(rawStates) > 0
+}
+
+// IsGlobalRaw reports whether a global restore function has been set (i.e. EnableRawGlobal was used).
+func IsGlobalRaw() bool {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	return globalRestore != nil
+}
+
+// IsEffectiveRaw reports whether the effective runtime should consider raw mode enabled
+// for the process' stdin. It takes TUI ownership into account: when the TUI owns the
+// terminal (`TUIActive == true`), callers should treat the terminal as being under
+// TUI control rather than enabling raw mode themselves.
+func IsEffectiveRaw() bool {
+	if TUIActive {
+		return true
+	}
+	// check common stdin fd
+	return IsRaw(int(os.Stdin.Fd())) || IsGlobalRaw()
+}
+
+// SetTUIActive sets the TUI ownership flag. Callers should set this to true when
+// the TUI takes ownership of the terminal (so other helpers avoid enabling raw mode).
+func SetTUIActive(v bool) {
+	TUIActive = v
+}
+
 // EnableRaw enables raw mode on fd and returns a restore function.
 // Restore is safe to call multiple times.
 func EnableRaw(fd int) (func() error, error) {
