@@ -14,7 +14,6 @@ type PTYSession struct {
 	Cmd     string
 	Bridge  *sshclient.PTYSSHBridge
 	Running bool
-	mu      sync.Mutex
 	created time.Time
 }
 
@@ -22,8 +21,8 @@ type PTYSession struct {
 type PTYManager struct {
 	w           *Watcher
 	sessions    map[int]*PTYSession
-	mu          sync.Mutex
-	Pendingchan chan string // channel to send pause/unpause/exit commands
+	Pendingchan chan string  // channel to send pause/unpause/exit commands
+	mu          sync.RWMutex // protect sessions map
 }
 
 // NewPTYManager creates a manager bound to a watcher instance
@@ -38,12 +37,6 @@ func NewPTYManager(w *Watcher) *PTYManager {
 func (m *PTYManager) OpenRemoteSlot(slot int, remoteCmd string) error {
 	if slot < 3 || slot > 9 {
 		return fmt.Errorf("slot must be 3..9")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if s, ok := m.sessions[slot]; ok && s != nil && s.Running {
-		return fmt.Errorf("slot %d already has active session", slot)
 	}
 
 	if m.w == nil || m.w.sshClient == nil {
@@ -62,7 +55,11 @@ func (m *PTYManager) OpenRemoteSlot(slot int, remoteCmd string) error {
 		Running: false,
 		created: time.Now(),
 	}
+
+	// add session
+	m.mu.Lock()
 	m.sessions[slot] = s
+	m.mu.Unlock()
 	return nil
 }
 
@@ -70,33 +67,26 @@ func (m *PTYManager) OpenRemoteSlot(slot int, remoteCmd string) error {
 // This call will block until the interactive session exits. Caller must ensure keyboard
 // handler isn't concurrently reading (watcher should restore terminal before calling Focus).
 func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) error {
-
-	m.mu.Lock()
+	m.mu.RLock()
 	s, ok := m.sessions[slot]
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if !ok || s == nil {
 		return fmt.Errorf("no session in slot %d", slot)
 	}
 
-	// <-- CHANGED: only lock briefly to set Running; do NOT hold s.mu across the message loop
-	s.mu.Lock()
+	// mark running
 	s.Running = true
-	s.mu.Unlock()
 
 	if m.w != nil && m.w.printer != nil {
 		m.w.printer.Resume()
 	}
 
-	// Provide a callback which will be invoked when the bridge stdin matcher
-	// detects the configured sequence (default Ctrl+G). The callback will
-	// publish an event to request showing the menu in the watcher if available.
-	// Build a callback that handles Ctrl+G (0x07) and Alt+1..9 (ESC + digit)
+	// Build the bridge callback that handles Ctrl+G and ESC+digit
 	cb := func(gg []byte) {
-		// scan for patterns inside gg
 		for i := 0; i < len(gg); i++ {
 			b := gg[i]
 			if b == 0x07 { // Ctrl+G
-				// write a debug marker to /tmp so the user can verify the callback ran
+				// debug marker
 				go func() {
 					fname := fmt.Sprintf("/tmp/make-sync-callback-fired-slot-%d.log", slot)
 					f, err := os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -113,12 +103,9 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 				d := gg[i+1]
 				if d >= '1' && d <= '9' {
 					slotNum := int(d - '0')
-					// publish event with the slot number
 					if m != nil && m.w != nil && m.w.eventBus != nil {
 						go func(s int) { m.w.eventBus.Publish("devsync.pty.alt", s) }(slotNum)
 					}
-					// fmt.Println("slotNum :: ", slotNum)
-					// write a marker for debug
 					go func(sInt int) {
 						fname := fmt.Sprintf("/tmp/make-sync-%v.log", sInt)
 						f, err := os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -126,21 +113,19 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 							defer f.Close()
 							f.WriteString(fmt.Sprintf("%d alt pressed\n", sInt))
 						}
-						fmt.Println("vvvvvvvvvvvvvvvvvvvv")
 						switch sInt {
 						case slot:
+							// same slot -> ignore
 						case 1:
 							if callback != nil {
 								callback(sInt)
 							}
-						// same slot, ignore
 						case 3, 4, 5, 6, 7, 8, 9:
-							// valid slot, attempt to focus it
 							if callback != nil {
 								callback(sInt)
 							}
 						default:
-							// invalid slot, ignore
+							// ignore
 						}
 					}(slotNum)
 				}
@@ -148,14 +133,16 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 		}
 	}
 
-	// Save previous matcher/callback and install combined matcher+callback
+	// Save previous matcher/callback and install combined matcher+callback using thread-safe setters
 	var prevMatcher func([]byte) bool
 	var prevCallback func([]byte)
+	var prevObserver func([]byte)
+
 	if s.Bridge != nil {
-		prevMatcher = s.Bridge.StdinMatcher
-		prevCallback = s.Bridge.StdinCallback
-		s.Bridge.StdinMatcher = func(b []byte) bool {
-			// detect Ctrl+G or ESC + digit anywhere
+		prevMatcher = s.Bridge.GetStdinMatcher()
+		prevCallback = s.Bridge.GetStdinCallback()
+		// Install matcher that detects Ctrl+G or ESC+digit anywhere
+		s.Bridge.SetStdinMatcher(func(b []byte) bool {
 			for i := 0; i < len(b); i++ {
 				if b[i] == 0x07 {
 					return true
@@ -168,14 +155,10 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 				}
 			}
 			return false
-		}
-	}
-	// Install a simple observer that logs stdin chunks to a temp file for debugging
-	var prevObserver func([]byte)
-	if s.Bridge != nil {
-		prevObserver = s.Bridge.StdinObserver
-		s.Bridge.StdinObserver = func(b []byte) {
-			// append to temp file (best-effort)
+		})
+		// install simple observer for debug
+		prevObserver = s.Bridge.GetStdinObserver()
+		s.Bridge.SetStdinObserver(func(b []byte) {
 			go func(data []byte) {
 				f, _ := os.OpenFile("/tmp/make-sync-pty-input.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 				if f == nil {
@@ -184,25 +167,33 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 				defer f.Close()
 				f.Write(data)
 			}(b)
-		}
+		})
+		// install callback
+		s.Bridge.SetStdinCallback(cb)
 	}
-	s.Bridge.StdinCallback = cb
 
+	// prepare pending channel
 	m.Pendingchan = make(chan string, 1)
 	if !isExist {
-		m.Pendingchan <- "start" // start unpaused
+		m.Pendingchan <- "start"
 	} else {
-		m.Pendingchan <- "unpause" // start unpaused
+		m.Pendingchan <- "unpause"
 	}
-	for msg := range m.Pendingchan {
-		switch {
-		case msg == "pause":
-			m.w.printer.PrintBlock("⏸️  Press any key to return to menu...", true)
-			m.w.printer.ClearLine()
-			s.Bridge.StdinCallback = nil
 
-			err := s.Bridge.Pause()
-			if err != nil {
+	// message loop (blocks until Pendingchan closed)
+	for msg := range m.Pendingchan {
+		switch msg {
+		case "pause":
+			if m.w != nil && m.w.printer != nil {
+				m.w.printer.PrintBlock("⏸️  Press any key to return to menu...", true)
+				m.w.printer.ClearLine()
+			}
+			// clear callback while paused
+			if s.Bridge != nil {
+				s.Bridge.SetStdinCallback(nil)
+			}
+
+			if err := s.Bridge.Pause(); err != nil {
 				if m.w != nil && m.w.printer != nil {
 					m.w.printer.Printf("❌ Failed to pause PTY session: %v\n", err)
 				} else {
@@ -210,59 +201,64 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 				}
 			}
 			close(m.Pendingchan)
-		case msg == "unpause":
-			err := m.ResumeSlot(slot)
-			if err != nil {
+
+		case "unpause":
+			if err := m.ResumeSlot(slot); err != nil {
 				if m.w != nil && m.w.printer != nil {
-					m.w.printer.Printf("❌ Failed to pause PTY session: %v\n", err)
+					m.w.printer.Printf("❌ Failed to resume PTY session: %v\n", err)
 				} else {
-					fmt.Printf("❌ Failed to pause PTY session: %v\n", err)
+					fmt.Printf("❌ Failed to resume PTY session: %v\n", err)
 				}
 				os.Exit(1)
 			}
-			m.w.printer.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
-			m.w.printer.ClearLine()
-		case msg == "start":
+			if m.w != nil && m.w.printer != nil {
+				m.w.printer.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
+				m.w.printer.ClearLine()
+			}
+
+		case "start":
 			go func() {
 				if err := s.Bridge.StartInteractiveShell(cb); err != nil {
 					s.Running = false
+					// restore previous observer if bridge still exists
 					if s.Bridge != nil {
-						s.Bridge.StdinObserver = prevObserver
+						s.Bridge.SetStdinObserver(prevObserver)
 					}
 				}
-				m.CloseSlot(slot)
+				_ = m.CloseSlot(slot)
 			}()
 		}
 	}
-	// restore previous observer, matcher and callback when Focus returns
+
+	// restore previous observer/matcher/callback
 	if s.Bridge != nil {
-		s.Bridge.StdinObserver = prevObserver
-		s.Bridge.StdinMatcher = prevMatcher
-		s.Bridge.StdinCallback = prevCallback
+		s.Bridge.SetStdinObserver(prevObserver)
+		s.Bridge.SetStdinMatcher(prevMatcher)
+		s.Bridge.SetStdinCallback(prevCallback)
 	}
-	s.mu.Lock()
+
 	s.Running = false
-	s.mu.Unlock()
 	return nil
 }
 
 // PauseSlot pauses the PTY session in the given slot.
 func (m *PTYManager) PauseSlot(slot int) error {
-	m.mu.Lock()
+	m.mu.RLock()
 	s, ok := m.sessions[slot]
-	s.Bridge.StdinCallback = nil
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if !ok || s == nil || s.Bridge == nil {
 		return fmt.Errorf("no session in slot %d", slot)
 	}
+	// clear callback then pause
+	s.Bridge.SetStdinCallback(nil)
 	return s.Bridge.Pause()
 }
 
 // ResumeSlot resumes the PTY session in the given slot.
 func (m *PTYManager) ResumeSlot(slot int) error {
-	m.mu.Lock()
+	m.mu.RLock()
 	s, ok := m.sessions[slot]
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if !ok || s == nil || s.Bridge == nil {
 		return fmt.Errorf("no session in slot %d", slot)
 	}
@@ -271,39 +267,35 @@ func (m *PTYManager) ResumeSlot(slot int) error {
 
 // CloseSlot closes and removes the session in slot (remote bridge closed).
 func (m *PTYManager) CloseSlot(slot int) error {
-	m.w.printer.ClearScreen()
-	time.Sleep(400 * time.Millisecond)
-	// Jangan clear layar langsung — gunakan PrintBlock dan minta Watcher redraw.
+	// show message
 	if m.w != nil && m.w.printer != nil {
-		// pastikan printer aktif
+		m.w.printer.ClearScreen()
+		time.Sleep(400 * time.Millisecond)
 		m.w.printer.Resume()
-
-		// tampilkan pesan tanpa mengosongkan menu secara permanen
 		m.w.printer.PrintBlock("", true)
 		m.w.printer.PrintBlock("🔌 Remote PTY session closed. Press Enter to return menu...", true)
-
-		// best-effort: minta Watcher merender ulang menu (jika ada eventBus)
 		if m.w.eventBus != nil {
 			go func() { m.w.eventBus.Publish("devsync.menu.show") }()
 		}
 	} else {
 		fmt.Println("🔌 Remote PTY session closed. Press Enter to return menu...")
 	}
-	m.mu.Lock()
+
+	// cleanup
 	if m.Pendingchan != nil {
 		close(m.Pendingchan)
 		m.Pendingchan = nil
 	}
+	m.mu.Lock()
 	s, ok := m.sessions[slot]
+	if ok {
+		delete(m.sessions, slot)
+	}
+	m.mu.Unlock()
 	if !ok || s == nil {
-		m.mu.Unlock()
 		return nil
 	}
-	delete(m.sessions, slot)
-	m.mu.Unlock()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.Bridge != nil {
 		_ = s.Bridge.Close()
 	}
@@ -313,16 +305,15 @@ func (m *PTYManager) CloseSlot(slot int) error {
 
 // HasSlot returns whether there's a session in slot
 func (m *PTYManager) HasSlot(slot int) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	_, ok := m.sessions[slot]
 	return ok
 }
 
-// ListSlots returns active slots
 func (m *PTYManager) ListSlots() []int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	res := make([]int, 0, len(m.sessions))
 	for k := range m.sessions {
 		res = append(res, k)

@@ -80,6 +80,8 @@ type Session struct {
 
 // Watcher handles file system watching
 type Watcher struct {
+	ready             chan struct{}
+	readyOnce         sync.Once
 	config            *config.Config
 	watchPath         string // Absolute path being watched
 	watchChan         chan notify.EventInfo
@@ -107,6 +109,19 @@ type Watcher struct {
 	ptyMgr *PTYManager
 	// NOTE: remote initialization is tracked in package-level registry
 	Slot *int
+	// runtime control
+	running   bool
+	runningMu sync.Mutex
+
+	configMu sync.RWMutex // protect reading/writing w.config or other config-derived state
+
+	// protects access to extendedIgnores and ignoreFileModTime
+	ignoresMu sync.RWMutex
+
+	// KeyboardEvents receives shortcut events from TUI (e.g. "reload","stats","deploy","alt3")
+	KeyboardEvents chan string
+	// TUIActive indicates Bubble Tea is running; when true legacy raw keyboard handler should pause
+	TUIActive bool
 }
 
 // RemoteAgentConfig represents the configuration sent to remote agent

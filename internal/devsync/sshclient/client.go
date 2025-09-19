@@ -455,132 +455,121 @@ func (c *SSHClient) RunCommandPersistent(cmd string) error {
 	return c.session.Run(cmd)
 }
 
-// RunCommandWithStream executes a command and returns channels for output and errors
-func (c *SSHClient) RunCommandWithStream(cmd string) (<-chan string, <-chan error, error) {
+// RunCommandWithStream executes a command and streams output and errors via channels
+func (c *SSHClient) RunCommandWithStream(cmd string, usePty bool) (<-chan string, <-chan error, error) {
 	session, err := c.client.NewSession()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create session: %v", err)
 	}
-	c.agentSession = session
-	// Request a pty so remote process is attached to the session's terminal
-	// This helps ensure the remote process receives SIGHUP when the session closes.
-	// Requesting a pty is best-effort; ignore error if not supported.
-	if err := session.RequestPty("xterm", 80, 40, ssh.TerminalModes{}); err != nil {
-		// non-fatal
+
+	// optional PTY
+	if usePty {
+		if err := session.RequestPty("xterm", 80, 40, ssh.TerminalModes{}); err != nil {
+			session.Close()
+			return nil, nil, fmt.Errorf("failed to request pty: %v", err)
+		}
 	}
 
-	// Get stdout pipe for streaming output
 	stdout, err := session.StdoutPipe()
 	if err != nil {
 		session.Close()
 		return nil, nil, fmt.Errorf("failed to get stdout pipe: %v", err)
 	}
-
-	// Get stderr pipe for error handling
 	stderr, err := session.StderrPipe()
 	if err != nil {
 		session.Close()
 		return nil, nil, fmt.Errorf("failed to get stderr pipe: %v", err)
 	}
 
-	// Create channels for output and errors
-	outputChan := make(chan string, 100)
-	errorChan := make(chan error, 10)
+	outCh := make(chan string, 128)
+	errCh := make(chan error, 8)
 
-	// Use sync.Once to ensure session is closed only once
+	var wg sync.WaitGroup
+	wg.Add(3) // stdout, stderr, waiter
 	var closeSessionOnce sync.Once
 
-	// Start the command
-	if err := session.Start(cmd); err != nil {
-		session.Close()
-		return nil, nil, fmt.Errorf("failed to start command: %v", err)
-	}
-
-	// Handle stdout in a goroutine
+	// stdout reader
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Ignore panic from sending on closed channel
-			}
-		}()
-		defer close(outputChan)
-		buf := make([]byte, 1024)
+		defer wg.Done()
+		buf := make([]byte, 4096)
 		for {
-			n, err := stdout.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					// inform caller
+			n, rerr := stdout.Read(buf)
+			if n > 0 {
+				s := string(buf[:n])
+				select {
+				case outCh <- s:
+				default:
+					// drop if nobody reading
+				}
+			}
+			if rerr != nil {
+				if rerr != io.EOF {
 					select {
-					case errorChan <- err:
+					case errCh <- rerr:
 					default:
 					}
-					// close session to ensure remote process is signaled
 					closeSessionOnce.Do(func() { session.Close() })
 				}
-				break
-			}
-			if n > 0 {
-				output := string(buf[:n])
-				select {
-				case outputChan <- output:
-				default:
-					// Channel full, skip to prevent blocking
-				}
+				return
 			}
 		}
 	}()
 
-	// Handle stderr in a goroutine
+	// stderr reader
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Ignore panic from sending on closed channel
-			}
-		}()
-		defer close(errorChan)
-		buf := make([]byte, 1024)
+		defer wg.Done()
+		buf := make([]byte, 4096)
 		for {
-			n, err := stderr.Read(buf)
-			if err != nil {
-				if err != io.EOF {
+			n, rerr := stderr.Read(buf)
+			if n > 0 {
+				s := string(buf[:n])
+				select {
+				case errCh <- fmt.Errorf("stderr: %s", s):
+				default:
+					// drop if nobody reading
+				}
+			}
+			if rerr != nil {
+				if rerr != io.EOF {
 					select {
-					case errorChan <- err:
+					case errCh <- rerr:
 					default:
 					}
-					// close session to ensure remote process is signaled
 					closeSessionOnce.Do(func() { session.Close() })
 				}
-				break
-			}
-			if n > 0 {
-				errorMsg := string(buf[:n])
-				select {
-				case errorChan <- fmt.Errorf("stderr: %s", errorMsg):
-				default:
-				}
+				return
 			}
 		}
 	}()
 
-	// Handle session completion in a goroutine
+	// waiter
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Ignore panic from sending on closed channel
-			}
-		}()
-		err := session.Wait()
-		closeSessionOnce.Do(func() { session.Close() })
-		if err != nil {
+		defer wg.Done()
+		if err := session.Start(cmd); err != nil {
 			select {
-			case errorChan <- fmt.Errorf("command completed with error: %v", err):
+			case errCh <- fmt.Errorf("start failed: %v", err):
 			default:
-				// Channel might be closed, skip sending
+			}
+			closeSessionOnce.Do(func() { session.Close() })
+			return
+		}
+		if err := session.Wait(); err != nil {
+			select {
+			case errCh <- fmt.Errorf("command finished with error: %v", err):
+			default:
 			}
 		}
+		closeSessionOnce.Do(func() { session.Close() })
 	}()
 
-	return outputChan, errorChan, nil
+	// coordinator closes channels once all done
+	go func() {
+		wg.Wait()
+		close(outCh)
+		close(errCh)
+	}()
+
+	return outCh, errCh, nil
 }
 
 // IsPersistent returns whether this client uses persistent connections

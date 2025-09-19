@@ -8,8 +8,7 @@ import (
 
 	"make-sync/internal/config"
 	"make-sync/internal/devsync/sshclient"
-
-	"github.com/manifoldco/promptui"
+	"make-sync/internal/tui"
 )
 
 var watcher *Watcher
@@ -40,14 +39,17 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			"back :: Return to main menu",
 		}
 
-		prompt := promptui.Select{
-			Label:    "Select DevSync Mode",
-			Items:    menuItems,
-			Size:     8,
-			HideHelp: true, // Hide the help text to reduce clutter
+		// pause legacy keyboard handler while TUI runs
+		if watcher != nil {
+			watcher.TUIActive = true
+			select {
+			case watcher.keyboardStop <- true:
+			default:
+			}
 		}
 
-		i, result, err := prompt.Run()
+		// use TUI menu (bubbletea + bubbles/list) to show selection
+		result, err := tui.ShowMenu(menuItems, "Select DevSync Mode")
 		if err != nil {
 			if watcher != nil && watcher.printer != nil {
 				watcher.printer.Printf("❌ Menu selection cancelled: %v\n", err)
@@ -55,6 +57,32 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 				fmt.Printf("❌ Menu selection cancelled: %v\n", err)
 			}
 			return "cancelled"
+		}
+
+		if watcher != nil {
+			select {
+			case watcher.keyboardRestart <- true:
+			default:
+			}
+			watcher.TUIActive = false
+		}
+
+		// derive index to keep existing switch logic
+		i := -1
+		for idx, it := range menuItems {
+			if it == result {
+				i = idx
+				break
+			}
+		}
+		if i == -1 {
+			// fallback: try matching prefix
+			for idx, it := range menuItems {
+				if len(result) > 0 && len(it) >= len(result) && it[:len(result)] == result {
+					i = idx
+					break
+				}
+			}
 		}
 
 		if watcher != nil && watcher.printer != nil {
@@ -68,7 +96,16 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 		case 0: // safe_sync
 			// Start watcher - create watcher and initialize remote resources once
 			if watcher == nil {
-				watcher = NewWatcher(cfg)
+				var err error
+				watcher, err = NewWatcher(cfg)
+				if err != nil {
+					if watcher != nil && watcher.printer != nil {
+						watcher.printer.Printf("❌ Failed to create watcher: %v\n", err)
+					} else {
+						fmt.Printf("❌ Failed to create watcher: %v\n", err)
+					}
+					return "error"
+				}
 			}
 			watcher.printer.Println("👀 Starting watcher (safe_sync). Press Ctrl-C to stop and return to menu.")
 			if err := watcher.Start(); err != nil {
@@ -183,7 +220,6 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 					fmt.Printf("❌ Failed to start interactive shell: %v\n", err)
 				}
 			}
-			fmt.Println("qqqqqqqqqqqqqqqqqqqqqq")
 			// Ensure bridge and client are closed before returning to menu
 			bridge.Close()
 			sshClient.Close()

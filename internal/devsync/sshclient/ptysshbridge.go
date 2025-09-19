@@ -6,19 +6,21 @@ import (
 	"os"
 	"sync"
 
-	"github.com/aymanbagabas/go-pty"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
+
+	"make-sync/internal/pty"
+	"make-sync/internal/util"
 )
 
 // PTYSSHBridge represents a bridge between PTY and SSH session for interactive sessions
 type PTYSSHBridge struct {
-	pty          pty.Pty
-	sshClient    *SSHClient
-	sshSession   *ssh.Session
-	termOldState *term.State
-	ioCancel     chan bool
-	ioOnce       sync.Once
+	localPTY    pty.PTY
+	sshClient   *SSHClient
+	sshSession  *ssh.Session
+	termRestore func() error
+	ioCancel    chan bool
+	ioOnce      sync.Once
 
 	initialCommand string
 
@@ -37,87 +39,120 @@ type PTYSSHBridge struct {
 	stdinWg     sync.WaitGroup
 
 	stdinPipe io.WriteCloser
+
+	mu    sync.RWMutex // protect concurrent access to shared fields below
+	stdin io.WriteCloser
 }
 
 // NewPTYSSHBridge creates a new PTY-SSH bridge for interactive sessions
 func NewPTYSSHBridge(sshClient *SSHClient) (*PTYSSHBridge, error) {
-	ptyMaster, err := pty.New()
+	ptWrapper, ptFile, err := pty.Open()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PTY: %v", err)
 	}
 	sshSession, err := sshClient.CreatePTYSession()
 	if err != nil {
-		ptyMaster.Close()
+		if ptWrapper != nil {
+			ptWrapper.Close()
+		}
 		return nil, fmt.Errorf("failed to create SSH session: %v", err)
 	}
-	tty, _ := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 
 	return &PTYSSHBridge{
-		pty:        ptyMaster,
+		localPTY:   ptWrapper,
+		localTTY:   ptFile,
 		sshClient:  sshClient,
 		sshSession: sshSession,
 		ioCancel:   make(chan bool),
 		ioOnce:     sync.Once{},
-		localTTY:   tty,
 	}, nil
 }
 
-// NewPTYSSHBridgeWithCommand creates a new PTY-SSH bridge with initial command
 func NewPTYSSHBridgeWithCommand(sshClient *SSHClient, initialCommand string) (*PTYSSHBridge, error) {
-	ptyMaster, err := pty.New()
+	// keep behavior consistent with NewPTYSSHBridge: open a PTY master
+	ptWrapper, ptFile, err := pty.Open()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PTY: %v", err)
 	}
 	sshSession, err := sshClient.CreatePTYSession()
 	if err != nil {
-		ptyMaster.Close()
+		if ptWrapper != nil {
+			_ = ptWrapper.Close()
+		}
+		if ptFile != nil {
+			_ = ptFile.Close()
+		}
 		return nil, fmt.Errorf("failed to create SSH session: %v", err)
 	}
-	tty, _ := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 
 	return &PTYSSHBridge{
-		pty:            ptyMaster,
+		localPTY:       ptWrapper,
+		localTTY:       ptFile,
 		sshClient:      sshClient,
 		sshSession:     sshSession,
 		ioCancel:       make(chan bool),
 		ioOnce:         sync.Once{},
 		initialCommand: initialCommand,
-		localTTY:       tty,
 	}, nil
 }
 
 // stdinLoop handles forwarding stdin to remote
-func (bridge *PTYSSHBridge) stdinLoop(stdinPipe io.WriteCloser) {
+func (bridge *PTYSSHBridge) stdinLoop() {
 	defer bridge.stdinWg.Done()
+
 	buf := make([]byte, 4096)
 	for {
+		// check stop or io cancel first
 		select {
 		case <-bridge.stopStdinCh:
+			return
+		case <-bridge.ioCancel:
 			return
 		default:
 		}
 
 		n, err := os.Stdin.Read(buf)
-		if n > 0 {
-			data := buf[:n]
-
-			// Jangan echo ke local TTY di sini — biarkan remote PTY yang echo.
-			// Hanya jalankan observer/matcher dan kirim ke remote stdin.
-			if bridge.StdinObserver != nil {
-				// copy data to avoid races
-				d := make([]byte, len(data))
-				copy(d, data)
-				go bridge.StdinObserver(d)
+		if n <= 0 {
+			if err != nil {
+				return
 			}
-			if bridge.StdinCallback != nil && bridge.StdinMatcher != nil && bridge.StdinMatcher(data) {
-				go bridge.StdinCallback(data)
-			}
-			if stdinPipe != nil {
-				_, _ = stdinPipe.Write(data)
-			}
+			continue
 		}
-		if err != nil {
-			return
+
+		// check if input handling is disabled
+		bridge.inputMu.Lock()
+		disabled := bridge.inputDisabled
+		bridge.inputMu.Unlock()
+		if disabled {
+			continue
+		}
+
+		data := make([]byte, n)
+		copy(data, buf[:n])
+
+		// snapshot hooks using thread-safe getters
+		observer := bridge.GetStdinObserver()
+		matcher := bridge.GetStdinMatcher()
+		callback := bridge.GetStdinCallback()
+
+		if observer != nil {
+			go observer(data)
+		}
+		if matcher != nil && callback != nil && matcher(data) {
+			go callback(data)
+		}
+
+		// snapshot current writers under lock to avoid races with writers being swapped
+		bridge.mu.RLock()
+		w := bridge.stdin
+		sp := bridge.stdinPipe
+		bridge.mu.RUnlock()
+
+		// prefer explicit stdin writer if set, otherwise fallback to session stdinPipe
+		if w != nil {
+			_, _ = w.Write(data)
+		} else if sp != nil {
+			_, _ = sp.Write(data)
 		}
 	}
 }
@@ -133,16 +168,18 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(cb func([]byte)) error {
 		}
 	}
 	if err := bridge.sshSession.RequestPty("xterm-256color", rows, cols, ssh.TerminalModes{}); err != nil {
-		bridge.pty.Close()
+		if bridge.localPTY != nil {
+			_ = bridge.localPTY.Close()
+		}
 		bridge.sshSession.Close()
 		return fmt.Errorf("failed to request PTY: %v", err)
 	}
 	if isTTY {
-		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		restore, err := util.EnableRaw(int(os.Stdin.Fd()))
 		if err != nil {
 			return fmt.Errorf("failed to set raw mode: %v", err)
 		}
-		bridge.termOldState = oldState
+		bridge.termRestore = restore
 	}
 	stdinPipe, err := bridge.sshSession.StdinPipe()
 	if err != nil {
@@ -172,7 +209,7 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(cb func([]byte)) error {
 	// start stdin goroutine
 	bridge.stopStdinCh = make(chan struct{})
 	bridge.stdinWg.Add(1)
-	go bridge.stdinLoop(stdinPipe)
+	go bridge.stdinLoop()
 
 	// handle output
 	go func() {
@@ -229,9 +266,9 @@ func (bridge *PTYSSHBridge) Pause() error {
 	bridge.outputDisabled = true
 	bridge.outputMu.Unlock()
 
-	if bridge.termOldState != nil {
-		term.Restore(int(os.Stdin.Fd()), bridge.termOldState)
-		bridge.termOldState = nil
+	if bridge.termRestore != nil {
+		_ = bridge.termRestore()
+		bridge.termRestore = nil
 	}
 	return nil
 }
@@ -243,17 +280,17 @@ func (bridge *PTYSSHBridge) Resume() error {
 	bridge.outputMu.Unlock()
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		restore, err := util.EnableRaw(int(os.Stdin.Fd()))
 		if err != nil {
 			return fmt.Errorf("failed to set raw mode: %v", err)
 		}
-		bridge.termOldState = oldState
+		bridge.termRestore = restore
 	}
 
 	if bridge.stdinPipe != nil {
 		bridge.stopStdinCh = make(chan struct{})
 		bridge.stdinWg.Add(1)
-		go bridge.stdinLoop(bridge.stdinPipe)
+		go bridge.stdinLoop()
 	}
 	return nil
 }
@@ -263,9 +300,9 @@ func (bridge *PTYSSHBridge) Close() error {
 	bridge.ioOnce.Do(func() {
 		close(bridge.ioCancel)
 	})
-	if bridge.termOldState != nil {
-		term.Restore(int(os.Stdin.Fd()), bridge.termOldState)
-		bridge.termOldState = nil
+	if bridge.termRestore != nil {
+		_ = bridge.termRestore()
+		bridge.termRestore = nil
 	}
 	if bridge.stopStdinCh != nil {
 		close(bridge.stopStdinCh)
@@ -277,8 +314,64 @@ func (bridge *PTYSSHBridge) Close() error {
 	if bridge.sshSession != nil {
 		bridge.sshSession.Close()
 	}
-	if bridge.pty != nil {
-		bridge.pty.Close()
+	if bridge.localPTY != nil {
+		_ = bridge.localPTY.Close()
+		bridge.localPTY = nil
 	}
 	return nil
+}
+
+// Thread-safe setters/getters for stdin hooks and writer
+
+func (b *PTYSSHBridge) SetStdinMatcher(m func([]byte) bool) {
+	b.mu.Lock()
+	b.StdinMatcher = m
+	b.mu.Unlock()
+}
+
+func (b *PTYSSHBridge) GetStdinMatcher() func([]byte) bool {
+	b.mu.RLock()
+	m := b.StdinMatcher
+	b.mu.RUnlock()
+	return m
+}
+
+func (b *PTYSSHBridge) SetStdinCallback(cb func([]byte)) {
+	b.mu.Lock()
+	b.StdinCallback = cb
+	b.mu.Unlock()
+}
+
+func (b *PTYSSHBridge) GetStdinCallback() func([]byte) {
+	b.mu.RLock()
+	cb := b.StdinCallback
+	b.mu.RUnlock()
+	return cb
+}
+
+func (b *PTYSSHBridge) SetStdinObserver(o func([]byte)) {
+	b.mu.Lock()
+	b.StdinObserver = o
+	b.mu.Unlock()
+}
+
+func (b *PTYSSHBridge) GetStdinObserver() func([]byte) {
+	b.mu.RLock()
+	o := b.StdinObserver
+	b.mu.RUnlock()
+	return o
+}
+
+// Optionally expose safe access to the active stdin writer if needed
+func (b *PTYSSHBridge) setStdinWriter(w io.WriteCloser) {
+	b.mu.Lock()
+	b.stdin = w
+	b.mu.Unlock()
+}
+
+func (b *PTYSSHBridge) getStdinWriter() io.WriteCloser {
+	b.mu.RLock()
+	w := b.stdin
+	b.mu.RUnlock()
+	return w
 }

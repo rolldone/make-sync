@@ -15,13 +15,12 @@ import (
 	"time"
 
 	"github.com/asaskevich/EventBus"
-	"github.com/manifoldco/promptui"
 	"github.com/rjeczalik/notify"
 	"gopkg.in/yaml.v3"
 )
 
 // NewWatcher creates a new file watcher instance
-func NewWatcher(cfg *config.Config) *Watcher {
+func NewWatcher(cfg *config.Config) (*Watcher, error) {
 	// Calculate watch path
 	watchPath := cfg.LocalPath
 	if watchPath == "" {
@@ -93,6 +92,7 @@ func NewWatcher(cfg *config.Config) *Watcher {
 
 	// Build and deploy agent if SSH client is available
 	watcher := &Watcher{
+		ready:      make(chan struct{}),
 		config:     cfg,
 		watchPath:  absWatchPath,
 		watchChan:  make(chan notify.EventInfo, 100),
@@ -108,49 +108,40 @@ func NewWatcher(cfg *config.Config) *Watcher {
 		eventBus:        EventBus.New(),
 		printer:         util.Default,
 		Slot:            nil,
+		notifyStopped:   make(chan struct{}),
+		configMu:        sync.RWMutex{},
+		ignoresMu:       sync.RWMutex{},
+		KeyboardEvents:  make(chan string, 8),
+		TUIActive:       false,
 	}
+
+	// start a short goroutine to handle TUI-driven shortcuts
+	go func() {
+		for ev := range watcher.KeyboardEvents {
+			switch ev {
+			case "reload":
+				watcher.HandleReloadCommand()
+			case "stats":
+				watcher.HandleShowStatsCommand()
+			case "deploy":
+				watcher.HandleDeployAgentCommand()
+			default:
+				// alt keys like "alt3".. "alt9" -> synthesize slot handling
+				if strings.HasPrefix(ev, "alt") && len(ev) > 3 {
+					// parse numeric slot
+					slot := int(ev[3] - '0')
+					watcher.Slot = &slot
+					watcher.showCommandMenuDisplay()
+				}
+			}
+		}
+	}()
 
 	// Initialize command manager after watcher is created
 	watcher.commands = NewCommandManager(watcher)
 
 	// Initialize PTY manager for persistent remote sessions (Alt+3..9)
 	watcher.ptyMgr = NewPTYManager(watcher)
-
-	// Subscribe to remote command exec events so Alt-menu can request execution
-	// if watcher.eventBus != nil {
-	// 	watcher.eventBus.Subscribe("devsync.command.exec.remote", func(cmd string) {
-	// 		go watcher.runRemoteCommand(cmd)
-	// 	})
-
-	// 	// Subscribe to menu show requests so keyboard goroutine can ask main
-	// 	// watcher to display the prompt from a safe goroutine.
-	// 	watcher.eventBus.Subscribe("devsync.menu.show", func() {
-	// 		go func() {
-	// 			// Attempt to stop keyboard handler before taking over terminal
-	// 			if watcher.keyboardStop != nil {
-	// 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	// 				defer cancel()
-	// 				select {
-	// 				case watcher.keyboardStop <- true:
-	// 					// stopped
-	// 				case <-ctx.Done():
-	// 					watcher.printer.PrintBlock("⚠️  timeout waiting for keyboard handler to stop\n", true)
-	// 				}
-	// 			}
-
-	// 			// Show the menu (this will resume printing internally)
-	// 			watcher.showCommandMenuDisplay(0)
-
-	// 			// Signal keyboard restart (non-blocking)
-	// 			if watcher.keyboardRestart != nil {
-	// 				select {
-	// 				case watcher.keyboardRestart <- true:
-	// 				default:
-	// 				}
-	// 			}
-	// 		}()
-	// 	})
-	// }
 
 	// build & deploy
 	if err := watcher.buildAndDeployAgent(); err != nil {
@@ -167,28 +158,30 @@ func NewWatcher(cfg *config.Config) *Watcher {
 		watcher.safePrintf("⚠️  Failed to start agent monitoring: %v\n", err)
 	}
 
-	return watcher
+	// start goroutines here as before (they'll wait on ready)
+	return watcher, nil
 }
 
-// generateRemoteConfig generates minimal configuration for remote agent
 func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
+	// Load & render config (may be expensive) then swap under lock
 	newCfg, err := config.LoadAndRenderConfig()
 	if err != nil {
 		return &RemoteAgentConfig{}
 	}
 
-	// Update current config reference
+	// atomically update watcher config
+	w.configMu.Lock()
 	w.config = newCfg
+	w.configMu.Unlock()
 
-	// Create remote config with necessary fields
-	config := &RemoteAgentConfig{}
+	// Build remote config snapshot from the new config
+	cfg := &RemoteAgentConfig{}
+	cfg.Devsync.Ignores = newCfg.Devsync.Ignores
+	cfg.Devsync.AgentWatchs = newCfg.Devsync.AgentWatchs
+	cfg.Devsync.ManualTransfer = newCfg.Devsync.ManualTransfer
+	cfg.Devsync.WorkingDir = newCfg.Devsync.Auth.RemotePath
 
-	config.Devsync.Ignores = w.config.Devsync.Ignores
-	config.Devsync.AgentWatchs = w.config.Devsync.AgentWatchs
-	config.Devsync.ManualTransfer = w.config.Devsync.ManualTransfer
-	config.Devsync.WorkingDir = w.config.Devsync.Auth.RemotePath
-
-	return config
+	return cfg
 }
 
 // configToJSON converts config struct to JSON string
@@ -320,7 +313,7 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 	w.safeStatusln("🚀 Running agent watch command: %s", watchCmd)
 
 	// Use streaming output for continuous monitoring
-	outputChan, errorChan, err := w.sshClient.RunCommandWithStream(watchCmd)
+	outputChan, errorChan, err := w.sshClient.RunCommandWithStream(watchCmd, false)
 	if err != nil {
 		return fmt.Errorf("failed to start agent watch command: %v", err)
 	}
@@ -789,6 +782,20 @@ func (w *Watcher) executeLocalCommand(cmd string) error {
 
 // Start begins watching files in the configured directory
 func (w *Watcher) Start() error {
+	// make Start idempotent for repeated UI navigation
+	w.runningMu.Lock()
+	if w.running {
+		w.runningMu.Unlock()
+		return nil // already running
+	}
+	w.running = true
+	w.runningMu.Unlock()
+	// ensure we reset running flag when Start returns
+	defer func() {
+		w.runningMu.Lock()
+		w.running = false
+		w.runningMu.Unlock()
+	}()
 
 	// Get the watch path from config
 	watchPath := w.config.LocalPath
@@ -810,6 +817,16 @@ func (w *Watcher) Start() error {
 		w.config.TriggerPerm.UnlinkFolder)
 
 	if w.watchChan == nil {
+		// If a previous notify loop existed, wait for it to fully stop
+		if w.notifyStopped != nil {
+			select {
+			case <-w.notifyStopped:
+				// previous notify stopped
+			case <-time.After(5 * time.Second):
+				w.safePrintf("⚠️  Start: timeout waiting for previous notifyStopped\n")
+			}
+		}
+
 		// reset so StopNotify can be called again later
 		w.notifyStopOnce = sync.Once{}
 		w.notifyStopped = make(chan struct{})
@@ -825,8 +842,20 @@ func (w *Watcher) Start() error {
 		return fmt.Errorf("failed to setup file watcher: %v", err)
 	}
 
+	// close ready exactly once to signal goroutines the watcher init completed
+	w.readyOnce.Do(func() {
+		// ensure channel exists (created in NewWatcher)
+		if w.ready == nil {
+			w.ready = make(chan struct{})
+		}
+		close(w.ready)
+	})
+
 	// Start keyboard input handler goroutine
-	go w.handleKeyboardInput()
+	// Start legacy keyboard handler only when TUI is not active
+	if !w.TUIActive {
+		go w.handleKeyboardInput()
+	}
 
 	// Start session completion event handler
 	go w.handleSessionCompletionEvents()
@@ -836,14 +865,6 @@ func (w *Watcher) Start() error {
 
 	w.safeStatus("✅ File watcher started successfully\n")
 	w.safeStatus("💡 Press Ctrl+C to stop watching, R+Enter to reload .sync_ignore, S+Enter to show cache stats, A+Enter to deploy agent\n")
-
-	// Wait for done signal or notifyStopped (StopNotify requested)
-	if w.notifyStopped == nil {
-		// ensure channel exists to avoid nil receive in select
-		w.notifyStopped = make(chan struct{})
-		// close immediately only if processEvents already returned; otherwise defer will close
-		// we leave it empty here; processEvents will close it when exiting
-	}
 
 	select {
 	case <-w.done:
@@ -890,6 +911,11 @@ func (w *Watcher) Stop() {
 // processEvents processes file system events
 func (w *Watcher) processEvents() {
 
+	// Wait until Watcher is fully initialized by Start()
+	if w.ready != nil {
+		<-w.ready
+	}
+
 	// Ensure notifyStopped is initialized so StopNotify can wait on it
 	if w.notifyStopped == nil {
 		w.notifyStopped = make(chan struct{})
@@ -933,14 +959,20 @@ func (w *Watcher) handleSessionCompletionEvents() {
 func (w *Watcher) handleEvent(event notify.EventInfo) {
 	path := event.Path()
 
-	// Check if this is the .sync_ignore file being modified
+	// If .sync_ignore modified -> clear cache under lock
 	if filepath.Base(path) == ".sync_ignore" {
-		// Clear the cache so it will be reloaded on next shouldIgnore call
+		w.ignoresMu.Lock()
 		w.extendedIgnores = nil
 		w.ignoreFileModTime = time.Time{}
+		w.ignoresMu.Unlock()
 	}
 
-	// Check if path should be ignored
+	// Snapshot config for safe downstream use
+	w.configMu.RLock()
+	cfgSnapshot := w.config
+	w.configMu.RUnlock()
+
+	// Check if path should be ignored (uses loadExtendedIgnores which is locked internally)
 	if w.shouldIgnore(path) {
 		return
 	}
@@ -948,9 +980,31 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 	// Map notify event to our EventType
 	eventType := w.mapNotifyEvent(event.Event())
 
-	// Check if this event type is allowed by permissions
-	if !w.isEventAllowed(eventType) {
-		return
+	// Check permissions using snapshot
+	if cfgSnapshot != nil {
+		switch eventType {
+		case EventCreate:
+			if !cfgSnapshot.TriggerPerm.Add {
+				return
+			}
+		case EventWrite:
+			if !cfgSnapshot.TriggerPerm.Change {
+				return
+			}
+		case EventRemove:
+			if !cfgSnapshot.TriggerPerm.Unlink {
+				return
+			}
+		case EventRename:
+			if !cfgSnapshot.TriggerPerm.Unlink {
+				return
+			}
+		}
+	} else {
+		// fallback: use existing isEventAllowed (reads w.config) but try to avoid races
+		if !w.isEventAllowed(eventType) {
+			return
+		}
 	}
 
 	// Get file info
@@ -972,16 +1026,6 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 
 	// Store this event for debouncing
 	w.storeEvent(fileEvent)
-
-	// Handle rename events (they come as two separate events)
-	if eventType == EventRename {
-		// For rename, we might need to track old path
-		// This is simplified - in production you might want to track rename pairs
-	}
-
-	// Display the event
-	// Disable for a while to reduce noise
-	// w.displayEvent(fileEvent)
 
 	// Execute scripts if configured
 	w.ExecuteScripts(fileEvent)
@@ -1131,59 +1175,90 @@ func (w *Watcher) mapNotifyEvent(event notify.Event) EventType {
 	}
 }
 
-// shouldIgnore checks if a path should be ignored based on ignore patterns
 func (w *Watcher) shouldIgnore(path string) bool {
-	// Core ignores that are ALWAYS applied (cannot be overridden)
+	// Core ignores that are ALWAYS applied
 	coreIgnores := []string{
-		".sync_collections", // Sync collections folder
-		".sync_temp",        // Temporary files folder
-		"make-sync.yaml",    // Main config file
-		".sync_ignore",      // Ignore configuration file
+		".sync_collections",
+		".sync_temp",
+		"make-sync.yaml",
+		".sync_ignore",
 	}
 
-	// Check core ignores first (these cannot be overridden)
 	for _, ignore := range coreIgnores {
 		if w.matchesPattern(path, ignore) {
 			return true
 		}
 	}
 
-	// Additional check for .sync_temp folder (failsafe)
 	if strings.Contains(path, ".sync_temp") {
 		return true
 	}
 
-	// Extended ignores from .sync_ignore file
-	extendedIgnores := w.loadExtendedIgnores()
-	for _, ignore := range extendedIgnores {
+	// Extended ignores - loadExtendedIgnores is concurrency-safe and returns a copy
+	extended := w.loadExtendedIgnores()
+	for _, ignore := range extended {
 		if w.matchesPattern(path, ignore) {
 			return true
 		}
 	}
 
-	// Check user-configured ignores from YAML
-	for _, ignore := range w.config.Devsync.Ignores {
-		if w.matchesPattern(path, ignore) {
-			return true
-		}
-	}
-	return false
-}
+	// Snapshot config for user-configured ignores
+	w.configMu.RLock()
+	cfg := w.config
+	w.configMu.RUnlock()
 
-// loadExtendedIgnores loads ignore patterns from .sync_ignore file with caching
-func (w *Watcher) loadExtendedIgnores() []string {
-	// Check if we have cached patterns and if .sync_ignore file hasn't changed
-	syncIgnorePath := ".sync_ignore"
-	if len(w.extendedIgnores) > 0 {
-		if info, err := os.Stat(syncIgnorePath); err == nil {
-			if info.ModTime().Equal(w.ignoreFileModTime) {
-				// File hasn't changed, return cached patterns
-				return w.extendedIgnores
+	if cfg != nil {
+		for _, ignore := range cfg.Devsync.Ignores {
+			if w.matchesPattern(path, ignore) {
+				return true
 			}
 		}
 	}
 
-	// Default extended ignores
+	return false
+}
+
+// filepath: /home/donny/workspaces/make-sync/internal/devsync/watcher.go
+func (w *Watcher) ReloadWatchPatterns() error {
+	// Build new patterns off-line if needed (not holding locks)
+	// Invalidate cached extended ignores under write lock
+	w.ignoresMu.Lock()
+	w.extendedIgnores = nil
+	w.ignoreFileModTime = time.Time{}
+	w.ignoresMu.Unlock()
+
+	// Preload extended ignores (will populate cache safely)
+	_ = w.loadExtendedIgnores()
+
+	w.safePrintln("✅ Watch patterns reloaded")
+	return nil
+}
+
+func (w *Watcher) loadExtendedIgnores() []string {
+	syncIgnorePath := ".sync_ignore"
+
+	// Fast-path: return cached copy under RLock if file unchanged
+	w.ignoresMu.RLock()
+	if len(w.extendedIgnores) > 0 {
+		cached := make([]string, len(w.extendedIgnores))
+		copy(cached, w.extendedIgnores)
+		cachedMod := w.ignoreFileModTime
+		w.ignoresMu.RUnlock()
+
+		if info, err := os.Stat(syncIgnorePath); err == nil {
+			if info.ModTime().Equal(cachedMod) {
+				return cached
+			}
+		} else {
+			if cachedMod.IsZero() {
+				return cached
+			}
+		}
+	} else {
+		w.ignoresMu.RUnlock()
+	}
+
+	// Defaults
 	defaultExtendedIgnores := []string{
 		".git",
 		".DS_Store",
@@ -1196,43 +1271,55 @@ func (w *Watcher) loadExtendedIgnores() []string {
 		"*.bak",
 	}
 
-	// Try to read .sync_ignore file
+	// Read file (no locks)
 	content, err := os.ReadFile(syncIgnorePath)
 	if err != nil {
-		// File doesn't exist, cache defaults
-		w.extendedIgnores = defaultExtendedIgnores
-		w.ignoreFileModTime = time.Time{} // Reset mod time
-		return defaultExtendedIgnores
+		// cache defaults
+		w.ignoresMu.Lock()
+		w.extendedIgnores = make([]string, len(defaultExtendedIgnores))
+		copy(w.extendedIgnores, defaultExtendedIgnores)
+		w.ignoreFileModTime = time.Time{}
+		w.ignoresMu.Unlock()
+		out := make([]string, len(defaultExtendedIgnores))
+		copy(out, defaultExtendedIgnores)
+		return out
 	}
 
-	// Get file modification time
 	info, err := os.Stat(syncIgnorePath)
 	if err != nil {
-		w.extendedIgnores = defaultExtendedIgnores
+		w.ignoresMu.Lock()
+		w.extendedIgnores = make([]string, len(defaultExtendedIgnores))
+		copy(w.extendedIgnores, defaultExtendedIgnores)
 		w.ignoreFileModTime = time.Time{}
-		return defaultExtendedIgnores
+		w.ignoresMu.Unlock()
+		out := make([]string, len(defaultExtendedIgnores))
+		copy(out, defaultExtendedIgnores)
+		return out
 	}
 
-	// Try to parse as YAML first
+	// Try YAML
 	var yamlIgnores []string
 	if err := yaml.Unmarshal(content, &yamlIgnores); err == nil && len(yamlIgnores) > 0 {
-		w.safeStatus("📄 Loaded .sync_ignore as YAML format (%d patterns)\n", len(yamlIgnores))
-		w.extendedIgnores = yamlIgnores
+		w.ignoresMu.Lock()
+		w.extendedIgnores = make([]string, len(yamlIgnores))
+		copy(w.extendedIgnores, yamlIgnores)
 		w.ignoreFileModTime = info.ModTime()
-		return yamlIgnores
+		w.ignoresMu.Unlock()
+
+		out := make([]string, len(yamlIgnores))
+		copy(out, yamlIgnores)
+		w.safeStatus("📄 Loaded .sync_ignore as YAML format (%d patterns)\n", len(yamlIgnores))
+		return out
 	}
 
-	// If YAML parsing fails, try to parse as .gitignore style (plain text)
+	// Fallback: .gitignore style
 	lines := strings.Split(string(content), "\n")
 	var gitignoreIgnores []string
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Skip lines that start with YAML dash (old format)
 		if strings.HasPrefix(line, "- ") {
 			continue
 		}
@@ -1240,17 +1327,29 @@ func (w *Watcher) loadExtendedIgnores() []string {
 	}
 
 	if len(gitignoreIgnores) > 0 {
-		w.safeStatus("📄 Loaded .sync_ignore as .gitignore format (%d patterns)\n", len(gitignoreIgnores))
-		w.extendedIgnores = gitignoreIgnores
+		w.ignoresMu.Lock()
+		w.extendedIgnores = make([]string, len(gitignoreIgnores))
+		copy(w.extendedIgnores, gitignoreIgnores)
 		w.ignoreFileModTime = info.ModTime()
-		return gitignoreIgnores
+		w.ignoresMu.Unlock()
+
+		out := make([]string, len(gitignoreIgnores))
+		copy(out, gitignoreIgnores)
+		w.safeStatus("📄 Loaded .sync_ignore as .gitignore format (%d patterns)\n", len(gitignoreIgnores))
+		return out
 	}
 
-	// If both parsing methods fail, fall back to default
+	// Fallback to defaults
 	w.safePrintf("⚠️  Failed to parse .sync_ignore file, using defaults\n")
-	w.extendedIgnores = defaultExtendedIgnores
+	w.ignoresMu.Lock()
+	w.extendedIgnores = make([]string, len(defaultExtendedIgnores))
+	copy(w.extendedIgnores, defaultExtendedIgnores)
 	w.ignoreFileModTime = info.ModTime()
-	return defaultExtendedIgnores
+	w.ignoresMu.Unlock()
+
+	out := make([]string, len(defaultExtendedIgnores))
+	copy(out, defaultExtendedIgnores)
+	return out
 }
 
 // matchesPattern checks if a path matches a pattern (supports wildcards)
@@ -1320,198 +1419,198 @@ func (w *Watcher) hasActiveSession() bool {
 }
 
 // displayMainMenu displays the main devsync menu
-func (w *Watcher) displayMainMenu() {
-	lines := []string{
-		"🔧 DevSync Main Menu",
-		"====================",
-		"R  - Reload configuration",
-		"S  - Show cache stats",
-		"A  - Deploy agent",
-		"Alt+1 - This menu",
-		"Alt+2 - New remote session (no menu)  (TBD)",
-		"Alt+3..9 - Command menus (dynamic per-config). Press one to open command picker.",
-		"Alt+B - Background current session",
-		"Alt+0 - Close current session",
-		"> ",
-	}
-	for i := range lines {
-		w.printer.Println(lines[i])
-		w.printer.ClearLine()
-	}
-	// menu := strings.Join(lines, "\n")
+// func (w *Watcher) displayMainMenu() {
+// 	lines := []string{
+// 		"🔧 DevSync Main Menu",
+// 		"====================",
+// 		"R  - Reload configuration",
+// 		"S  - Show cache stats",
+// 		"A  - Deploy agent",
+// 		"Alt+1 - This menu",
+// 		"Alt+2 - New remote session (no menu)  (TBD)",
+// 		"Alt+3..9 - Command menus (dynamic per-config). Press one to open command picker.",
+// 		"Alt+B - Background current session",
+// 		"Alt+0 - Close current session",
+// 		"> ",
+// 	}
+// 	for i := range lines {
+// 		w.printer.Println(lines[i])
+// 		w.printer.ClearLine()
+// 	}
+// 	// menu := strings.Join(lines, "\n")
 
-	// if w != nil && w.printer != nil {
-	// 	w.printer.Println(menu)
-	// } else {
-	// 	fmt.Print(menu)
-	// }
+// 	// if w != nil && w.printer != nil {
+// 	// 	w.printer.Println(menu)
+// 	// } else {
+// 	// 	fmt.Print(menu)
+// 	// }
 
-}
+// }
 
 // ...existing code...
-func (w *Watcher) handleKeyboardInput() {
-	buffer := make([]byte, 10) // Increase buffer for escape sequences
-	util.Default.Printf("DEBUG keyboard handler start pid=%d\n", os.Getpid())
-	defer util.Default.Printf("DEBUG keyboard handler exit pid=%d\n", os.Getpid())
-	var rawEnabled bool
+// func (w *Watcher) handleKeyboardInput() {
+// 	buffer := make([]byte, 10) // Increase buffer for escape sequences
+// 	util.Default.Printf("DEBUG keyboard handler start pid=%d\n", os.Getpid())
+// 	defer util.Default.Printf("DEBUG keyboard handler exit pid=%d\n", os.Getpid())
+// 	var rawEnabled bool
 
-	// Try to enable raw mode using util helper so we can capture single keypresses
-	if _, err := util.EnableRawGlobalAuto(); err == nil {
-		rawEnabled = true
-	} else {
-		w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
-	}
+// 	// Try to enable raw mode using util helper so we can capture single keypresses
+// 	if _, err := util.EnableRawGlobalAuto(); err == nil {
+// 		rawEnabled = true
+// 	} else {
+// 		w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
+// 	}
 
-	// Ensure terminal state is restored when this handler returns
-	restore := func() {
-		_ = util.RestoreGlobal()
-	}
-	defer restore()
+// 	// Ensure terminal state is restored when this handler returns
+// 	restore := func() {
+// 		_ = util.RestoreGlobal()
+// 	}
+// 	defer restore()
 
-	for {
-		select {
-		case <-w.keyboardStop:
-			// Stop keyboard input during session, wait for restart
-			// Before pausing for session, restore terminal state so session can set raw mode
-			_ = util.RestoreGlobal()
-			<-w.keyboardRestart
-			// Re-enable raw mode after session if possible
-			if !rawEnabled {
-				if _, err := util.EnableRawGlobalAuto(); err == nil {
-					rawEnabled = true
-				} else {
-					w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
-				}
-			}
-			continue
-		default:
-			n, err := os.Stdin.Read(buffer)
-			if err != nil {
-				// On read error, restore terminal and exit handler
-				_ = util.RestoreGlobal()
-				return
-			}
-			if n > 0 {
-				raw := buffer[:n]
-				input := string(raw)
-				// Handle escape sequences for Alt + key (don't trim spaces)
-				if strings.HasPrefix(input, "\x1b") {
-					// Try to create a two-byte sequence if available (ESC + key)
-					if n >= 2 {
-						seq := string([]byte{raw[0], raw[1]})
-						_ = util.RestoreGlobal()
-						w.handleAltKey(seq)
-						// Re-enable raw mode after handler returns if possible
-						if !rawEnabled {
-							if _, err := util.EnableRawGlobalAuto(); err == nil {
-								rawEnabled = true
-							}
-						}
-						continue
-					}
+// 	for {
+// 		select {
+// 		case <-w.keyboardStop:
+// 			// Stop keyboard input during session, wait for restart
+// 			// Before pausing for session, restore terminal state so session can set raw mode
+// 			_ = util.RestoreGlobal()
+// 			<-w.keyboardRestart
+// 			// Re-enable raw mode after session if possible
+// 			if !rawEnabled {
+// 				if _, err := util.EnableRawGlobalAuto(); err == nil {
+// 					rawEnabled = true
+// 				} else {
+// 					w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
+// 				}
+// 			}
+// 			continue
+// 		default:
+// 			n, err := os.Stdin.Read(buffer)
+// 			if err != nil {
+// 				// On read error, restore terminal and exit handler
+// 				_ = util.RestoreGlobal()
+// 				return
+// 			}
+// 			if n > 0 {
+// 				raw := buffer[:n]
+// 				input := string(raw)
+// 				// Handle escape sequences for Alt + key (don't trim spaces)
+// 				if strings.HasPrefix(input, "\x1b") {
+// 					// Try to create a two-byte sequence if available (ESC + key)
+// 					if n >= 2 {
+// 						seq := string([]byte{raw[0], raw[1]})
+// 						_ = util.RestoreGlobal()
+// 						w.handleAltKey(seq)
+// 						// Re-enable raw mode after handler returns if possible
+// 						if !rawEnabled {
+// 							if _, err := util.EnableRawGlobalAuto(); err == nil {
+// 								rawEnabled = true
+// 							}
+// 						}
+// 						continue
+// 					}
 
-					// Fallback: pass full input string to handler
-					_ = util.RestoreGlobal()
-					w.handleAltKey(input)
-					if !rawEnabled {
-						if _, err := util.EnableRawGlobalAuto(); err == nil {
-							rawEnabled = true
-						}
-					}
-					continue
-				}
+// 					// Fallback: pass full input string to handler
+// 					_ = util.RestoreGlobal()
+// 					w.handleAltKey(input)
+// 					if !rawEnabled {
+// 						if _, err := util.EnableRawGlobalAuto(); err == nil {
+// 							rawEnabled = true
+// 						}
+// 					}
+// 					continue
+// 				}
 
-				// Check for Ctrl+R (0x12) raw byte
-				if buffer[0] == 0x12 {
-					// ensure terminal restored before stopping notify so UI is sane
-					_ = util.RestoreGlobal()
-					w.StopNotify()
-					return
-				}
-				// Check for Ctrl+C (0x03) - force stop and exit
-				if buffer[0] == 0x03 {
-					_ = util.RestoreGlobal()
-					os.Exit(0)
-					return
-				}
-				// Trim spaces for regular keys
-				input = strings.TrimSpace(input)
-				// Check for regular keys
-				switch input {
-				case "R", "r":
-					_ = util.RestoreGlobal()
-					w.HandleReloadCommand()
-					if !rawEnabled {
-						if _, err := util.EnableRawGlobalAuto(); err == nil {
-							rawEnabled = true
-						}
-					}
-				case "S", "s":
-					_ = util.RestoreGlobal()
-					w.HandleShowStatsCommand()
-					if !rawEnabled {
-						if _, err := util.EnableRawGlobalAuto(); err == nil {
-							rawEnabled = true
-						}
-					}
-				case "A", "a":
-					_ = util.RestoreGlobal()
-					w.HandleDeployAgentCommand()
-					if !rawEnabled {
-						if _, err := util.EnableRawGlobalAuto(); err == nil {
-							rawEnabled = true
-						}
-					}
-				}
-			}
-		}
-	}
-}
+// 				// Check for Ctrl+R (0x12) raw byte
+// 				if buffer[0] == 0x12 {
+// 					// ensure terminal restored before stopping notify so UI is sane
+// 					_ = util.RestoreGlobal()
+// 					w.StopNotify()
+// 					return
+// 				}
+// 				// Check for Ctrl+C (0x03) - force stop and exit
+// 				if buffer[0] == 0x03 {
+// 					_ = util.RestoreGlobal()
+// 					os.Exit(0)
+// 					return
+// 				}
+// 				// Trim spaces for regular keys
+// 				input = strings.TrimSpace(input)
+// 				// Check for regular keys
+// 				switch input {
+// 				case "R", "r":
+// 					_ = util.RestoreGlobal()
+// 					w.HandleReloadCommand()
+// 					if !rawEnabled {
+// 						if _, err := util.EnableRawGlobalAuto(); err == nil {
+// 							rawEnabled = true
+// 						}
+// 					}
+// 				case "S", "s":
+// 					_ = util.RestoreGlobal()
+// 					w.HandleShowStatsCommand()
+// 					if !rawEnabled {
+// 						if _, err := util.EnableRawGlobalAuto(); err == nil {
+// 							rawEnabled = true
+// 						}
+// 					}
+// 				case "A", "a":
+// 					_ = util.RestoreGlobal()
+// 					w.HandleDeployAgentCommand()
+// 					if !rawEnabled {
+// 						if _, err := util.EnableRawGlobalAuto(); err == nil {
+// 							rawEnabled = true
+// 						}
+// 					}
+// 				}
+// 			}
+// 		}
+// 	}
+// }
 
 // ...existing code...
 
 // handleAltKey handles Alt + key combinations
-func (w *Watcher) handleAltKey(input string) {
+// func (w *Watcher) handleAltKey(input string) {
 
-	// Clear screen and display menu in one atomic block
-	w.printer.PrintBlock("\033[2J\033[1;1H", false)
+// 	// Clear screen and display menu in one atomic block
+// 	w.printer.PrintBlock("\033[2J\033[1;1H", false)
 
-	switch input {
-	case "\x1br", "\x1br\n", "\x1bR", "\x1bR\n": // Alt + R (reload)
-		w.HandleReloadCommand()
-	case "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9": // Alt + 3-9
-		// Ensure terminal is in normal (cooked) mode before launching promptui
-		// so the interactive selector can read arrow keys and render properly.
-		w.printer.PrintBlock("", true) // ensure any status line cleared
+// 	switch input {
+// 	case "\x1br", "\x1br\n", "\x1bR", "\x1bR\n": // Alt + R (reload)
+// 		w.HandleReloadCommand()
+// 	case "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9": // Alt + 3-9
+// 		// Ensure terminal is in normal (cooked) mode before launching promptui
+// 		// so the interactive selector can read arrow keys and render properly.
+// 		w.printer.PrintBlock("", true) // ensure any status line cleared
 
-		// Detect slot number (ESC + digit). Keep current behavior (show menu)
-		// for now and reserve slot-handling for PTY manager integration.
-		var slot int
-		if strings.HasPrefix(input, "\x1b") && len(input) >= 2 {
-			switch input[1] {
-			case '3':
-				slot = 3
-			case '4':
-				slot = 4
-			case '5':
-				slot = 5
-			case '6':
-				slot = 6
-			case '7':
-				slot = 7
-			case '8':
-				slot = 8
-			case '9':
-				slot = 9
-			}
-		}
+// 		// Detect slot number (ESC + digit). Keep current behavior (show menu)
+// 		// for now and reserve slot-handling for PTY manager integration.
+// 		var slot int
+// 		if strings.HasPrefix(input, "\x1b") && len(input) >= 2 {
+// 			switch input[1] {
+// 			case '3':
+// 				slot = 3
+// 			case '4':
+// 				slot = 4
+// 			case '5':
+// 				slot = 5
+// 			case '6':
+// 				slot = 6
+// 			case '7':
+// 				slot = 7
+// 			case '8':
+// 				slot = 8
+// 			case '9':
+// 				slot = 9
+// 			}
+// 		}
 
-		_ = slot // placeholder for future PTY manager behavior
-		w.Slot = &slot
-		w.showCommandMenuDisplay()
-	default:
-	}
-}
+// 		_ = slot // placeholder for future PTY manager behavior
+// 		w.Slot = &slot
+// 		w.showCommandMenuDisplay()
+// 	default:
+// 	}
+// }
 
 // HandleReloadCommand handles the reload command from user input
 func (w *Watcher) HandleReloadCommand() {
@@ -1558,15 +1657,6 @@ func (w *Watcher) ReloadConfiguration() error {
 	return nil
 }
 
-// ReloadWatchPatterns reloads the file watching patterns
-func (w *Watcher) ReloadWatchPatterns() error {
-	// Reload extended ignores
-	w.extendedIgnores = w.loadExtendedIgnores()
-
-	w.safePrintln("✅ Watch patterns reloaded")
-	return nil
-}
-
 // HandleShowStatsCommand handles the show stats command
 func (w *Watcher) HandleShowStatsCommand() {
 	statsBlock := `
@@ -1605,185 +1695,185 @@ func (w *Watcher) HandleDeployAgentCommand() {
 // If slot is between 3..9, after the user selects a command we will try to
 // create/open a persistent PTY session in that slot and attach to it. If
 // slot == 0 the previous behavior (runRemoteCommand) is used.
-func (w *Watcher) showCommandMenuDisplay() {
-	callback := func(slotNew int) {
-		// w.ptyMgr.PauseSlot(*w.Slot)
-		w.Slot = &slotNew
-		w.ptyMgr.Pendingchan <- "pause"
-	}
-	for {
-		slot := w.Slot
+// func (w *Watcher) showCommandMenuDisplay() {
+// 	callback := func(slotNew int) {
+// 		// w.ptyMgr.PauseSlot(*w.Slot)
+// 		w.Slot = &slotNew
+// 		w.ptyMgr.Pendingchan <- "pause"
+// 	}
+// 	for {
+// 		slot := w.Slot
 
-		if *slot == 1 {
-			w.displayMainMenu()
-			break
-		}
+// 		if *slot == 1 {
+// 			w.displayMainMenu()
+// 			break
+// 		}
 
-		// w.safePrintf("🔄 Focusing existing slot %d...\n", *slot)
-		if w.ptyMgr != nil && w.ptyMgr.HasSlot(*slot) {
-			// If slot already exists, focus it instead of showing menu again
-			if err := w.ptyMgr.Focus(*slot, true, callback); err != nil {
-				w.safePrintf("❌ Failed to focus slot %d: %v\n", *slot, err)
-			}
-			continue
-		}
-		// gather remote commands from config (safe nil checks)
-		var remoteCmds []string
-		if w != nil && w.config != nil && w.config.Devsync.Script.Remote.Commands != nil {
-			remoteCmds = append(remoteCmds, w.config.Devsync.Script.Remote.Commands...)
-		}
+// 		// w.safePrintf("🔄 Focusing existing slot %d...\n", *slot)
+// 		if w.ptyMgr != nil && w.ptyMgr.HasSlot(*slot) {
+// 			// If slot already exists, focus it instead of showing menu again
+// 			if err := w.ptyMgr.Focus(*slot, true, callback); err != nil {
+// 				w.safePrintf("❌ Failed to focus slot %d: %v\n", *slot, err)
+// 			}
+// 			continue
+// 		}
+// 		// gather remote commands from config (safe nil checks)
+// 		var remoteCmds []string
+// 		if w != nil && w.config != nil && w.config.Devsync.Script.Remote.Commands != nil {
+// 			remoteCmds = append(remoteCmds, w.config.Devsync.Script.Remote.Commands...)
+// 		}
 
-		// fallback defaults if none configured
-		if len(remoteCmds) == 0 {
-			remoteCmds = []string{
-				"docker-compose up",
-				"docker-compose down && docker-compose up --build",
-				"docker-compose down && docker-compose up",
-				"tail -f storage/log/*.log >>> my.log",
-				"docker-compose exec app bash -l",
-			}
-		}
+// 		// fallback defaults if none configured
+// 		if len(remoteCmds) == 0 {
+// 			remoteCmds = []string{
+// 				"docker-compose up",
+// 				"docker-compose down && docker-compose up --build",
+// 				"docker-compose down && docker-compose up",
+// 				"tail -f storage/log/*.log >>> my.log",
+// 				"docker-compose exec app bash -l",
+// 			}
+// 		}
 
-		// Build interactive menu items: remote commands first, then Local Console, then Exit
-		items := make([]string, 0, len(remoteCmds)+2)
-		items = append(items, remoteCmds...)
-		items = append(items, "Local Console")
-		items = append(items, "Exit")
+// 		// Build interactive menu items: remote commands first, then Local Console, then Exit
+// 		items := make([]string, 0, len(remoteCmds)+2)
+// 		items = append(items, remoteCmds...)
+// 		items = append(items, "Local Console")
+// 		items = append(items, "Exit")
 
-		// Suspend background printing while the interactive menu is active to
-		// prevent status messages from "leaking" into the prompt.
-		if w != nil && w.printer != nil {
-			w.printer.Suspend()
-		} else {
-			fmt.Print("\x1b[2J\x1b[1;1H")
-		}
+// 		// Suspend background printing while the interactive menu is active to
+// 		// prevent status messages from "leaking" into the prompt.
+// 		if w != nil && w.printer != nil {
+// 			w.printer.Suspend()
+// 		} else {
+// 			fmt.Print("\x1b[2J\x1b[1;1H")
+// 		}
 
-		// Ensure terminal is in cooked mode for promptui
-		_ = util.RestoreGlobal()
+// 		// Ensure terminal is in cooked mode for promptui
+// 		_ = util.RestoreGlobal()
 
-		// Use promptui to show an interactive selectable list (arrow keys)
-		prompt := promptui.Select{
-			Label: "? Remote Console Mode",
-			Items: items,
-			Size:  10,
-			Templates: &promptui.SelectTemplates{
-				Label:    "{{ . }}",
-				Active:   "▸ {{ . | cyan }}",
-				Inactive: "  {{ . }}",
-				Selected: "Selected: {{ . }}",
-			},
-			HideHelp: true,
-		}
+// 		// Use promptui to show an interactive selectable list (arrow keys)
+// 		prompt := promptui.Select{
+// 			Label: "? Remote Console Mode",
+// 			Items: items,
+// 			Size:  10,
+// 			Templates: &promptui.SelectTemplates{
+// 				Label:    "{{ . }}",
+// 				Active:   "▸ {{ . | cyan }}",
+// 				Inactive: "  {{ . }}",
+// 				Selected: "Selected: {{ . }}",
+// 			},
+// 			HideHelp: true,
+// 		}
 
-		i, result, err := prompt.Run()
-		if err != nil {
-			if w != nil && w.printer != nil {
-				w.printer.Resume()
-				w.printer.Printf("❌ Mvfvdfvfenu selection cancelled: %v\n", err)
-			} else {
-				fmt.Printf("❌ jjjjjMenu selection cancelled: %v\n", err)
-			}
-			// re-enable raw mode for keyboard loop and return
-			_, _ = util.EnableRawGlobalAuto()
-			return
-		}
+// 		i, result, err := prompt.Run()
+// 		if err != nil {
+// 			if w != nil && w.printer != nil {
+// 				w.printer.Resume()
+// 				w.printer.Printf("❌ Mvfvdfvfenu selection cancelled: %v\n", err)
+// 			} else {
+// 				fmt.Printf("❌ jjjjjMenu selection cancelled: %v\n", err)
+// 			}
+// 			// re-enable raw mode for keyboard loop and return
+// 			_, _ = util.EnableRawGlobalAuto()
+// 			return
+// 		}
 
-		// re-enable raw mode after prompt so keyboard loop can continue
-		_, _ = util.EnableRawGlobalAuto()
+// 		// re-enable raw mode after prompt so keyboard loop can continue
+// 		_, _ = util.EnableRawGlobalAuto()
 
-		// Handle special items: Exit should return to watcher main menu
-		if result == "Exit" {
-			if w != nil && w.printer != nil {
-				w.printer.PrintBlock("", true)
-				w.printer.Resume()
-				// Re-draw the watcher main menu/status so user sees the watcher again
-				w.displayMainMenu()
-			} else {
-				// ensure terminal cleared
-				fmt.Print("\x1b[2J\x1b[1;1H")
-				w.displayMainMenu()
-			}
-			return
-		}
+// 		// Handle special items: Exit should return to watcher main menu
+// 		if result == "Exit" {
+// 			if w != nil && w.printer != nil {
+// 				w.printer.PrintBlock("", true)
+// 				w.printer.Resume()
+// 				// Re-draw the watcher main menu/status so user sees the watcher again
+// 				w.displayMainMenu()
+// 			} else {
+// 				// ensure terminal cleared
+// 				fmt.Print("\x1b[2J\x1b[1;1H")
+// 				w.displayMainMenu()
+// 			}
+// 			return
+// 		}
 
-		// For other items, publish execution request to event bus so watcher can
-		// execute the command using the existing SSH session. Fall back to calling
-		// runRemoteCommand directly when no EventBus is available.
-		if w != nil && w.printer != nil {
-			w.printer.Printf("Selected: %s (index %d)\n", result, i)
-		} else {
-			fmt.Printf("Selected: %s (index %d)\n", result, i)
-		}
-		// Ensure the printer is resumed so terminal state is normal before starting
-		// the interactive remote session. If a slot was provided we'll use the
-		// PTY manager to Open/Focus the slot; otherwise we call runRemoteCommand.
-		if w != nil && w.printer != nil {
-			w.printer.Resume()
-		}
+// 		// For other items, publish execution request to event bus so watcher can
+// 		// execute the command using the existing SSH session. Fall back to calling
+// 		// runRemoteCommand directly when no EventBus is available.
+// 		if w != nil && w.printer != nil {
+// 			w.printer.Printf("Selected: %s (index %d)\n", result, i)
+// 		} else {
+// 			fmt.Printf("Selected: %s (index %d)\n", result, i)
+// 		}
+// 		// Ensure the printer is resumed so terminal state is normal before starting
+// 		// the interactive remote session. If a slot was provided we'll use the
+// 		// PTY manager to Open/Focus the slot; otherwise we call runRemoteCommand.
+// 		if w != nil && w.printer != nil {
+// 			w.printer.Resume()
+// 		}
 
-		if *slot >= 3 && *slot <= 9 && w != nil && w.ptyMgr != nil {
-			// Build initial command similar to runRemoteCommand so the PTY's
-			// initial command will cd into remote path and run the selected cmd.
-			remotePath := w.config.Devsync.Auth.RemotePath
-			if remotePath == "" {
-				remotePath = "/tmp"
-			}
-			initialCmd := fmt.Sprintf("mkdir -p %s || true && cd %s && bash -c %s ; exec bash",
-				shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
-			isExist := false
-			// If slot not present, try to create it.
-			if !w.ptyMgr.HasSlot(*slot) {
-				fmt.Println("➕ Creating new slot", *slot, "...")
-				if err := w.ptyMgr.OpenRemoteSlot(*slot, initialCmd); err != nil {
-					if w.printer != nil {
-						w.printer.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", slot, err)
-					} else {
-						w.printer.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", slot, err)
-					}
-					// Fallback to simple run
-					w.runRemoteCommand(result)
-					continue
-				}
-			} else {
-				fmt.Println("🔄 Reusing existing slot", *slot, "...")
-				isExist = true
-			}
+// 		if *slot >= 3 && *slot <= 9 && w != nil && w.ptyMgr != nil {
+// 			// Build initial command similar to runRemoteCommand so the PTY's
+// 			// initial command will cd into remote path and run the selected cmd.
+// 			remotePath := w.config.Devsync.Auth.RemotePath
+// 			if remotePath == "" {
+// 				remotePath = "/tmp"
+// 			}
+// 			initialCmd := fmt.Sprintf("mkdir -p %s || true && cd %s && bash -c %s ; exec bash",
+// 				shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
+// 			isExist := false
+// 			// If slot not present, try to create it.
+// 			if !w.ptyMgr.HasSlot(*slot) {
+// 				fmt.Println("➕ Creating new slot", *slot, "...")
+// 				if err := w.ptyMgr.OpenRemoteSlot(*slot, initialCmd); err != nil {
+// 					if w.printer != nil {
+// 						w.printer.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", slot, err)
+// 					} else {
+// 						w.printer.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", slot, err)
+// 					}
+// 					// Fallback to simple run
+// 					w.runRemoteCommand(result)
+// 					continue
+// 				}
+// 			} else {
+// 				fmt.Println("🔄 Reusing existing slot", *slot, "...")
+// 				isExist = true
+// 			}
 
-			// Attach to the slot (this will block until the interactive session exits)
-			if w.printer != nil {
-				w.printer.Suspend()
-			}
-			// fmt.Println("Is exist:", isExist)
-			fmt.Println("🔗 Attaching to slot", *slot, "...")
-			if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
-				if w.printer != nil {
-					w.printer.Printf("⚠️  Failed to focus slot %d: %v\n", slot, err)
-					w.printer.Resume()
-				} else {
-					w.printer.Printf("⚠️  Failed to focus slot %d: %v\n", slot, err)
-				}
-			} else {
-				if w.printer != nil {
-					w.printer.Resume()
-				}
-			}
-		}
+// 			// Attach to the slot (this will block until the interactive session exits)
+// 			if w.printer != nil {
+// 				w.printer.Suspend()
+// 			}
+// 			// fmt.Println("Is exist:", isExist)
+// 			fmt.Println("🔗 Attaching to slot", *slot, "...")
+// 			if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
+// 				if w.printer != nil {
+// 					w.printer.Printf("⚠️  Failed to focus slot %d: %v\n", slot, err)
+// 					w.printer.Resume()
+// 				} else {
+// 					w.printer.Printf("⚠️  Failed to focus slot %d: %v\n", slot, err)
+// 				}
+// 			} else {
+// 				if w.printer != nil {
+// 					w.printer.Resume()
+// 				}
+// 			}
+// 		}
 
-		// Default: run the remote command once using the existing flow.
-		// w.runRemoteCommand(result)
+// 		// Default: run the remote command once using the existing flow.
+// 		// w.runRemoteCommand(result)
 
-		// Terapin disini
+// 		// Terapin disini
 
-		// If event bus present, publish; otherwise run directly in a goroutine
-		// if w != nil && w.eventBus != nil {
-		// 	w.eventBus.Publish("devsync.command.exec.remote", result)
-		// } else if w != nil {
-		// 	w.runRemoteCommand(result)
-		// }
+// 		// If event bus present, publish; otherwise run directly in a goroutine
+// 		// if w != nil && w.eventBus != nil {
+// 		// 	w.eventBus.Publish("devsync.command.exec.remote", result)
+// 		// } else if w != nil {
+// 		// 	w.runRemoteCommand(result)
+// 		// }
 
-		// if w != nil && w.printer != nil {
-		// 	w.printer.Resume()
-		// }
-		continue
-	}
-}
+// 		// if w != nil && w.printer != nil {
+// 		// 	w.printer.Resume()
+// 		// }
+// 		continue
+// 	}
+// }
