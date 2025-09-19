@@ -1,21 +1,795 @@
 package devsync
 
 import (
+	"encoding/json"
 	"fmt"
 	"make-sync/internal/config"
 	"make-sync/internal/devsync/sshclient"
+	"make-sync/internal/util"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/asaskevich/EventBus"
+	"github.com/manifoldco/promptui"
 	"github.com/rjeczalik/notify"
 	"gopkg.in/yaml.v3"
 )
 
+// NewWatcher creates a new file watcher instance
+func NewWatcher(cfg *config.Config) *Watcher {
+	// Calculate watch path
+	watchPath := cfg.LocalPath
+	if watchPath == "" {
+		watchPath = "."
+	}
+	absWatchPath, err := filepath.Abs(watchPath)
+	if err != nil {
+		util.Default.Printf("⚠️  Failed to get absolute watch path: %v\n", err)
+		absWatchPath = watchPath
+	}
+
+	// Initialize SSH client if auth is configured
+	var sshClient *sshclient.SSHClient
+	if cfg.Devsync.Auth.Username != "" && cfg.Devsync.Auth.PrivateKey != "" {
+		var err error
+		// Use persistent SSH client for better performance
+		sshClient, err = sshclient.NewPersistentSSHClient(
+			cfg.Devsync.Auth.Username,
+			cfg.Devsync.Auth.PrivateKey,
+			cfg.Devsync.Auth.Host,
+			cfg.Devsync.Auth.Port,
+		)
+		if err != nil {
+			util.Default.Printf("⚠️  Failed to initialize SSH client: %v\n", err)
+		} else {
+			// Connect to SSH server
+			if err := sshClient.Connect(); err != nil {
+				util.Default.Printf("⚠️  Failed to connect SSH server: %v\n", err)
+				sshClient = nil
+			} else {
+				util.Default.Printf("🔗 SSH client connected successfully\n")
+
+				// Start persistent session for continuous monitoring
+				if err := sshClient.StartPersistentSession(); err != nil {
+					util.Default.Printf("⚠️  Failed to start persistent session: %v\n", err)
+					sshClient = nil
+				} else {
+					util.Default.Printf("🔄 Persistent SSH session started\n")
+				}
+			}
+		}
+	}
+
+	// Initialize file cache
+	var fileCache *FileCache
+	if sshClient != nil {
+		// Create .sync_temp directory if it doesn't exist
+		syncTempDir := ".sync_temp"
+		if err := os.MkdirAll(syncTempDir, 0755); err != nil {
+			util.Default.Printf("⚠️  Failed to create .sync_temp directory: %v\n", err)
+		} else {
+			dbPath := filepath.Join(syncTempDir, "file_cache.db")
+			var err error
+			fileCache, err = NewFileCache(dbPath, absWatchPath)
+			if err != nil {
+				util.Default.Printf("⚠️  Failed to initialize file cache: %v\n", err)
+			} else {
+				util.Default.Printf("💾 File cache initialized: %s\n", dbPath)
+
+				// Reset cache if configured
+				if cfg.ResetCache {
+					if err := fileCache.ResetCache(); err != nil {
+						util.Default.Printf("⚠️  Failed to reset cache: %v\n", err)
+					}
+				}
+			}
+		}
+	}
+
+	// Build and deploy agent if SSH client is available
+	watcher := &Watcher{
+		config:     cfg,
+		watchPath:  absWatchPath,
+		watchChan:  make(chan notify.EventInfo, 100),
+		done:       make(chan bool),
+		eventChan:  make(chan FileEvent, 100),
+		lastEvents: make(map[string]FileEvent),
+		sshClient:  sshClient,
+		fileCache:  fileCache,
+		// sessions:        make(map[string]*Session),
+		sessionCounter:  0,
+		keyboardStop:    make(chan bool, 1),
+		keyboardRestart: make(chan bool, 1),
+		eventBus:        EventBus.New(),
+		printer:         util.Default,
+		Slot:            nil,
+	}
+
+	// Initialize command manager after watcher is created
+	watcher.commands = NewCommandManager(watcher)
+
+	// Initialize PTY manager for persistent remote sessions (Alt+3..9)
+	watcher.ptyMgr = NewPTYManager(watcher)
+
+	// Subscribe to remote command exec events so Alt-menu can request execution
+	// if watcher.eventBus != nil {
+	// 	watcher.eventBus.Subscribe("devsync.command.exec.remote", func(cmd string) {
+	// 		go watcher.runRemoteCommand(cmd)
+	// 	})
+
+	// 	// Subscribe to menu show requests so keyboard goroutine can ask main
+	// 	// watcher to display the prompt from a safe goroutine.
+	// 	watcher.eventBus.Subscribe("devsync.menu.show", func() {
+	// 		go func() {
+	// 			// Attempt to stop keyboard handler before taking over terminal
+	// 			if watcher.keyboardStop != nil {
+	// 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// 				defer cancel()
+	// 				select {
+	// 				case watcher.keyboardStop <- true:
+	// 					// stopped
+	// 				case <-ctx.Done():
+	// 					watcher.printer.PrintBlock("⚠️  timeout waiting for keyboard handler to stop\n", true)
+	// 				}
+	// 			}
+
+	// 			// Show the menu (this will resume printing internally)
+	// 			watcher.showCommandMenuDisplay(0)
+
+	// 			// Signal keyboard restart (non-blocking)
+	// 			if watcher.keyboardRestart != nil {
+	// 				select {
+	// 				case watcher.keyboardRestart <- true:
+	// 				default:
+	// 				}
+	// 			}
+	// 		}()
+	// 	})
+	// }
+
+	// build & deploy
+	if err := watcher.buildAndDeployAgent(); err != nil {
+		watcher.safePrintf("⚠️  Failed to build/deploy agent: %v\n", err)
+	}
+
+	// sync config
+	if err := watcher.syncConfigToRemote(); err != nil {
+		watcher.safePrintf("⚠️  Failed to sync config to remote: %v\n", err)
+	}
+
+	// start monitoring
+	if err := watcher.startAgentMonitoring(); err != nil {
+		watcher.safePrintf("⚠️  Failed to start agent monitoring: %v\n", err)
+	}
+
+	return watcher
+}
+
+// generateRemoteConfig generates minimal configuration for remote agent
+func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
+	newCfg, err := config.LoadAndRenderConfig()
+	if err != nil {
+		return &RemoteAgentConfig{}
+	}
+
+	// Update current config reference
+	w.config = newCfg
+
+	// Create remote config with necessary fields
+	config := &RemoteAgentConfig{}
+
+	config.Devsync.Ignores = w.config.Devsync.Ignores
+	config.Devsync.AgentWatchs = w.config.Devsync.AgentWatchs
+	config.Devsync.ManualTransfer = w.config.Devsync.ManualTransfer
+	config.Devsync.WorkingDir = w.config.Devsync.Auth.RemotePath
+
+	return config
+}
+
+// configToJSON converts config struct to JSON string
+func (w *Watcher) configToJSON(cfg *RemoteAgentConfig) (string, error) {
+	// Convert struct to JSON with indentation
+	jsonBytes, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config to JSON: %v", err)
+	}
+
+	return string(jsonBytes), nil
+}
+
+// uploadConfigToRemote uploads config content to remote file
+func (w *Watcher) uploadConfigToRemote(configContent, remotePath string) error {
+	// Create temporary local file
+	tempFile, err := os.CreateTemp("", "remote-config-*.json")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+	// Write config content to temp file
+	if _, err := tempFile.WriteString(configContent); err != nil {
+		return fmt.Errorf("failed to write config to temp file: %v", err)
+	}
+	tempFile.Close()
+
+	// Upload temp file to remote
+	if err := w.sshClient.SyncFile(tempFile.Name(), remotePath); err != nil {
+		return fmt.Errorf("failed to upload config file: %v", err)
+	}
+
+	return nil
+}
+
+// joinRemotePath joins path components using forward slashes (/) for remote paths
+// This ensures compatibility with remote servers (typically Linux/Unix)
+func (w *Watcher) joinRemotePath(elem ...string) string {
+	if len(elem) == 0 {
+		return ""
+	}
+	if len(elem) == 1 {
+		return elem[0]
+	}
+
+	// Start with first element
+	result := elem[0]
+
+	// Join remaining elements with forward slash
+	for i := 1; i < len(elem); i++ {
+		if result != "" && !strings.HasSuffix(result, "/") {
+			result += "/"
+		}
+		elem[i] = strings.TrimPrefix(elem[i], "/")
+		result += elem[i]
+	}
+
+	return result
+}
+
+// shellEscape escapes single quotes for safe inclusion in single-quoted shell strings
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// startAgentMonitoring starts continuous monitoring of the remote agent
+func (w *Watcher) startAgentMonitoring() error {
+	if w.sshClient == nil || !w.sshClient.IsPersistent() {
+		return fmt.Errorf("persistent SSH client not available")
+	}
+
+	w.safePrintln("👀 Starting continuous agent monitoring...")
+
+	// Get the remote agent path
+	remoteBase := w.config.Devsync.Auth.RemotePath
+	if remoteBase == "" {
+		return fmt.Errorf("remote base path is empty or not configured")
+	}
+	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
+	remoteAgentPath := w.joinRemotePath(remoteSyncTemp, "sync-agent")
+
+	// Start agent watch command in background - run once and keep it running
+	watchCmd := fmt.Sprintf("cd %s && chmod +x %s && %s watch", remoteBase, remoteAgentPath, remoteAgentPath)
+
+	// fmt.Printf("🚀 Starting agent with command: %s\n", watchCmd)
+
+	// Start the agent in a goroutine and keep it running
+	go func() {
+		for {
+			if w.sshClient.GetSession() == nil {
+				w.safePrintln("⚠️  SSH session lost, attempting to restart...")
+				if err := w.sshClient.StartPersistentSession(); err != nil {
+					w.safePrintf("❌ Failed to restart SSH session: %v\n", err)
+					time.Sleep(5 * time.Second)
+					continue
+				}
+			}
+
+			// fmt.Println("🔄 Starting agent watch command...")
+
+			// Execute the watch command - this should run continuously
+			if err := w.runAgentWatchCommand(watchCmd); err != nil {
+				w.safePrintf("⚠️  Agent watch command failed: %v\n", err)
+
+				// If session failed, try to restart
+				if strings.Contains(err.Error(), "session") || strings.Contains(err.Error(), "broken pipe") {
+					w.safePrintln("🔌 SSH session broken, stopping current session...")
+					w.sshClient.StopAgentSession()
+					time.Sleep(3 * time.Second)
+					continue
+				}
+			}
+
+			// If we reach here, the command completed (which it shouldn't for a watch command)
+			// This means the agent stopped unexpectedly
+			w.safeStatusln("⚠️  Agent watch command completed unexpectedly, restarting in 5 seconds...")
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
+	return nil
+}
+
+// runAgentWatchCommand runs the agent watch command and handles its output stream
+func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
+	// Print the command with a single blank line before it to reduce visual clutter
+	w.safeStatusln("🚀 Running agent watch command: %s", watchCmd)
+
+	// Use streaming output for continuous monitoring
+	outputChan, errorChan, err := w.sshClient.RunCommandWithStream(watchCmd)
+	if err != nil {
+		return fmt.Errorf("failed to start agent watch command: %v", err)
+	}
+
+	// Hide cursor while streaming and print a one-line status
+	w.hideCursor()
+	w.safeStatusln("📡 Agent watch command started, monitoring output stream...")
+
+	// Process output in real-time
+	for {
+		select {
+		case output, ok := <-outputChan:
+			if !ok {
+				// Channel closed, agent command finished
+				// Restore cursor visibility before returning
+				w.showCursor()
+				w.safePrintln("📡 Agent output channel closed")
+				return nil
+			}
+			if output == "" {
+				continue
+			}
+			w.processAgentOutput(output)
+
+		case err, ok := <-errorChan:
+			if !ok {
+				// Channel closed
+				// Restore cursor visibility before returning
+				w.showCursor()
+				w.safeStatusln("📡 Agent error channel closed")
+				return nil
+			}
+			if err != nil {
+				// Restore cursor before propagating error
+				w.showCursor()
+				w.safePrintf("⚠️  Agent output error: %v\n", err)
+				return err
+			}
+
+		case <-time.After(3000 * time.Second):
+			// Restore cursor before returning
+			w.showCursor()
+			w.safePrintln("⏰ Agent monitoring timeout - command may still be running")
+			return fmt.Errorf("agent monitoring timeout")
+		}
+	}
+}
+
+// processAgentOutput processes the JSON output from the remote agent
+func (w *Watcher) processAgentOutput(output string) {
+	if strings.TrimSpace(output) == "" {
+		return
+	}
+
+	// fmt.Printf("📨 Agent output: %s\n", output)
+
+	// Parse structured output from agent
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		// Parse line format: [timestamp] TYPE|data|path
+		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
+			parts := strings.SplitN(line, "]", 2)
+			if len(parts) != 2 {
+				continue
+			}
+
+			content := strings.TrimSpace(parts[1])
+			if strings.HasPrefix(content, "EVENT|") {
+				// Parse event: EVENT|EventType|path
+				eventParts := strings.Split(content, "|")
+				if len(eventParts) >= 3 {
+					eventType := eventParts[1]
+					filePath := eventParts[2]
+					// Handle file events
+					w.handleFileDownloadEvent(eventType, filePath)
+				}
+			} else if strings.HasPrefix(content, "HASH|") {
+				// Parse hash: HASH|path|hash_value
+				hashParts := strings.Split(content, "|")
+				if len(hashParts) >= 3 {
+					filePath := hashParts[1]
+					hashValue := hashParts[2]
+
+					// Determine remote base and try to compute relative path
+					localPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
+
+					// Map to local path under watchPath
+					var err error
+					// Compute local hash
+					var localHash string
+					if w.fileCache != nil {
+						localHash, err = w.fileCache.CalculateFileHash(localPath)
+						if err != nil {
+							localHash = ""
+						}
+					}
+
+					// fmt.Println("🧾 Received hash info - Remote:", filePath, "Local:", localPath, "Remote Hash:", hashValue, "Local Hash:", localHash)
+
+					if localHash == hashValue {
+						// If hashes match, no action needed
+						return
+					} else {
+						// Try to download the file from remote to local
+						remoteBase := w.config.Devsync.Auth.RemotePath
+						if remoteBase == "" {
+							remoteBase = "."
+						}
+						currentHash, _ := w.fileCache.CalculateFileHash(filePath)
+
+						if currentHash == hashValue {
+							w.safePrintf("✅ Remote file %s already in cache with matching hash, skipping download\n", filePath)
+							continue
+						}
+
+						w.safePrintf("💾 Downloading remote file to local: %s -> %s\n", filePath, localPath)
+						if err := w.fileCache.UpdateMetaDataFromDownload(localPath, hashValue); err != nil {
+							w.safePrintf("⚠️  Failed to update cache for %s: %v\n", localPath, err)
+						}
+						if err := w.sshClient.DownloadFile(localPath, filePath); err != nil {
+							w.safePrintf("❌ Failed to download file %s from remote: %v\n", localPath, err)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// handleFileEvent handles individual file events from agent
+func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
+
+	// Only sync for Create and Write events
+	// Handle delete events explicitly - accept common variants from agent
+	if eventType == "Delete" || eventType == "Remove" || strings.HasSuffix(eventType, ".Remove") || strings.Contains(eventType, "Delete") {
+		w.safePrintf("🗑️  Received delete event for %s\n", filePath)
+
+		// Map remote path to local path
+		relPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
+
+		// Attempt to remove local file or directory
+		if err := os.RemoveAll(relPath); err != nil {
+			w.safePrintf("❌ Failed to delete local path %s: %v\n", relPath, err)
+		} else {
+			w.safePrintf("✅ Deleted local path: %s\n", relPath)
+
+			// Remove metadata from cache if available
+			if w.fileCache != nil {
+				if err := w.fileCache.DeleteFileMetadata(relPath); err != nil {
+					w.safePrintf("⚠️  Failed to delete metadata for %s: %v\n", relPath, err)
+				}
+			}
+		}
+
+		return
+	}
+}
+
+// StopAgentMonitoring stops the continuous agent monitoring
+func (w *Watcher) StopAgentMonitoring() error {
+	if w.sshClient != nil {
+		return w.sshClient.StopAgentSession()
+	}
+	return nil
+}
+
+// syncConfigToRemote syncs the current configuration to remote .sync_temp/config.json
+func (w *Watcher) syncConfigToRemote() error {
+	if w.sshClient == nil {
+		return nil
+	}
+
+	// generate remote config JSON
+	cfg := w.generateRemoteConfig()
+	configJSON, err := w.configToJSON(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to convert config to JSON: %v", err)
+	}
+
+	// compute remote path for .sync_temp/config.json
+	remoteBase := w.config.Devsync.Auth.RemotePath
+	if remoteBase == "" {
+		remoteBase = "."
+	}
+	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
+	remoteConfigPath := w.joinRemotePath(remoteSyncTemp, "config.json")
+
+	// Print remote path and dump config atomically. Add one blank line before the block
+	w.safePrintf("📤 Syncing config to: %s\n", remoteConfigPath)
+	w.safePrintf("📄 Config content:\n")
+	// Use PrintBlock to atomically print multi-line JSON and clear any single-line status
+	w.printer.PrintBlock(configJSON, true)
+	// Upload config to remote via SSH
+	if err := w.uploadConfigToRemote(configJSON, remoteConfigPath); err != nil {
+		return fmt.Errorf("failed to upload config: %v", err)
+	}
+
+	w.safePrintln("✅ Config synced successfully to remote")
+	return nil
+}
+
+// safePrintf prints using a mutex to avoid interleaving with other goroutines
+func (w *Watcher) safePrintf(format string, a ...interface{}) {
+	w.printer.Printf(format, a...)
+}
+
+// safePrintln prints a line using a mutex to avoid interleaving with other goroutines
+func (w *Watcher) safePrintln(a ...interface{}) {
+	w.printer.Println(a...)
+}
+
+// safeStatus writes a single-line status at the start of the line (clears remainder)
+func (w *Watcher) safeStatus(format string, a ...interface{}) {
+	// Print clear-line and formatted status as a single atomic block to
+	// prevent other goroutines from interleaving prints between the clear
+	// and the status text.
+	if w != nil && w.printer != nil {
+		w.printer.PrintBlock(fmt.Sprintf(format, a...), true)
+	} else {
+		// fallback: emulate same behavior
+		fmt.Print("\r\x1b[K")
+		fmt.Printf(format, a...)
+	}
+}
+
+// safeStatusln writes a single-line status and appends a newline
+func (w *Watcher) safeStatusln(format string, a ...interface{}) {
+	// Use PrintBlock to atomically clear the line and print the status with newline
+	if w != nil && w.printer != nil {
+		w.printer.PrintBlock(fmt.Sprintf(format, a...), true)
+	} else {
+		fmt.Print("\r\x1b[K")
+		fmt.Printf(format+"\n", a...)
+	}
+}
+
+// hideCursor hides the terminal cursor (thread-safe)
+func (w *Watcher) hideCursor() {
+	w.printer.Print("\x1b[?25l")
+}
+
+// showCursor shows the terminal cursor (thread-safe)
+func (w *Watcher) showCursor() {
+	w.printer.Print("\x1b[?25h")
+}
+
+// buildAndDeployAgent builds the agent for target OS and deploys it
+func (w *Watcher) buildAndDeployAgent() error {
+	if w.sshClient == nil {
+		w.safePrintln("⚠️  SSH client not available, skipping agent deployment")
+		return nil
+	}
+
+	w.safePrintln("🔨 Building sync agent for target OS...")
+
+	// Determine target OS from config
+	targetOS := w.config.Devsync.OSTarget
+	if targetOS == "" {
+		targetOS = "linux" // Default to linux
+	}
+
+	// Build agent for target platform
+	agentPath, err := w.buildAgentForTarget(targetOS)
+	if err != nil {
+		w.safePrintf("⚠️  Build failed for agent: %v\n", err)
+
+		// As fallback, check if a pre-built binary exists in project root
+		projectRoot := filepath.Dir(w.watchPath)
+		fallbackName := fmt.Sprintf("sync-agent-%s", targetOS)
+		if targetOS == "windows" {
+			fallbackName += ".exe"
+		}
+		fallbackPath := filepath.Join(projectRoot, fallbackName)
+		if _, statErr := os.Stat(fallbackPath); statErr == nil {
+			w.safePrintf("ℹ️  Found existing agent binary: %s - will use it as fallback\n", fallbackPath)
+			// Use the fallback binary name (relative) to deploy
+			agentPath = fallbackName
+		} else {
+			return fmt.Errorf("no fallback agent found at %s and build failed: %v", fallbackPath, err)
+		}
+	}
+
+	w.safePrintf("📦 Agent built successfully: %s\n", agentPath)
+
+	// Deploy agent to remote server
+	if err := w.deployAgentToRemote(agentPath); err != nil {
+		return fmt.Errorf("failed to deploy agent: %v", err)
+	}
+
+	w.safePrintln("✅ Agent deployed successfully to remote server")
+	return nil
+}
+
+// buildAgentForTarget builds the agent executable for the specified target OS
+func (w *Watcher) buildAgentForTarget(targetOS string) (string, error) {
+	// Get the project root directory (parent of current working directory)
+	projectRoot := filepath.Dir(w.watchPath)
+	agentSourceDir := filepath.Join(projectRoot, "sub_app", "agent")
+	agentBinaryName := fmt.Sprintf("sync-agent-%s", targetOS)
+
+	// Determine GOOS based on target OS
+	var goos string
+	switch targetOS {
+	case "linux":
+		goos = "linux"
+	case "windows":
+		goos = "windows"
+		agentBinaryName += ".exe"
+	case "darwin":
+		goos = "darwin"
+	default:
+		goos = "linux"
+	}
+
+	// Build command with absolute path
+	buildCmd := fmt.Sprintf("cd %s && GOOS=%s go build -o %s .", agentSourceDir, goos, filepath.Join(projectRoot, agentBinaryName))
+
+	// Execute build
+	if err := w.executeLocalCommand(buildCmd); err != nil {
+		return "", fmt.Errorf("build failed: %v", err)
+	}
+
+	return agentBinaryName, nil
+}
+
+// deployAgentToRemote deploys the agent binary to the remote server
+func (w *Watcher) deployAgentToRemote(agentPath string) error {
+	// Get absolute path for the agent binary
+	projectRoot := filepath.Dir(w.watchPath)
+	absAgentPath := filepath.Join(projectRoot, agentPath)
+
+	// Get the remote base path from config
+	remoteBase := w.config.Devsync.Auth.RemotePath
+	if remoteBase == "" {
+		remoteBase = "." // fallback to current directory
+	}
+	// Create .sync_temp directory on remote using full path (always use / for remote)
+	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
+	remoteCmd := fmt.Sprintf("mkdir -p %s", remoteSyncTemp)
+	if err := w.sshClient.RunCommand(remoteCmd); err != nil {
+		return fmt.Errorf("failed to create remote .sync_temp: %v", err)
+	}
+
+	w.safePrintf("📁 Created .sync_temp directory on remote server: %s\n", remoteSyncTemp)
+
+	// Upload agent binary to remote .sync_temp directory
+	remoteAgentPath := w.joinRemotePath(remoteSyncTemp, "sync-agent")
+	w.safePrintf("📦 Deploying agent to remote path: %s\n", remoteAgentPath)
+	// Check if agent already exists and compare identity
+	if w.shouldSkipAgentUpload(absAgentPath, remoteAgentPath) {
+		w.safePrintln("⏭️  Agent already up-to-date, skipping upload")
+		// return nil
+	} else {
+		w.safePrintln("📦 Uploading new agent to remote server...")
+		// fmt.Println("absolute agent path:", absAgentPath)
+		// fmt.Println("remote agent path:", remoteAgentPath)
+		if err := w.sshClient.SyncFile(absAgentPath, remoteAgentPath); err != nil {
+			w.safePrintf("err: %v\n", err)
+			return fmt.Errorf("failed to upload agent: %v", err)
+		}
+	}
+	// Make agent executable on remote
+	remoteCmd = fmt.Sprintf("chmod +x %s", remoteAgentPath)
+	if err := w.sshClient.RunCommand(remoteCmd); err != nil {
+		return fmt.Errorf("failed to make agent executable: %v", err)
+	}
+
+	// Final verification - check agent permissions
+	if output, err := w.sshClient.RunCommandWithOutput(fmt.Sprintf("ls -la %s", remoteAgentPath)); err != nil {
+		w.safePrintf("⚠️  Could not verify agent permissions: %v\n", err)
+	} else {
+		w.safePrintf("✅ Agent permissions verified:\n%s", output)
+	}
+
+	return nil
+}
+
+// shouldSkipAgentUpload checks if agent upload should be skipped by comparing identities
+func (w *Watcher) shouldSkipAgentUpload(localAgentPath, remoteAgentPath string) bool {
+	w.safePrintln("🔍 Checking if agent upload can be skipped...")
+
+	// Check if remote agent exists
+	checkCmd := fmt.Sprintf("test -f %s && echo 'exists' || echo 'not_exists'", remoteAgentPath)
+	if output, err := w.sshClient.RunCommandWithOutput(checkCmd); err != nil {
+		w.safePrintf("⚠️  Could not check remote agent existence: %v\n", err)
+		return false // Don't skip if we can't check
+	} else if strings.TrimSpace(output) != "exists" {
+		w.safePrintln("📦 Remote agent doesn't exist, upload required")
+		return false // Agent doesn't exist, need to upload
+	}
+
+	w.safePrintln("📦 Remote agent exists, checking identity...")
+
+	// Get local agent identity
+	localIdentity, err := w.getLocalAgentIdentity(localAgentPath)
+	if err != nil {
+		w.safePrintf("⚠️  Could not get local agent identity: %v\n", err)
+		return false // Don't skip if we can't get local identity
+	}
+
+	// Get remote agent identity
+	remoteIdentityCmd := fmt.Sprintf("cd %s && chmod +x sync-agent && ./sync-agent identity", filepath.Dir(remoteAgentPath))
+	if output, err := w.sshClient.RunCommandWithOutput(remoteIdentityCmd); err != nil {
+		w.safePrintf("⚠️  Could not get remote agent identity: %v\n", err)
+		return false // Don't skip if we can't get remote identity
+	} else {
+		remoteIdentity := strings.TrimSpace(output)
+
+		w.safePrintf("🔢 Local agent identity:  %s\n", localIdentity)
+		w.safePrintf("🔢 Remote agent identity: %s\n", remoteIdentity)
+
+		if localIdentity == remoteIdentity {
+			// fmt.Println("✅ Agent identities match, skipping upload")
+			return true // Skip upload
+		} else {
+			w.safePrintln("🔄 Agent identities differ, upload required")
+			return false // Need to upload
+		}
+	}
+}
+
+// getLocalAgentIdentity gets the identity hash of the local agent binary
+func (w *Watcher) getLocalAgentIdentity(agentPath string) (string, error) {
+	// Execute local agent with identity command
+	identityCmd := fmt.Sprintf("%s identity", agentPath)
+	output, err := w.executeLocalCommandWithOutput(identityCmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to get local agent identity: %v", err)
+	}
+
+	// The output should be just the hash
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 0 {
+		return "", fmt.Errorf("no identity output from local agent")
+	}
+
+	// Get the last line which should contain the hash
+	return strings.TrimSpace(lines[len(lines)-1]), nil
+}
+
+// executeLocalCommand executes a command locally
+func (w *Watcher) executeLocalCommand(cmd string) error {
+	w.safePrintf("🔧 Executing: %s\n", cmd)
+
+	// Execute the command using bash -c for complex commands
+	command := exec.Command("bash", "-c", cmd)
+	command.Dir = "." // Execute in current directory
+
+	output, err := command.CombinedOutput()
+	if err != nil {
+		w.safePrintf("❌ Command failed: %v\n", err)
+		w.safePrintf("Output: %s\n", string(output))
+		return err
+	}
+
+	if len(output) > 0 {
+		w.safePrintf("✅ Command output: %s\n", string(output))
+	}
+
+	return nil
+}
+
 // Start begins watching files in the configured directory
 func (w *Watcher) Start() error {
+
 	// Get the watch path from config
 	watchPath := w.config.LocalPath
 	if watchPath == "" {
@@ -28,12 +802,21 @@ func (w *Watcher) Start() error {
 		return fmt.Errorf("failed to get absolute path for %s: %v", watchPath, err)
 	}
 
-	fmt.Printf("🔍 Starting file watcher on: %s\n", absWatchPath)
-	fmt.Printf("📋 Watch permissions - Add: %v, Change: %v, Unlink: %v, UnlinkFolder: %v\n",
+	w.safePrintf("🔍 Starting file watcher on: %s\n", absWatchPath)
+	w.safePrintf("📋 Watch permissions - Add: %v, Change: %v, Unlink: %v, UnlinkFolder: %v\n",
 		w.config.TriggerPerm.Add,
 		w.config.TriggerPerm.Change,
 		w.config.TriggerPerm.Unlink,
 		w.config.TriggerPerm.UnlinkFolder)
+
+	if w.watchChan == nil {
+		// reset so StopNotify can be called again later
+		w.notifyStopOnce = sync.Once{}
+		w.notifyStopped = make(chan struct{})
+
+		// close immediately only if processEvents already returned; otherwise defer will close
+		w.watchChan = make(chan notify.EventInfo, 100)
+	}
 
 	// Setup recursive watching
 	watchPattern := filepath.Join(absWatchPath, "...")
@@ -45,16 +828,32 @@ func (w *Watcher) Start() error {
 	// Start keyboard input handler goroutine
 	go w.handleKeyboardInput()
 
+	// Start session completion event handler
+	go w.handleSessionCompletionEvents()
+
 	// Start event processing goroutine
 	go w.processEvents()
 
-	fmt.Printf("✅ File watcher started successfully\n")
-	fmt.Printf("💡 Press Ctrl+C to stop watching, R+Enter to reload .sync_ignore, S+Enter to show cache stats, A+Enter to deploy agent\n\n")
+	w.safeStatus("✅ File watcher started successfully\n")
+	w.safeStatus("💡 Press Ctrl+C to stop watching, R+Enter to reload .sync_ignore, S+Enter to show cache stats, A+Enter to deploy agent\n")
 
-	// Wait for done signal
-	<-w.done
+	// Wait for done signal or notifyStopped (StopNotify requested)
+	if w.notifyStopped == nil {
+		// ensure channel exists to avoid nil receive in select
+		w.notifyStopped = make(chan struct{})
+		// close immediately only if processEvents already returned; otherwise defer will close
+		// we leave it empty here; processEvents will close it when exiting
+	}
 
-	return nil
+	select {
+	case <-w.done:
+		w.safePrintln("done:", w.notifyStopped)
+		return nil
+	case <-w.notifyStopped:
+		w.safePrintln("notifyStopped:", w.notifyStopped)
+		// notify subsystem stopped -> return to menu
+		return nil
+	}
 }
 
 // Stop stops the file watcher
@@ -62,22 +861,22 @@ func (w *Watcher) Stop() {
 	// Close file cache if exists
 	if w.fileCache != nil {
 		if totalFiles, totalSize, err := w.fileCache.GetFileStats(); err == nil {
-			fmt.Printf("💾 Cache stats: %d files, %.2f MB\n", totalFiles, float64(totalSize)/(1024*1024))
+			w.safePrintf("💾 Cache stats: %d files, %.2f MB\n", totalFiles, float64(totalSize)/(1024*1024))
 		}
 
 		if err := w.fileCache.Close(); err != nil {
-			fmt.Printf("⚠️  Failed to close file cache: %v\n", err)
+			w.safePrintf("⚠️  Failed to close file cache: %v\n", err)
 		} else {
-			fmt.Printf("💾 File cache closed\n")
+			w.safePrintln("💾 File cache closed")
 		}
 	}
 
 	// Close SSH connection if exists
 	if w.sshClient != nil {
 		if err := w.sshClient.Close(); err != nil {
-			fmt.Printf("⚠️  Failed to close SSH connection: %v\n", err)
+			w.safePrintf("⚠️  Failed to close SSH connection: %v\n", err)
 		} else {
-			fmt.Printf("🔌 SSH connection closed\n")
+			w.safePrintln("🔌 SSH connection closed")
 		}
 	}
 
@@ -91,15 +890,43 @@ func (w *Watcher) Stop() {
 // processEvents processes file system events
 func (w *Watcher) processEvents() {
 
+	// Ensure notifyStopped is initialized so StopNotify can wait on it
+	if w.notifyStopped == nil {
+		w.notifyStopped = make(chan struct{})
+	}
+
+	defer func() {
+		// signal that notify processing stopped
+		close(w.notifyStopped)
+	}()
+
 	for {
 		select {
-		case event := <-w.watchChan:
-			// fmt.Println("Received event:", event)
+		case event, ok := <-w.watchChan:
+			if !ok {
+				// watch channel closed - return
+				return
+			}
 			w.handleEvent(event)
 		case <-w.done:
 			return
 		}
 	}
+}
+
+// handleSessionCompletionEvents handles session completion events via EventBus
+func (w *Watcher) handleSessionCompletionEvents() {
+	// Subscribe to session completion events
+	if w.eventBus == nil {
+		return
+	}
+	w.eventBus.Subscribe("session:completed", func(sessionName string) {
+		// If no active sessions remain, clear screen and show main menu
+		if !w.hasActiveSession() {
+			w.printer.PrintBlock("\033[2J\033[1;1H", false)
+			w.displayMainMenu()
+		}
+	})
 }
 
 // handleEvent processes a single file system event
@@ -157,7 +984,135 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 	// w.displayEvent(fileEvent)
 
 	// Execute scripts if configured
-	w.executeScripts(fileEvent)
+	w.ExecuteScripts(fileEvent)
+}
+
+// ExecuteScripts executes configured scripts for file events
+func (w *Watcher) ExecuteScripts(event FileEvent) {
+
+	// Handle SSH sync / delete if SSH client is available
+	if w.sshClient != nil {
+		if event.EventType == EventRemove {
+			// Map local path to remote path and attempt to remove remotely
+			remotePath := strings.ReplaceAll(event.Path, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
+			// Final failsafe: don't try to delete .sync_temp on remote
+			if strings.Contains(remotePath, ".sync_temp") {
+				w.safePrintf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remotePath)
+			} else {
+				// Use rm -rf to remove files or directories on remote side
+				cmd := fmt.Sprintf("rm -rf '%s'", remotePath)
+				w.safePrintf("📤 Deleting remote path: %s\n", remotePath)
+				if err := w.sshClient.RunCommand(cmd); err != nil {
+					w.safePrintf("❌ Failed to delete remote path %s: %v\n", remotePath, err)
+				} else {
+					w.safePrintf("✅ Remote delete succeeded: %s\n", remotePath)
+				}
+			}
+
+			// Remove metadata from file cache if available
+			if w.fileCache != nil {
+				if err := w.fileCache.DeleteFileMetadata(event.Path); err != nil {
+					w.safePrintf("⚠️  Failed to delete metadata for %s: %v\n", event.Path, err)
+				} else {
+					w.safePrintf("🗑️  Deleted cache metadata for %s\n", event.Path)
+				}
+			}
+		} else {
+			// For create/write events, sync file normally
+			isDifferent, err := w.fileCache.ShouldSyncFile(event.Path)
+			if err != nil {
+				w.safePrintf("⚠️  Cache check error for %s: %v\n", event.Path, err)
+				return
+			}
+			if !isDifferent {
+				w.safeStatus("ℹ️  File unchanged, skipping sync: %s\n", event.Path)
+				return
+			}
+			w.syncFileViaSSH(event)
+		}
+	}
+}
+
+// StopNotify stops only the file-notify subsystem (file watching). It is idempotent
+// and will signal when the notify loop has fully stopped by closing notifyStopped.
+// ...existing code...
+func (w *Watcher) StopNotify() {
+	// idempotent stop via sync.Once
+	w.notifyStopOnce.Do(func() {
+		// protect against panics from notify.Stop or close
+		w.safeStatusln("\n🛑 Stopping file watcher...")
+		time.Sleep(3 * time.Second)
+		if w.watchChan != nil {
+			// Stop notify library watchers (safe to call multiple times)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						w.safePrintf("⚠️  notify.Stop panic recovered: %v\n", r)
+					}
+				}()
+				notify.Stop(w.watchChan)
+			}()
+
+			// Close our watch channel to signal processEvents to exit.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// already closed by someone else — ignore
+					}
+				}()
+				close(w.watchChan)
+			}()
+		}
+	})
+
+	// Wait for processEvents() to acknowledge shutdown by closing notifyStopped
+	if w.notifyStopped == nil {
+		// if processEvents not started, nothing to wait for
+		return
+	}
+	select {
+	case <-w.notifyStopped:
+		// stopped normally
+	case <-time.After(5 * time.Second):
+		w.safePrintf("⚠️  StopNotify: timeout waiting for notify to stop\n")
+	}
+
+	// safe to nil the channel reference now (prevents accidental reuse)
+	w.watchChan = nil
+}
+
+// syncFileViaSSH syncs a file to remote server via SSH
+func (w *Watcher) syncFileViaSSH(event FileEvent) {
+	if w.sshClient == nil {
+		w.safePrintf("❌ SSH client not available for file sync\n")
+		return
+	}
+
+	localPath := event.Path
+	remotePath := strings.ReplaceAll(localPath, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
+
+	// Create remote directory if it doesn't exist
+	remoteDir := filepath.Dir(remotePath)
+	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
+	if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
+		w.safePrintf("❌ Failed to create remote directory %s: %v\n", remoteDir, err)
+		return
+	}
+
+	// Upload file using SCP
+	if err := w.sshClient.UploadFile(localPath, remotePath); err != nil {
+		w.safePrintf("❌ Failed to sync file %s to %s: %v\n", localPath, remotePath, err)
+		return
+	}
+
+	w.safeStatus("✅ File synced: %s → %s\n", localPath, remotePath)
+
+	// Update file cache metadata if available
+	if w.fileCache != nil {
+		if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
+			w.safePrintf("⚠️  Failed to update cache metadata for %s: %v\n", localPath, err)
+		}
+	}
 }
 
 // mapNotifyEvent maps notify.Event to our EventType
@@ -261,7 +1216,7 @@ func (w *Watcher) loadExtendedIgnores() []string {
 	// Try to parse as YAML first
 	var yamlIgnores []string
 	if err := yaml.Unmarshal(content, &yamlIgnores); err == nil && len(yamlIgnores) > 0 {
-		fmt.Printf("📄 Loaded .sync_ignore as YAML format (%d patterns)\n", len(yamlIgnores))
+		w.safeStatus("📄 Loaded .sync_ignore as YAML format (%d patterns)\n", len(yamlIgnores))
 		w.extendedIgnores = yamlIgnores
 		w.ignoreFileModTime = info.ModTime()
 		return yamlIgnores
@@ -285,14 +1240,14 @@ func (w *Watcher) loadExtendedIgnores() []string {
 	}
 
 	if len(gitignoreIgnores) > 0 {
-		fmt.Printf("📄 Loaded .sync_ignore as .gitignore format (%d patterns)\n", len(gitignoreIgnores))
+		w.safeStatus("📄 Loaded .sync_ignore as .gitignore format (%d patterns)\n", len(gitignoreIgnores))
 		w.extendedIgnores = gitignoreIgnores
 		w.ignoreFileModTime = info.ModTime()
 		return gitignoreIgnores
 	}
 
 	// If both parsing methods fail, fall back to default
-	fmt.Printf("⚠️  Failed to parse .sync_ignore file, using defaults\n")
+	w.safePrintf("⚠️  Failed to parse .sync_ignore file, using defaults\n")
 	w.extendedIgnores = defaultExtendedIgnores
 	w.ignoreFileModTime = info.ModTime()
 	return defaultExtendedIgnores
@@ -327,94 +1282,7 @@ func (w *Watcher) isEventAllowed(eventType EventType) bool {
 	}
 }
 
-// displayEvent displays a file event to the console
-func (w *Watcher) displayEvent(event FileEvent) {
-	timestamp := time.Now().Format("15:04:05")
-	relativePath := w.getRelativePath(event.Path)
-
-	var emoji, action string
-	switch event.EventType {
-	case EventCreate:
-		emoji = "🆕"
-		action = "Created"
-	case EventWrite:
-		emoji = "📝"
-		action = "Modified"
-	case EventRemove:
-		emoji = "🗑️"
-		action = "Deleted"
-	case EventRename:
-		emoji = "📋"
-		action = "Renamed"
-	}
-	fmt.Println("EventCreated:", event.EventType, "Path:", event.Path) // Debug line
-	if event.IsDir {
-		fmt.Printf("%s %s %s [DIR] %s\n", timestamp, emoji, action, relativePath)
-	} else {
-		fmt.Printf("%s %s %s %s\n", timestamp, emoji, action, relativePath)
-	}
-}
-
-// getRelativePath gets the relative path from watch directory
-func (w *Watcher) getRelativePath(absPath string) string {
-	// For remote sync, we want just the filename to sync to remote root
-	// But for cache lookup, we need the relative path from watch directory
-	return filepath.Base(absPath)
-}
-
-// executeScripts executes configured scripts for file events
-func (w *Watcher) executeScripts(event FileEvent) {
-	// Execute local commands if configured
-	for _, cmd := range w.config.Devsync.Script.Local.Commands {
-		if cmd != "" {
-			fmt.Printf("🔧 Executing local: %s\n", cmd)
-			// TODO: Implement actual command execution
-		}
-	}
-
-	// Handle SSH sync / delete if SSH client is available
-	if w.sshClient != nil {
-		if event.EventType == EventRemove {
-			// Map local path to remote path and attempt to remove remotely
-			remotePath := strings.ReplaceAll(event.Path, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
-			// Final failsafe: don't try to delete .sync_temp on remote
-			if strings.Contains(remotePath, ".sync_temp") {
-				fmt.Printf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remotePath)
-			} else {
-				// Use rm -rf to remove files or directories on remote side
-				cmd := fmt.Sprintf("rm -rf '%s'", remotePath)
-				fmt.Printf("📤 Deleting remote path: %s\n", remotePath)
-				if err := w.sshClient.RunCommand(cmd); err != nil {
-					fmt.Printf("❌ Failed to delete remote path %s: %v\n", remotePath, err)
-				} else {
-					fmt.Printf("✅ Remote delete succeeded: %s\n", remotePath)
-				}
-			}
-
-			// Remove metadata from file cache if available
-			if w.fileCache != nil {
-				if err := w.fileCache.DeleteFileMetadata(event.Path); err != nil {
-					fmt.Printf("⚠️  Failed to delete metadata for %s: %v\n", event.Path, err)
-				} else {
-					fmt.Printf("🗑️  Deleted cache metadata for %s\n", event.Path)
-				}
-			}
-		} else {
-			// For create/write events, sync file normally
-			w.syncFileViaSSH(event)
-		}
-	}
-
-	// Execute remote commands if configured
-	for _, cmd := range w.config.Devsync.Script.Remote.Commands {
-		if cmd != "" && w.sshClient != nil {
-			fmt.Printf("🔧 Executing remote: %s\n", cmd)
-			if err := w.sshClient.RunCommand(cmd); err != nil {
-				fmt.Printf("❌ Failed to execute remote command: %v\n", err)
-			}
-		}
-	}
-}
+// isDuplicateEvent checks if this event is a duplicate of a recent event
 
 // isDuplicateEvent checks if this event is a duplicate of a recent event
 func (w *Watcher) isDuplicateEvent(event FileEvent) bool {
@@ -441,302 +1309,481 @@ func (w *Watcher) storeEvent(event FileEvent) {
 	}
 }
 
-// syncFileViaSSH syncs a file to remote server via SSH
-func (w *Watcher) syncFileViaSSH(event FileEvent) {
-	if w.sshClient == nil {
-		return
-	}
-
-	// Skip directories for now
-	if event.IsDir {
-		return
-	}
-
-	// fmt.Println("event.Path:", event.Path)
-	// FINAL FAILSAFE: Never sync files in .sync_temp folder
-	if strings.Contains(event.Path, ".sync_temp") {
-		fmt.Printf("🚫 BLOCKED: File in .sync_temp folder: %s\n", event.Path)
-		return
-	}
-
-	// Get relative path from watch directory
-	relativePath := w.getRelativePath(event.Path)
-
-	// Skip if file is outside watch directory
-	if relativePath == "" {
-		fmt.Printf("⚠️  Skipping file outside watch directory: %s\n", event.Path)
-		return
-	}
-
-	// Check file cache to see if file has changed
-	// fmt.Println("w.fileCache:", w.fileCache)
-
-	time.Sleep(300 * time.Millisecond)
-
-	if w.fileCache != nil {
-		shouldSync, err := w.fileCache.ShouldSyncFile(event.Path)
-		if err != nil {
-			fmt.Printf("⚠️  Failed to check file cache for %s: %v\n", relativePath, err)
-			// Continue with sync on cache error
-		} else if !shouldSync {
-			fmt.Printf("⏭️  Skipping unchanged file: %s\n", relativePath)
-			return
+// hasActiveSession checks if there are any active sessions
+func (w *Watcher) hasActiveSession() bool {
+	for _, session := range w.sessions {
+		if session.isActive {
+			return true
 		}
 	}
-
-	// Replace local base path with remote base path
-	remotePath := strings.ReplaceAll(event.Path, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
-
-	fmt.Printf("📤 Syncing file: %s -> %s\n", event.Path, remotePath)
-
-	// fmt.Printf("   Relative path: %s\n", relativePath)
-	// fmt.Printf("   Remote base: %s\n", remoteBase)
-
-	// Upload file via SSH
-	if err := w.sshClient.SyncFile(event.Path, remotePath); err != nil {
-		fmt.Printf("❌ Faiqqqqled to sync file %s: %v\n", relativePath, err)
-	} else {
-		fmt.Printf("✅ Successfully synced: %s\n", relativePath)
-
-		// Update file cache after successful sync
-		if w.fileCache != nil {
-			if err := w.fileCache.UpdateFileMetadata(event.Path); err != nil {
-				fmt.Printf("⚠️  Failed to update file cache for %s: %v\n", relativePath, err)
-			}
-		}
-	}
+	return false
 }
 
-// handleKeyboardInput handles keyboard input for manual commands
+// displayMainMenu displays the main devsync menu
+func (w *Watcher) displayMainMenu() {
+	lines := []string{
+		"🔧 DevSync Main Menu",
+		"====================",
+		"R  - Reload configuration",
+		"S  - Show cache stats",
+		"A  - Deploy agent",
+		"Alt+1 - This menu",
+		"Alt+2 - New remote session (no menu)  (TBD)",
+		"Alt+3..9 - Command menus (dynamic per-config). Press one to open command picker.",
+		"Alt+B - Background current session",
+		"Alt+0 - Close current session",
+		"> ",
+	}
+	for i := range lines {
+		w.printer.Println(lines[i])
+		w.printer.ClearLine()
+	}
+	// menu := strings.Join(lines, "\n")
+
+	// if w != nil && w.printer != nil {
+	// 	w.printer.Println(menu)
+	// } else {
+	// 	fmt.Print(menu)
+	// }
+
+}
+
+// ...existing code...
 func (w *Watcher) handleKeyboardInput() {
-	buffer := make([]byte, 1)
+	buffer := make([]byte, 10) // Increase buffer for escape sequences
+	util.Default.Printf("DEBUG keyboard handler start pid=%d\n", os.Getpid())
+	defer util.Default.Printf("DEBUG keyboard handler exit pid=%d\n", os.Getpid())
+	var rawEnabled bool
+
+	// Try to enable raw mode using util helper so we can capture single keypresses
+	if _, err := util.EnableRawGlobalAuto(); err == nil {
+		rawEnabled = true
+	} else {
+		w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
+	}
+
+	// Ensure terminal state is restored when this handler returns
+	restore := func() {
+		_ = util.RestoreGlobal()
+	}
+	defer restore()
+
 	for {
-		n, err := os.Stdin.Read(buffer)
-		if err != nil {
-			break
-		}
-		if n > 0 {
-			input := string(buffer[:n])
-			// Check for R key (reload command)
-			if input == "R" || input == "r" {
-				w.handleReloadCommand()
+		select {
+		case <-w.keyboardStop:
+			// Stop keyboard input during session, wait for restart
+			// Before pausing for session, restore terminal state so session can set raw mode
+			_ = util.RestoreGlobal()
+			<-w.keyboardRestart
+			// Re-enable raw mode after session if possible
+			if !rawEnabled {
+				if _, err := util.EnableRawGlobalAuto(); err == nil {
+					rawEnabled = true
+				} else {
+					w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
+				}
 			}
-			// Check for S key (show stats command)
-			if input == "S" || input == "s" {
-				w.handleShowStatsCommand()
+			continue
+		default:
+			n, err := os.Stdin.Read(buffer)
+			if err != nil {
+				// On read error, restore terminal and exit handler
+				_ = util.RestoreGlobal()
+				return
 			}
-			// Check for A key (deploy agent command)
-			if input == "A" || input == "a" {
-				w.handleDeployAgentCommand()
+			if n > 0 {
+				raw := buffer[:n]
+				input := string(raw)
+				// Handle escape sequences for Alt + key (don't trim spaces)
+				if strings.HasPrefix(input, "\x1b") {
+					// Try to create a two-byte sequence if available (ESC + key)
+					if n >= 2 {
+						seq := string([]byte{raw[0], raw[1]})
+						_ = util.RestoreGlobal()
+						w.handleAltKey(seq)
+						// Re-enable raw mode after handler returns if possible
+						if !rawEnabled {
+							if _, err := util.EnableRawGlobalAuto(); err == nil {
+								rawEnabled = true
+							}
+						}
+						continue
+					}
+
+					// Fallback: pass full input string to handler
+					_ = util.RestoreGlobal()
+					w.handleAltKey(input)
+					if !rawEnabled {
+						if _, err := util.EnableRawGlobalAuto(); err == nil {
+							rawEnabled = true
+						}
+					}
+					continue
+				}
+
+				// Check for Ctrl+R (0x12) raw byte
+				if buffer[0] == 0x12 {
+					// ensure terminal restored before stopping notify so UI is sane
+					_ = util.RestoreGlobal()
+					w.StopNotify()
+					return
+				}
+				// Check for Ctrl+C (0x03) - force stop and exit
+				if buffer[0] == 0x03 {
+					_ = util.RestoreGlobal()
+					os.Exit(0)
+					return
+				}
+				// Trim spaces for regular keys
+				input = strings.TrimSpace(input)
+				// Check for regular keys
+				switch input {
+				case "R", "r":
+					_ = util.RestoreGlobal()
+					w.HandleReloadCommand()
+					if !rawEnabled {
+						if _, err := util.EnableRawGlobalAuto(); err == nil {
+							rawEnabled = true
+						}
+					}
+				case "S", "s":
+					_ = util.RestoreGlobal()
+					w.HandleShowStatsCommand()
+					if !rawEnabled {
+						if _, err := util.EnableRawGlobalAuto(); err == nil {
+							rawEnabled = true
+						}
+					}
+				case "A", "a":
+					_ = util.RestoreGlobal()
+					w.HandleDeployAgentCommand()
+					if !rawEnabled {
+						if _, err := util.EnableRawGlobalAuto(); err == nil {
+							rawEnabled = true
+						}
+					}
+				}
 			}
 		}
 	}
 }
 
-// watcher.go (pseudo code snippet)
-func (w *Watcher) ReloadConfig() error {
-	// 1. Load config from disk (renders variables in-memory)
+// ...existing code...
+
+// handleAltKey handles Alt + key combinations
+func (w *Watcher) handleAltKey(input string) {
+
+	// Clear screen and display menu in one atomic block
+	w.printer.PrintBlock("\033[2J\033[1;1H", false)
+
+	switch input {
+	case "\x1br", "\x1br\n", "\x1bR", "\x1bR\n": // Alt + R (reload)
+		w.HandleReloadCommand()
+	case "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9": // Alt + 3-9
+		// Ensure terminal is in normal (cooked) mode before launching promptui
+		// so the interactive selector can read arrow keys and render properly.
+		w.printer.PrintBlock("", true) // ensure any status line cleared
+
+		// Detect slot number (ESC + digit). Keep current behavior (show menu)
+		// for now and reserve slot-handling for PTY manager integration.
+		var slot int
+		if strings.HasPrefix(input, "\x1b") && len(input) >= 2 {
+			switch input[1] {
+			case '3':
+				slot = 3
+			case '4':
+				slot = 4
+			case '5':
+				slot = 5
+			case '6':
+				slot = 6
+			case '7':
+				slot = 7
+			case '8':
+				slot = 8
+			case '9':
+				slot = 9
+			}
+		}
+
+		_ = slot // placeholder for future PTY manager behavior
+		w.Slot = &slot
+		w.showCommandMenuDisplay()
+	default:
+	}
+}
+
+// HandleReloadCommand handles the reload command from user input
+func (w *Watcher) HandleReloadCommand() {
+	if err := w.ReloadConfiguration(); err != nil {
+		w.safePrintf("❌ Failed to reload configuration: %v\n", err)
+	}
+}
+
+// ReloadConfiguration reloads the configuration
+func (w *Watcher) ReloadConfiguration() error {
+	w.printer.PrintBlock("🔄 Reloading configuration...", true)
+
+	// Load new config
 	newCfg, err := config.LoadAndRenderConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// 2. If watch path changed, update watchPath and (re)start watcher patterns if needed
-	newWatch := newCfg.LocalPath
-	if newWatch == "" {
-		newWatch = "."
-	}
-	absNewWatch, _ := filepath.Abs(newWatch)
-	if absNewWatch != w.watchPath {
-		// NOTE: this is simplified: proper implementation must stop notify.Watch and re-register
-		fmt.Printf("🔁 Watch path changed: %s -> %s\n", w.watchPath, absNewWatch)
-		w.watchPath = absNewWatch
-		// TODO: re-register notify watcher pattern (requires access to watch subscription)
-	}
-
-	// 3. If SSH auth changed, recreate SSH client
-	oldAuth := w.config.Devsync.Auth
-	newAuth := newCfg.Devsync.Auth
-	if oldAuth.Host != newAuth.Host || oldAuth.Username != newAuth.Username || oldAuth.PrivateKey != newAuth.PrivateKey || oldAuth.Port != newAuth.Port {
-		fmt.Println("🔁 SSH auth changed - recreating SSH client")
-		if w.sshClient != nil {
-			_ = w.sshClient.Close()
-		}
-		// Create new client (handle errors)
-		sshClient, err := sshclient.NewPersistentSSHClient(newAuth.Username, newAuth.PrivateKey, newAuth.Host, newAuth.Port)
-		if err != nil {
-			return fmt.Errorf("failed new ssh client: %w", err)
-		}
-		w.sshClient = sshClient
-		if err := w.sshClient.Connect(); err != nil {
-			return fmt.Errorf("failed to connect new ssh client: %w", err)
-		}
-		if err := w.sshClient.StartPersistentSession(); err != nil {
-			return fmt.Errorf("failed to start persistent session on new ssh client: %w", err)
-		}
-	}
-
-	// 4. Assign new config
+	// Update watcher's config
+	oldConfig := w.config
 	w.config = newCfg
 
-	// 5. Sync new config to remote and restart agent monitoring
-	if w.sshClient != nil {
-		if err := w.syncConfigToRemote(); err != nil {
-			fmt.Printf("⚠️ failed to sync config to remote: %v\n", err)
-		}
-		// restart monitoring (stop session then start)
-		_ = w.StopAgentMonitoring()
-		time.Sleep(1 * time.Second)
-		if err := w.sshClient.StartPersistentSession(); err == nil {
-			_ = w.startAgentMonitoring()
-		}
+	// Sync new config to remote if SSH is configured
+	if err := w.syncConfigToRemote(); err != nil {
+		// Restore old config on error
+		w.config = oldConfig
+		return fmt.Errorf("failed to sync config to remote: %w", err)
 	}
-
-	return nil
-}
-
-// handleReloadCommand handles the R reload command
-func (w *Watcher) handleReloadCommand() {
-	fmt.Printf("\n🔄 Manual reload requested (R key)\n")
-	fmt.Printf("=================================\n")
-
-	// Validate .sync_ignore file first
-	if err := w.validateSyncIgnore(); err != nil {
-		fmt.Printf("❌ .sync_ignore validation failed: %v\n", err)
-		fmt.Printf("💡 Please fix the .sync_ignore file and try again with R\n")
-		return
-	}
-
-	// If validation passes, reload the watch patterns
-	w.reloadWatchPatterns()
 
 	if err := w.StopAgentMonitoring(); err != nil {
-		fmt.Printf("⚠️  Failed to stop agent monitoring: %v\n", err)
+		// Restore old config on error
+		w.config = oldConfig
+		return fmt.Errorf("failed to stop agent monitoring: %w", err)
 	}
 
-	// Sync configuration to remote
-	if err := w.syncConfigToRemote(); err != nil {
-		fmt.Printf("⚠️  Failed to sync config to remote: %v\n", err)
+	// Reload watch patterns if watch path changed
+	if err := w.ReloadWatchPatterns(); err != nil {
+		// Restore old config on error
+		w.config = oldConfig
+		return fmt.Errorf("failed to reload watch patterns: %w", err)
 	}
 
-	// time.Sleep(2 * time.Second)
-
-	// Start continuous agent monitoring
-	// if err := w.startAgentMonitoring(); err != nil {
-	// 	fmt.Printf("⚠️  Failed to start agent monitoring: %v\n", err)
-	// }
-
-	fmt.Printf("✅ .sync_ignore reloaded successfully\n")
-}
-
-// reloadWatchPatterns reloads the ignore patterns by clearing cache and reloading
-func (w *Watcher) reloadWatchPatterns() {
-	// Clear the cached ignore patterns and modification time
-	w.extendedIgnores = nil
-	w.ignoreFileModTime = time.Time{}
-
-	// Reload the patterns
-	_ = w.loadExtendedIgnores()
-
-	fmt.Printf("🔄 Ignore patterns reloaded from .sync_ignore\n")
-}
-
-// validateSyncIgnore validates the .sync_ignore file format
-func (w *Watcher) validateSyncIgnore() error {
-	syncIgnorePath := ".sync_ignore"
-
-	// Check if file exists
-	if _, err := os.Stat(syncIgnorePath); os.IsNotExist(err) {
-		return fmt.Errorf("file does not exist")
-	}
-
-	// Read file content
-	content, err := os.ReadFile(syncIgnorePath)
-	if err != nil {
-		return fmt.Errorf("cannot read file: %v", err)
-	}
-
-	// Try to parse as YAML first
-	var yamlIgnores []string
-	if err := yaml.Unmarshal(content, &yamlIgnores); err == nil && len(yamlIgnores) > 0 {
-		// Valid YAML format
-		return nil
-	}
-
-	// Try to parse as .gitignore style (plain text)
-	lines := strings.Split(string(content), "\n")
-	validPatterns := 0
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		// Skip empty lines and comments
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		// Skip lines that start with YAML dash (old format)
-		if strings.HasPrefix(line, "- ") {
-			continue
-		}
-
-		// Basic validation for pattern format
-		if len(line) > 0 {
-			validPatterns++
-		}
-	}
-
-	if validPatterns == 0 {
-		return fmt.Errorf("no valid patterns found in file")
-	}
-
-	// Valid .gitignore format
+	w.safePrintln("✅ Configuration reloaded successfully")
 	return nil
 }
 
-// handleShowStatsCommand handles the S show stats command
-func (w *Watcher) handleShowStatsCommand() {
-	fmt.Printf("\n📊 Cache Statistics\n")
-	fmt.Printf("==================\n")
+// ReloadWatchPatterns reloads the file watching patterns
+func (w *Watcher) ReloadWatchPatterns() error {
+	// Reload extended ignores
+	w.extendedIgnores = w.loadExtendedIgnores()
 
+	w.safePrintln("✅ Watch patterns reloaded")
+	return nil
+}
+
+// HandleShowStatsCommand handles the show stats command
+func (w *Watcher) HandleShowStatsCommand() {
+	statsBlock := `
+📊 File Cache Statistics
+========================
+
+`
 	if w.fileCache == nil {
-		fmt.Printf("❌ File cache not initialized\n")
+		statsBlock += "❌ File cache not available"
+		w.printer.PrintBlock(statsBlock, true)
 		return
 	}
 
 	totalFiles, totalSize, err := w.fileCache.GetFileStats()
 	if err != nil {
-		fmt.Printf("❌ Failed to get cache stats: %v\n", err)
+		statsBlock += fmt.Sprintf("❌ Failed to get cache stats: %v", err)
+		w.printer.PrintBlock(statsBlock, true)
 		return
 	}
 
-	fmt.Printf("📁 Total cached files: %d\n", totalFiles)
-	fmt.Printf("💾 Total cached size: %.2f MB\n", float64(totalSize)/(1024*1024))
-	fmt.Printf("📂 Cache location: .sync_temp/file_cache.db\n")
+	statsBlock += fmt.Sprintf(`📁 Total cached files: %d
+💾 Total cached size: %.2f MB
+🗄️  Cache location: .sync_temp/file_cache.db`,
+		totalFiles,
+		float64(totalSize)/(1024*1024))
+
+	w.printer.PrintBlock(statsBlock, true)
 }
 
-// handleDeployAgentCommand handles the A deploy agent command
-func (w *Watcher) handleDeployAgentCommand() {
-	fmt.Printf("\n🚀 Deploy Agent Command\n")
-	fmt.Printf("======================\n")
+// HandleDeployAgentCommand handles the deploy agent command
+func (w *Watcher) HandleDeployAgentCommand() {
+	w.commands.HandleDeployAgentCommand()
+}
 
-	if w.sshClient == nil {
-		fmt.Printf("❌ SSH client not available\n")
-		fmt.Printf("💡 Make sure SSH configuration is properly set up\n")
-		return
+// showCommandMenuDisplay builds and prints the remote/local command menu (display only).
+// If slot is between 3..9, after the user selects a command we will try to
+// create/open a persistent PTY session in that slot and attach to it. If
+// slot == 0 the previous behavior (runRemoteCommand) is used.
+func (w *Watcher) showCommandMenuDisplay() {
+	callback := func(slotNew int) {
+		// w.ptyMgr.PauseSlot(*w.Slot)
+		w.Slot = &slotNew
+		w.ptyMgr.Pendingchan <- "pause"
 	}
+	for {
+		slot := w.Slot
 
-	fmt.Printf("🔨 Building and deploying sync agent...\n")
+		if *slot == 1 {
+			w.displayMainMenu()
+			break
+		}
 
-	// Build and deploy agent
-	if err := w.buildAndDeployAgent(); err != nil {
-		fmt.Printf("❌ Failed to build/deploy agent: %v\n", err)
-		return
-	}
+		// w.safePrintf("🔄 Focusing existing slot %d...\n", *slot)
+		if w.ptyMgr != nil && w.ptyMgr.HasSlot(*slot) {
+			// If slot already exists, focus it instead of showing menu again
+			if err := w.ptyMgr.Focus(*slot, true, callback); err != nil {
+				w.safePrintf("❌ Failed to focus slot %d: %v\n", *slot, err)
+			}
+			continue
+		}
+		// gather remote commands from config (safe nil checks)
+		var remoteCmds []string
+		if w != nil && w.config != nil && w.config.Devsync.Script.Remote.Commands != nil {
+			remoteCmds = append(remoteCmds, w.config.Devsync.Script.Remote.Commands...)
+		}
 
-	fmt.Printf("✅ Agent deployed successfully!\n")
-	fmt.Printf("💡 Agent is now available at: ~/.sync_temp/sync-agent\n")
+		// fallback defaults if none configured
+		if len(remoteCmds) == 0 {
+			remoteCmds = []string{
+				"docker-compose up",
+				"docker-compose down && docker-compose up --build",
+				"docker-compose down && docker-compose up",
+				"tail -f storage/log/*.log >>> my.log",
+				"docker-compose exec app bash -l",
+			}
+		}
 
-	// Additional verification - show agent info
-	if output, err := w.sshClient.RunCommandWithOutput("file .sync_temp/sync-agent"); err == nil {
-		fmt.Printf("📋 Agent info: %s", strings.TrimSpace(output))
+		// Build interactive menu items: remote commands first, then Local Console, then Exit
+		items := make([]string, 0, len(remoteCmds)+2)
+		items = append(items, remoteCmds...)
+		items = append(items, "Local Console")
+		items = append(items, "Exit")
+
+		// Suspend background printing while the interactive menu is active to
+		// prevent status messages from "leaking" into the prompt.
+		if w != nil && w.printer != nil {
+			w.printer.Suspend()
+		} else {
+			fmt.Print("\x1b[2J\x1b[1;1H")
+		}
+
+		// Ensure terminal is in cooked mode for promptui
+		_ = util.RestoreGlobal()
+
+		// Use promptui to show an interactive selectable list (arrow keys)
+		prompt := promptui.Select{
+			Label: "? Remote Console Mode",
+			Items: items,
+			Size:  10,
+			Templates: &promptui.SelectTemplates{
+				Label:    "{{ . }}",
+				Active:   "▸ {{ . | cyan }}",
+				Inactive: "  {{ . }}",
+				Selected: "Selected: {{ . }}",
+			},
+			HideHelp: true,
+		}
+
+		i, result, err := prompt.Run()
+		if err != nil {
+			if w != nil && w.printer != nil {
+				w.printer.Resume()
+				w.printer.Printf("❌ Mvfvdfvfenu selection cancelled: %v\n", err)
+			} else {
+				fmt.Printf("❌ jjjjjMenu selection cancelled: %v\n", err)
+			}
+			// re-enable raw mode for keyboard loop and return
+			_, _ = util.EnableRawGlobalAuto()
+			return
+		}
+
+		// re-enable raw mode after prompt so keyboard loop can continue
+		_, _ = util.EnableRawGlobalAuto()
+
+		// Handle special items: Exit should return to watcher main menu
+		if result == "Exit" {
+			if w != nil && w.printer != nil {
+				w.printer.PrintBlock("", true)
+				w.printer.Resume()
+				// Re-draw the watcher main menu/status so user sees the watcher again
+				w.displayMainMenu()
+			} else {
+				// ensure terminal cleared
+				fmt.Print("\x1b[2J\x1b[1;1H")
+				w.displayMainMenu()
+			}
+			return
+		}
+
+		// For other items, publish execution request to event bus so watcher can
+		// execute the command using the existing SSH session. Fall back to calling
+		// runRemoteCommand directly when no EventBus is available.
+		if w != nil && w.printer != nil {
+			w.printer.Printf("Selected: %s (index %d)\n", result, i)
+		} else {
+			fmt.Printf("Selected: %s (index %d)\n", result, i)
+		}
+		// Ensure the printer is resumed so terminal state is normal before starting
+		// the interactive remote session. If a slot was provided we'll use the
+		// PTY manager to Open/Focus the slot; otherwise we call runRemoteCommand.
+		if w != nil && w.printer != nil {
+			w.printer.Resume()
+		}
+
+		if *slot >= 3 && *slot <= 9 && w != nil && w.ptyMgr != nil {
+			// Build initial command similar to runRemoteCommand so the PTY's
+			// initial command will cd into remote path and run the selected cmd.
+			remotePath := w.config.Devsync.Auth.RemotePath
+			if remotePath == "" {
+				remotePath = "/tmp"
+			}
+			initialCmd := fmt.Sprintf("mkdir -p %s || true && cd %s && bash -c %s ; exec bash",
+				shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
+			isExist := false
+			// If slot not present, try to create it.
+			if !w.ptyMgr.HasSlot(*slot) {
+				fmt.Println("➕ Creating new slot", *slot, "...")
+				if err := w.ptyMgr.OpenRemoteSlot(*slot, initialCmd); err != nil {
+					if w.printer != nil {
+						w.printer.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", slot, err)
+					} else {
+						w.printer.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", slot, err)
+					}
+					// Fallback to simple run
+					w.runRemoteCommand(result)
+					continue
+				}
+			} else {
+				fmt.Println("🔄 Reusing existing slot", *slot, "...")
+				isExist = true
+			}
+
+			// Attach to the slot (this will block until the interactive session exits)
+			if w.printer != nil {
+				w.printer.Suspend()
+			}
+			// fmt.Println("Is exist:", isExist)
+			fmt.Println("🔗 Attaching to slot", *slot, "...")
+			if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
+				if w.printer != nil {
+					w.printer.Printf("⚠️  Failed to focus slot %d: %v\n", slot, err)
+					w.printer.Resume()
+				} else {
+					w.printer.Printf("⚠️  Failed to focus slot %d: %v\n", slot, err)
+				}
+			} else {
+				if w.printer != nil {
+					w.printer.Resume()
+				}
+			}
+		}
+
+		// Default: run the remote command once using the existing flow.
+		// w.runRemoteCommand(result)
+
+		// Terapin disini
+
+		// If event bus present, publish; otherwise run directly in a goroutine
+		// if w != nil && w.eventBus != nil {
+		// 	w.eventBus.Publish("devsync.command.exec.remote", result)
+		// } else if w != nil {
+		// 	w.runRemoteCommand(result)
+		// }
+
+		// if w != nil && w.printer != nil {
+		// 	w.printer.Resume()
+		// }
+		continue
 	}
 }

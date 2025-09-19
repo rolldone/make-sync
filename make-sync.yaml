@@ -35,9 +35,17 @@ devsync:
     local:
       on_ready: npm run build && ngi-sync direct create_folder
       on_stop: docker-compose down
+      commands:
+        - "npm run build"
+        - "npm run dev"
+        - "npm test"
     remote:
       on_ready: docker-compose up
       on_stop: docker-compose down
+      commands:
+        - "docker-compose ps"
+        - "docker-compose logs -f"
+        - "docker-compose restart"
   trigger_permission:
     unlink_folder: false
     unlink: false

@@ -430,10 +430,8 @@ func showDirectAccessMenu(loadedCfg *config.Config) bool {
 		return true
 	case "devsync :: Open Devsync":
 		fmt.Println("Opening devsync...")
-		err := devsync.RunDevSync(cfg)
-		if err != nil {
-			fmt.Printf("❌ DevSync error: %v\n", err)
-		}
+		devsync.ShowDevSyncModeMenu(cfg)
+
 		return true
 	case "clean :: Git clean up":
 		fmt.Println("Running git clean up...")
@@ -558,12 +556,8 @@ var devsyncCmd = &cobra.Command{
 		}
 		fmt.Println("✅ Configuration is valid and rendered!")
 
-		// Run devsync
-		err = devsync.RunDevSync(cfg)
-		if err != nil {
-			fmt.Printf("❌ DevSync error: %v\n", err)
-			os.Exit(1)
-		}
+		// Run devsync mode menu
+		devsync.ShowDevSyncModeMenu(cfg)
 	},
 }
 

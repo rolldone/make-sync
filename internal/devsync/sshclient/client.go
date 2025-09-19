@@ -592,3 +592,17 @@ func (c *SSHClient) IsPersistent() bool {
 func (c *SSHClient) GetSession() *ssh.Session {
 	return c.session
 }
+
+// CreatePTYSession creates a new SSH session configured for PTY usage
+func (c *SSHClient) CreatePTYSession() (*ssh.Session, error) {
+	if c.client == nil {
+		return nil, fmt.Errorf("SSH client not connected")
+	}
+
+	session, err := c.client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PTY session: %v", err)
+	}
+
+	return session, nil
+}

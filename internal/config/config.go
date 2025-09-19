@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"make-sync/internal/util"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+var printer = util.Default
 
 const ConfigFileName = "make-sync.yaml"
 
@@ -463,7 +466,7 @@ func LoadAndRenderConfig() (*Config, error) {
 	}
 	realPath, err := filepath.EvalSymlinks(basPath)
 	if err != nil {
-		fmt.Println("Error:", err)
+		printer.Println("Error:", err)
 		os.Exit(1)
 	}
 	absWatchPath, err := filepath.Abs(realPath)
@@ -494,37 +497,37 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 		if strings.HasPrefix(sshConfig.HostName, "=") {
 			oldValue := sshConfig.HostName
 			sshConfig.HostName = renderer.RenderComplexTemplates(sshConfig.HostName)
-			fmt.Printf("🔧 Rendered SSH config[%d].HostName: %s → %s\n", i, oldValue, sshConfig.HostName)
+			printer.Printf("🔧 Rendered SSH config[%d].HostName: %s → %s\n", i, oldValue, sshConfig.HostName)
 			renderCount++
 		}
 		if strings.HasPrefix(sshConfig.User, "=") {
 			oldValue := sshConfig.User
 			sshConfig.User = renderer.RenderComplexTemplates(sshConfig.User)
-			fmt.Printf("🔧 Rendered SSH config[%d].User: %s → %s\n", i, oldValue, sshConfig.User)
+			printer.Printf("🔧 Rendered SSH config[%d].User: %s → %s\n", i, oldValue, sshConfig.User)
 			renderCount++
 		}
 		if strings.HasPrefix(sshConfig.Port, "=") {
 			oldValue := sshConfig.Port
 			sshConfig.Port = renderer.RenderComplexTemplates(sshConfig.Port)
-			fmt.Printf("🔧 Rendered SSH config[%d].Port: %s → %s\n", i, oldValue, sshConfig.Port)
+			printer.Printf("🔧 Rendered SSH config[%d].Port: %s → %s\n", i, oldValue, sshConfig.Port)
 			renderCount++
 		}
 		if strings.HasPrefix(sshConfig.IdentityFile, "=") {
 			oldValue := sshConfig.IdentityFile
 			sshConfig.IdentityFile = renderer.RenderComplexTemplates(sshConfig.IdentityFile)
-			fmt.Printf("🔧 Rendered SSH config[%d].IdentityFile: %s → %s\n", i, oldValue, sshConfig.IdentityFile)
+			printer.Printf("🔧 Rendered SSH config[%d].IdentityFile: %s → %s\n", i, oldValue, sshConfig.IdentityFile)
 			renderCount++
 		}
 		if strings.Contains(sshConfig.RemoteCommand, "=") {
 			oldValue := sshConfig.RemoteCommand
 			sshConfig.RemoteCommand = renderer.RenderComplexTemplates(sshConfig.RemoteCommand)
-			fmt.Printf("🔧 Rendered SSH config[%d].RemoteCommand: %s → %s\n", i, oldValue, sshConfig.RemoteCommand)
+			printer.Printf("🔧 Rendered SSH config[%d].RemoteCommand: %s → %s\n", i, oldValue, sshConfig.RemoteCommand)
 			renderCount++
 		}
 		if strings.Contains(sshConfig.ProxyCommand, "=") {
 			oldValue := sshConfig.ProxyCommand
 			sshConfig.ProxyCommand = renderer.RenderComplexTemplates(sshConfig.ProxyCommand)
-			fmt.Printf("🔧 Rendered SSH config[%d].ProxyCommand: %s → %s\n", i, oldValue, sshConfig.ProxyCommand)
+			printer.Printf("🔧 Rendered SSH config[%d].ProxyCommand: %s → %s\n", i, oldValue, sshConfig.ProxyCommand)
 			renderCount++
 		}
 	}
@@ -533,37 +536,37 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 	if strings.HasPrefix(renderedCfg.Devsync.Auth.Username, "=") {
 		oldValue := renderedCfg.Devsync.Auth.Username
 		renderedCfg.Devsync.Auth.Username = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Username)
-		fmt.Printf("🔧 Rendered Devsync.Auth.Username: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Username)
+		printer.Printf("🔧 Rendered Devsync.Auth.Username: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Username)
 		renderCount++
 	}
 	if strings.HasPrefix(renderedCfg.Devsync.Auth.PrivateKey, "=") {
 		oldValue := renderedCfg.Devsync.Auth.PrivateKey
 		renderedCfg.Devsync.Auth.PrivateKey = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.PrivateKey)
-		fmt.Printf("🔧 Rendered Devsync.Auth.PrivateKey: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.PrivateKey)
+		printer.Printf("🔧 Rendered Devsync.Auth.PrivateKey: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.PrivateKey)
 		renderCount++
 	}
 	if strings.HasPrefix(renderedCfg.Devsync.Auth.Host, "=") {
 		oldValue := renderedCfg.Devsync.Auth.Host
 		renderedCfg.Devsync.Auth.Host = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Host)
-		fmt.Printf("🔧 Rendered Devsync.Auth.Host: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Host)
+		printer.Printf("🔧 Rendered Devsync.Auth.Host: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Host)
 		renderCount++
 	}
 	if strings.HasPrefix(renderedCfg.Devsync.Auth.Port, "=") {
 		oldValue := renderedCfg.Devsync.Auth.Port
 		renderedCfg.Devsync.Auth.Port = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Port)
-		fmt.Printf("🔧 Rendered Devsync.Auth.Port: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Port)
+		printer.Printf("🔧 Rendered Devsync.Auth.Port: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Port)
 		renderCount++
 	}
 	if strings.HasPrefix(renderedCfg.Devsync.Auth.LocalPath, "=") {
 		oldValue := renderedCfg.Devsync.Auth.LocalPath
 		renderedCfg.Devsync.Auth.LocalPath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.LocalPath)
-		fmt.Printf("🔧 Rendered Devsync.Auth.LocalPath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.LocalPath)
+		printer.Printf("🔧 Rendered Devsync.Auth.LocalPath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.LocalPath)
 		renderCount++
 	}
 	if strings.HasPrefix(renderedCfg.Devsync.Auth.RemotePath, "=") {
 		oldValue := renderedCfg.Devsync.Auth.RemotePath
 		renderedCfg.Devsync.Auth.RemotePath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.RemotePath)
-		fmt.Printf("🔧 Rendered Devsync.Auth.RemotePath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.RemotePath)
+		printer.Printf("🔧 Rendered Devsync.Auth.RemotePath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.RemotePath)
 		renderCount++
 	}
 
@@ -575,21 +578,21 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 		if strings.Contains(sshCmd.AccessName, "=") {
 			oldValue := sshCmd.AccessName
 			sshCmd.AccessName = renderer.RenderComplexTemplates(sshCmd.AccessName)
-			fmt.Printf("🔧 Rendered SSH command[%d].AccessName: %s → %s\n", i, oldValue, sshCmd.AccessName)
+			printer.Printf("🔧 Rendered SSH command[%d].AccessName: %s → %s\n", i, oldValue, sshCmd.AccessName)
 			renderCount++
 		}
 		if strings.Contains(sshCmd.Command, "=") {
 			oldValue := sshCmd.Command
 			sshCmd.Command = renderer.RenderComplexTemplates(sshCmd.Command)
-			fmt.Printf("🔧 Rendered SSH command[%d].Command: %s → %s\n", i, oldValue, sshCmd.Command)
+			printer.Printf("🔧 Rendered SSH command[%d].Command: %s → %s\n", i, oldValue, sshCmd.Command)
 			renderCount++
 		}
 	}
 
 	if renderCount > 0 {
-		fmt.Printf("✅ Template rendering completed: %d references resolved\n", renderCount)
+		printer.Printf("✅ Template rendering completed: %d references resolved\n", renderCount)
 	} else {
-		fmt.Println("ℹ️  No template references found in configuration")
+		printer.Println("ℹ️  No template references found in configuration")
 	}
 
 	return &renderedCfg, nil
