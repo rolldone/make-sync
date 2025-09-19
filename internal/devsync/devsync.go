@@ -9,6 +9,7 @@ import (
 	"make-sync/internal/config"
 	"make-sync/internal/devsync/sshclient"
 	"make-sync/internal/tui"
+	"make-sync/internal/util"
 )
 
 var watcher *Watcher
@@ -39,7 +40,7 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			"back :: Return to main menu",
 		}
 
-		// pause legacy keyboard handler while TUI runs
+		// pause legacy keyboard handler while TUI runs and let TUI own the terminal
 		if watcher != nil {
 			watcher.TUIActive = true
 			select {
@@ -47,6 +48,8 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			default:
 			}
 		}
+		// inform util that TUI owns the terminal so global raw-mode helpers are no-ops
+		util.TUIActive = true
 
 		// use TUI menu (bubbletea + bubbles/list) to show selection
 		result, err := tui.ShowMenu(menuItems, "Select DevSync Mode")
@@ -59,6 +62,8 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			return "cancelled"
 		}
 
+		// restore ownership back to legacy input handler
+		util.TUIActive = false
 		if watcher != nil {
 			select {
 			case watcher.keyboardRestart <- true:

@@ -15,6 +15,11 @@ var rawStates = map[int]*term.State{}
 var globalMu sync.Mutex
 var globalRestore func() error
 
+// TUIActive should be set to true by the TUI when it owns the terminal.
+// When true, helpers that would enable raw mode for the global stdin become no-ops
+// so the TUI remains the single owner of terminal raw mode.
+var TUIActive bool
+
 // EnableRaw enables raw mode on fd and returns a restore function.
 // Restore is safe to call multiple times.
 func EnableRaw(fd int) (func() error, error) {
@@ -67,6 +72,10 @@ func EnableRawGlobal(fd int) (func() error, error) {
 
 // Convenience helper that enables raw on os.Stdin and stores global restore.
 func EnableRawGlobalAuto() (func() error, error) {
+	// If the TUI owns the terminal, don't change the global raw state.
+	if TUIActive {
+		return func() error { return nil }, nil
+	}
 	fd := int(os.Stdin.Fd())
 	return EnableRawGlobal(fd)
 }

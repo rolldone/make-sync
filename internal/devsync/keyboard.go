@@ -16,10 +16,13 @@ func (w *Watcher) handleKeyboardInput() {
 	var rawEnabled bool
 
 	// Try to enable raw mode using util helper so we can capture single keypresses
-	if _, err := util.EnableRawGlobalAuto(); err == nil {
-		rawEnabled = true
-	} else {
-		w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
+	// Do not enable if TUI currently owns the terminal.
+	if !util.TUIActive {
+		if _, err := util.EnableRawGlobalAuto(); err == nil {
+			rawEnabled = true
+		} else {
+			w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
+		}
 	}
 
 	// Ensure terminal state is restored when this handler returns
@@ -62,7 +65,7 @@ func (w *Watcher) handleKeyboardInput() {
 						_ = util.RestoreGlobal()
 						w.handleAltKey(seq)
 						// Re-enable raw mode after handler returns if possible
-						if !rawEnabled {
+						if !rawEnabled && !util.TUIActive {
 							if _, err := util.EnableRawGlobalAuto(); err == nil {
 								rawEnabled = true
 							}
@@ -73,7 +76,7 @@ func (w *Watcher) handleKeyboardInput() {
 					// Fallback: pass full input string to handler
 					_ = util.RestoreGlobal()
 					w.handleAltKey(input)
-					if !rawEnabled {
+					if !rawEnabled && !util.TUIActive {
 						if _, err := util.EnableRawGlobalAuto(); err == nil {
 							rawEnabled = true
 						}
@@ -101,7 +104,7 @@ func (w *Watcher) handleKeyboardInput() {
 				case "R", "r":
 					_ = util.RestoreGlobal()
 					w.HandleReloadCommand()
-					if !rawEnabled {
+					if !rawEnabled && !util.TUIActive {
 						if _, err := util.EnableRawGlobalAuto(); err == nil {
 							rawEnabled = true
 						}
@@ -109,7 +112,7 @@ func (w *Watcher) handleKeyboardInput() {
 				case "S", "s":
 					_ = util.RestoreGlobal()
 					w.HandleShowStatsCommand()
-					if !rawEnabled {
+					if !rawEnabled && !util.TUIActive {
 						if _, err := util.EnableRawGlobalAuto(); err == nil {
 							rawEnabled = true
 						}
@@ -117,7 +120,7 @@ func (w *Watcher) handleKeyboardInput() {
 				case "A", "a":
 					_ = util.RestoreGlobal()
 					w.HandleDeployAgentCommand()
-					if !rawEnabled {
+					if !rawEnabled && !util.TUIActive {
 						if _, err := util.EnableRawGlobalAuto(); err == nil {
 							rawEnabled = true
 						}
