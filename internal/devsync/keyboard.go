@@ -131,12 +131,14 @@ func (w *Watcher) handleAltKey(input string) {
 	case "\x1br", "\x1br\n", "\x1bR", "\x1bR\n": // Alt + R (reload)
 		w.HandleReloadCommand()
 		return
-	case "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9":
-		// Alt + 3-9: map to slot numbers and show the command menu
+	case "\x1b2", "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9":
+		// Alt + 2-9: map to slot numbers and show the command menu
 		util.Default.PrintBlock("", true) // ensure any status line cleared
 		var slot int
 		if strings.HasPrefix(input, "\x1b") && len(input) >= 2 {
 			switch input[1] {
+			case '2':
+				slot = 2
 			case '3':
 				slot = 3
 			case '4':
@@ -154,6 +156,10 @@ func (w *Watcher) handleAltKey(input string) {
 			}
 		}
 		w.Slot = &slot
+		if slot == 2 {
+			w.enterShellNonCommand()
+			return
+		}
 		w.showCommandMenuDisplay()
 		return
 	default:

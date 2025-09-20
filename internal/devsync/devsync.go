@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"make-sync/internal/config"
@@ -28,9 +29,7 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			"safe_pull_sync :: Pull from remote then sync",
 			"soft_push_sync :: Safe push to remote then sync",
 			"force_single_sync :: Single file/folder transfer",
-			"remote_session :: New remote session (no menu)",
-			"remote_sessions :: Remote sessions menu",
-			"local_sessions :: Local sessions menu",
+			"remote_session :: New remote session",
 			"back :: Return to main menu",
 		}
 
@@ -56,6 +55,7 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 		result, err := tui.ShowMenuWithPrints(menuItems, "Select DevSync Mode")
 		if err != nil {
 			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
+			util.RestoreGlobal()
 			return "cancelled"
 		}
 
@@ -178,11 +178,51 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 					f.WriteString(time.Now().Format(time.RFC3339) + " callback fired\n")
 				}
 			}
+			routerStop := make(chan struct{})
+			wg := sync.WaitGroup{}
+			wg.Add(1)
+			go func() {
+				defer func() {
+					fmt.Println("DEBUG: stdin reader exiting")
+					wg.Done()
+				}()
+				buf := make([]byte, 4096)
+				for {
+					select {
+					case <-routerStop:
+						fmt.Println("DEBUG: router stopping")
+						return
+					default:
+						n, err := os.Stdin.Read(buf)
+						if n <= 0 {
+							if err != nil {
+								return
+							}
+							continue
+						}
+						data := buf[:n]
+						i := 0
+
+						for i < len(data) {
+							w := bridge.GetStdinWriter()
+							if w != nil {
+								_, _ = w.Write(data[i : i+1])
+							}
+							i++
+						}
+					}
+				}
+			}()
+
+			bridge.SetOnExitListener(func() {
+				close(routerStop)
+			})
 
 			if err := bridge.StartInteractiveShell(cb); err != nil {
 				util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
 			}
 			// Ensure bridge and client are closed before returning to menu
+			wg.Wait()
 			bridge.Close()
 			sshClient.Close()
 

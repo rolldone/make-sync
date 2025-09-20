@@ -11,9 +11,7 @@ import (
 
 	"github.com/asaskevich/EventBus"
 
-	"github.com/aymanbagabas/go-pty"
 	"github.com/rjeczalik/notify"
-	"golang.org/x/term"
 )
 
 type remoteInitState struct {
@@ -69,13 +67,9 @@ type Session struct {
 	Command string // Command being run (if any)
 	// goroutine removed - not used
 	// PTY support
-	pty      pty.Pty // PTY interface for session persistence
-	ptyState []byte  // PTY state for persistence (screen buffer, etc.)
-	isActive bool    // Whether this session is currently active/displayed
+	isActive bool // Whether this session is currently active/displayed
 	// I/O handling
-	ioCancel     chan bool   // Channel to cancel I/O goroutines
-	ioOnce       sync.Once   // Ensure I/O cancel only happens once
-	termOldState *term.State // Terminal state before raw mode (for restoration)
+	// old PTY and IO fields removed; PTY persistence is handled by PTYManager/Bridge
 }
 
 // Watcher handles file system watching
@@ -111,6 +105,8 @@ type Watcher struct {
 	ptyMgr *PTYManager
 	// NOTE: remote initialization is tracked in package-level registry
 	Slot *int
+	// isLocal indicates the menu is currently showing local commands submenu
+	isLocal bool
 	// runtime control
 	running   bool
 	runningMu sync.Mutex

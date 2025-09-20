@@ -116,28 +116,6 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 		TUIActive:      false,
 	}
 
-	// start a short goroutine to handle TUI-driven shortcuts
-	go func() {
-		for ev := range watcher.KeyboardEvents {
-			switch ev {
-			case "reload":
-				watcher.HandleReloadCommand()
-			case "stats":
-				watcher.HandleShowStatsCommand()
-			case "deploy":
-				watcher.HandleDeployAgentCommand()
-			default:
-				// alt keys like "alt3".. "alt9" -> synthesize slot handling
-				if strings.HasPrefix(ev, "alt") && len(ev) > 3 {
-					// parse numeric slot
-					slot := int(ev[3] - '0')
-					watcher.Slot = &slot
-					watcher.showCommandMenuDisplay()
-				}
-			}
-		}
-	}()
-
 	// Initialize command manager after watcher is created
 	watcher.commands = NewCommandManager(watcher)
 
@@ -1514,7 +1492,6 @@ func (w *Watcher) HandleShowStatsCommand() {
 	if err != nil {
 		statsBlock += fmt.Sprintf("❌ Failed to get cache stats: %v", err)
 		util.Default.PrintBlock(statsBlock, true)
-		return
 		return
 	}
 

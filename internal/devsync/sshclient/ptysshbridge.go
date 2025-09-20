@@ -27,8 +27,6 @@ type PTYSSHBridge struct {
 	StdinMatcher   func([]byte) bool
 	StdinCallback  func([]byte)
 	StdinObserver  func([]byte)
-	inputDisabled  bool
-	inputMu        sync.Mutex
 	outputDisabled bool
 	outputMu       sync.Mutex
 
@@ -36,12 +34,14 @@ type PTYSSHBridge struct {
 
 	// stdin control
 	stopStdinCh chan struct{}
-	stdinWg     sync.WaitGroup
 
 	stdinPipe io.WriteCloser
 
 	mu    sync.RWMutex // protect concurrent access to shared fields below
 	stdin io.WriteCloser
+	// exit listener called when the interactive session exits
+	exitListener func()
+	exitMu       sync.Mutex
 }
 
 // NewPTYSSHBridge creates a new PTY-SSH bridge for interactive sessions
@@ -96,67 +96,6 @@ func NewPTYSSHBridgeWithCommand(sshClient *SSHClient, initialCommand string) (*P
 	}, nil
 }
 
-// stdinLoop handles forwarding stdin to remote
-func (bridge *PTYSSHBridge) stdinLoop() {
-	defer bridge.stdinWg.Done()
-
-	buf := make([]byte, 4096)
-	for {
-		// check stop or io cancel first
-		select {
-		case <-bridge.stopStdinCh:
-			return
-		case <-bridge.ioCancel:
-			return
-		default:
-		}
-
-		n, err := os.Stdin.Read(buf)
-		if n <= 0 {
-			if err != nil {
-				return
-			}
-			continue
-		}
-
-		// check if input handling is disabled
-		bridge.inputMu.Lock()
-		disabled := bridge.inputDisabled
-		bridge.inputMu.Unlock()
-		if disabled {
-			continue
-		}
-
-		data := make([]byte, n)
-		copy(data, buf[:n])
-
-		// snapshot hooks using thread-safe getters
-		observer := bridge.GetStdinObserver()
-		matcher := bridge.GetStdinMatcher()
-		callback := bridge.GetStdinCallback()
-
-		if observer != nil {
-			go observer(data)
-		}
-		if matcher != nil && callback != nil && matcher(data) {
-			go callback(data)
-		}
-
-		// snapshot current writers under lock to avoid races with writers being swapped
-		bridge.mu.RLock()
-		w := bridge.stdin
-		sp := bridge.stdinPipe
-		bridge.mu.RUnlock()
-
-		// prefer explicit stdin writer if set, otherwise fallback to session stdinPipe
-		if w != nil {
-			_, _ = w.Write(data)
-		} else if sp != nil {
-			_, _ = sp.Write(data)
-		}
-	}
-}
-
 // StartInteractiveShell starts an interactive shell session
 func (bridge *PTYSSHBridge) StartInteractiveShell(cb func([]byte)) error {
 	cols, rows := 80, 24
@@ -186,6 +125,8 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(cb func([]byte)) error {
 		return err
 	}
 	bridge.stdinPipe = stdinPipe
+	// expose stdin writer so PTYManager can forward stdin bytes into the session
+	bridge.SetStdinWriter(stdinPipe)
 	stdoutPipe, err := bridge.sshSession.StdoutPipe()
 	if err != nil {
 		return err
@@ -206,10 +147,10 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(cb func([]byte)) error {
 		}
 	}
 
-	// start stdin goroutine
-	bridge.stopStdinCh = make(chan struct{})
-	bridge.stdinWg.Add(1)
-	go bridge.stdinLoop()
+	// Note: the bridge no longer starts a stdin-reading goroutine. The PTYManager
+	// is responsible for reading os.Stdin and forwarding bytes into the bridge's
+	// stdin writer. This avoids multiple readers on os.Stdin and centralizes
+	// shortcut handling.
 
 	// handle output
 	go func() {
@@ -251,6 +192,16 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(cb func([]byte)) error {
 
 	err = bridge.sshSession.Wait()
 	bridge.ioOnce.Do(func() { close(bridge.ioCancel) })
+	// Notify registered exit listener (if any). Protect invocation with mutex
+	bridge.exitMu.Lock()
+	if bridge.exitListener != nil {
+		go func(cb func()) {
+			defer func() { _ = recover() }()
+			cb()
+		}(bridge.exitListener)
+		bridge.exitListener = nil
+	}
+	bridge.exitMu.Unlock()
 	return err
 }
 
@@ -258,7 +209,6 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(cb func([]byte)) error {
 func (bridge *PTYSSHBridge) Pause() error {
 	if bridge.stopStdinCh != nil {
 		close(bridge.stopStdinCh)
-		bridge.stdinWg.Wait()
 		bridge.stopStdinCh = nil
 	}
 
@@ -288,9 +238,8 @@ func (bridge *PTYSSHBridge) Resume() error {
 	}
 
 	if bridge.stdinPipe != nil {
-		bridge.stopStdinCh = make(chan struct{})
-		bridge.stdinWg.Add(1)
-		go bridge.stdinLoop()
+		// bridge.stopStdinCh = make(chan struct{})
+		// go bridge.stdinLoop()
 	}
 	return nil
 }
@@ -306,7 +255,6 @@ func (bridge *PTYSSHBridge) Close() error {
 	}
 	if bridge.stopStdinCh != nil {
 		close(bridge.stopStdinCh)
-		bridge.stdinWg.Wait()
 	}
 	if bridge.localTTY != nil {
 		bridge.localTTY.Close()
@@ -374,4 +322,16 @@ func (b *PTYSSHBridge) getStdinWriter() io.WriteCloser {
 	w := b.stdin
 	b.mu.RUnlock()
 	return w
+}
+
+// Exported wrappers to satisfy Bridge interface in other packages.
+func (b *PTYSSHBridge) SetStdinWriter(w io.WriteCloser) { b.setStdinWriter(w) }
+func (b *PTYSSHBridge) GetStdinWriter() io.WriteCloser  { return b.getStdinWriter() }
+
+// SetOnExitListener registers a callback to be executed when the bridge detects
+// the interactive session has ended. The callback will be executed at most once.
+func (b *PTYSSHBridge) SetOnExitListener(cb func()) {
+	b.exitMu.Lock()
+	b.exitListener = cb
+	b.exitMu.Unlock()
 }
