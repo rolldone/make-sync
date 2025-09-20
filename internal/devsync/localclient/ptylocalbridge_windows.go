@@ -8,10 +8,6 @@ import (
 	"io"
 )
 
-// Windows stub: local PTY bridge not implemented on Windows yet.
-type PTYLocalBridge struct{}
-
-func NewPTYLocalBridge() (*PTYLocalBridge, error) { return &PTYLocalBridge{}, nil }
 func (b *PTYLocalBridge) StartInteractiveShell(cb func([]byte)) error {
 	_ = cb
 	return errors.New("local PTY not supported on Windows")
