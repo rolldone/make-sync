@@ -714,8 +714,6 @@ func (w *Watcher) deployAgentToRemote(agentPath string) error {
 		w.safePrintln("📦 Uploading new agent to remote server...")
 		// fmt.Println("absolute agent path:", absAgentPath)
 		// fmt.Println("remote agent path:", remoteAgentPath)
-		fmt.Println("absolute agent path:", absAgentPath)
-		fmt.Println("remote agent path:", remoteAgentPath)
 		if err := w.sshClient.SyncFile(absAgentPath, remoteAgentPath); err != nil {
 			w.safePrintf("err: %v\n", err)
 			return fmt.Errorf("failed to upload agent: %v", err)
