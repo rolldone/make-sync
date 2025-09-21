@@ -11,5 +11,9 @@ type PTY interface {
 	Close() error
 	Fd() uintptr
 	File() *os.File
+	// InPipe returns a file suitable for writing to the PTY's stdin.
+	InPipe() *os.File
+	// OutPipe returns a file suitable for reading from the PTY's stdout/stderr.
+	OutPipe() *os.File
 	SetSize(rows, cols int) error
 }

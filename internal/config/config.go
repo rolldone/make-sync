@@ -25,12 +25,12 @@ type Config struct {
 	ProjectName    string                 `yaml:"project_name"`
 	Username       string                 `yaml:"username"`
 	PrivateKey     string                 `yaml:"privateKey"`
+	Password       string                 `yaml:"password,omitempty"`
 	Host           string                 `yaml:"host"`
 	Port           string                 `yaml:"port"`
 	LocalPath      string                 `yaml:"localPath"`
 	RemotePath     string                 `yaml:"remotePath"`
 	Devsync        Devsync                `yaml:"devsync"`
-	TriggerPerm    TriggerPermission      `yaml:"trigger_permission"`
 	DirectAccess   DirectAccess           `yaml:"direct_access"`
 }
 
@@ -40,17 +40,19 @@ type SyncCollection struct {
 }
 
 type Devsync struct {
-	OSTarget       string   `yaml:"os_target"`
-	Auth           Auth     `yaml:"auth"`
-	Ignores        []string `yaml:"ignores"`
-	AgentWatchs    []string `yaml:"agent_watchs"`
-	ManualTransfer []string `yaml:"manual_transfer"`
-	Script         Script   `yaml:"script"`
+	OSTarget       string            `yaml:"os_target"`
+	Auth           Auth              `yaml:"auth"`
+	Ignores        []string          `yaml:"ignores"`
+	AgentWatchs    []string          `yaml:"agent_watchs"`
+	ManualTransfer []string          `yaml:"manual_transfer"`
+	Script         Script            `yaml:"script"`
+	TriggerPerm    TriggerPermission `yaml:"trigger_permission"`
 }
 
 type Auth struct {
 	Username   string `yaml:"username"`
 	PrivateKey string `yaml:"privateKey"`
+	Password   string `yaml:"password,omitempty"`
 	Host       string `yaml:"host"`
 	Port       string `yaml:"port"`
 	LocalPath  string `yaml:"localPath,omitempty"`
@@ -244,7 +246,7 @@ func MapTemplateToConfig(template TemplateConfig) Config {
 	}
 
 	// Map TriggerPerm
-	config.TriggerPerm = TriggerPermission{
+	config.Devsync.TriggerPerm = TriggerPermission{
 		UnlinkFolder: template.TriggerPerm.UnlinkFolder,
 		Unlink:       template.TriggerPerm.Unlink,
 		Change:       template.TriggerPerm.Change,

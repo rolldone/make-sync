@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +14,12 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
+
+// shellEscape escapes a string for safe single-quoted inclusion in a shell command.
+// It wraps s in single quotes and escapes any existing single quotes.
+func shellEscape(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
 
 // SSHClient represents an SSH client connection
 type SSHClient struct {
@@ -88,6 +95,10 @@ func (c *SSHClient) Close() error {
 // UploadFile uploads a local file to remote server
 func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 
+	// Defensive normalize remotePath: convert Windows backslashes to POSIX forward slashes
+	remotePath = strings.ReplaceAll(remotePath, "\\", "/")
+	remotePath = path.Clean(remotePath)
+
 	// Open local file
 	localFile, err := os.Open(localPath)
 	if err != nil {
@@ -108,9 +119,11 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	}
 	defer session.Close()
 
-	// Create remote directory if it doesn't exist
-	remoteDir := filepath.Dir(remotePath)
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteDir)
+	// Create remote directory if it doesn't exist (remote paths are POSIX)
+	remoteDir := path.Dir(remotePath)
+	// fmt.Println("remoteDir:", remoteDir)
+	// quote remoteDir to protect spaces/special chars
+	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
 	if err := c.RunCommand(mkdirCmd); err != nil {
 		return fmt.Errorf("failed to create remote directory: %v", err)
 	}
@@ -135,8 +148,10 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	}
 
 	// Start scp in 'to' mode targeting the remote directory (not including filename)
-	targetDir := filepath.Dir(remotePath)
-	if err := session.Start(fmt.Sprintf("scp -t %s", targetDir)); err != nil {
+	// Use POSIX `path.Dir` for remote paths and quote the argument for the remote shell.
+	targetDir := path.Dir(remotePath)
+	cmd := fmt.Sprintf("scp -t %s", shellEscape(targetDir))
+	if err := session.Start(cmd); err != nil {
 		session.Close()
 		return fmt.Errorf("failed to start scp on remote: %v", err)
 	}
@@ -156,7 +171,7 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 				ch <- nil
 			case 1, 2:
 				// read error message from stderr
-				msg := make([]byte, 1024)
+				msg := make([]byte, 2048)
 				n, _ := stderr.Read(msg)
 				ch <- fmt.Errorf("scp remote error: %s", strings.TrimSpace(string(msg[:n])))
 			default:
@@ -180,7 +195,7 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	}
 
 	// send file header: C<mode> <size> <filename>\n
-	filename := filepath.Base(remotePath)
+	filename := path.Base(remotePath)
 
 	fmt.Fprintf(stdin, "C%04o %d %s\n", stat.Mode().Perm(), stat.Size(), filename)
 
@@ -244,7 +259,6 @@ func (c *SSHClient) RunCommandWithOutput(cmd string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("command failed: %v", err)
 	}
-
 	return string(output), nil
 }
 
@@ -282,7 +296,10 @@ func (c *SSHClient) DownloadFile(localPath, remotePath string) error {
 	}
 
 	// Start scp in 'from' mode to fetch the file
-	if err := session.Start(fmt.Sprintf("scp -f %s", remotePath)); err != nil {
+	// Ensure remotePath is POSIX and quote it for the remote shell
+	remotePath = strings.ReplaceAll(remotePath, "\\", "/")
+	remotePath = path.Clean(remotePath)
+	if err := session.Start(fmt.Sprintf("scp -f %s", shellEscape(remotePath))); err != nil {
 		session.Close()
 		return fmt.Errorf("failed to start scp on remote: %v", err)
 	}

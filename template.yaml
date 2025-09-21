@@ -26,6 +26,11 @@ devsync:
   manual_transfer:
     - ".ssh"
     - "node_modules"
+  trigger_permission:
+    unlink_folder: true
+    unlink: true
+    change: true
+    add: true
   script:
     local:
       on_ready: "echo 'Local environment ready'"
@@ -40,11 +45,7 @@ devsync:
         - "docker compose down && docker compose up"
         - "docker compose exec app bash --login"
         - "tail -f storage/log/*.log"
-trigger_perm:
-  unlink_folder: true
-  unlink: true
-  change: true
-  add: true
+
 direct_access:
   config_file: ""
   ssh_configs:

@@ -124,15 +124,11 @@ func startWatching() {
 	workingDir := cwd
 	fmt.Printf("🔧 DEBUG: workingDir = '%s'\n", workingDir)
 	fmt.Printf("🔧 DEBUG: len(AgentWatchs) = %d\n", len(config.Devsync.AgentWatchs))
-	currentDir := "."
-
 	if err := os.Chdir(workingDir); err != nil {
 		fmt.Printf("⚠️  Failed to change to working directory: %v\n", err)
 		fmt.Println("🔄 Continuing with current directory")
-		currentDir = workingDir // Still use working dir for path resolution
 	} else {
 		fmt.Printf("✅ Successfully changed to working directory: %s\n", workingDir)
-		currentDir = workingDir
 	}
 
 	// Resolve watch paths relative to working directory
@@ -156,8 +152,36 @@ func startWatching() {
 	fmt.Printf("📋 Final watch paths: %v\n", watchPaths)
 
 	if len(watchPaths) == 0 {
-		fmt.Println("⚠️  No agent_watchs configured, watching current directory")
-		watchPaths = []string{currentDir}
+		fmt.Println("⚠️  No agent_watchs configured — agent will remain running and poll for config changes")
+		// Keep agent running and poll .sync_temp/config.json until watch paths are provided
+		go func() {
+			for {
+				time.Sleep(5 * time.Second)
+				cfg, err := loadConfig()
+				if err != nil {
+					// still no config, continue polling
+					fmt.Printf("🔍 Polling for config: %v\n", err)
+					continue
+				}
+				if len(cfg.Devsync.AgentWatchs) > 0 {
+					// Resolve newly discovered watch paths relative to workingDir
+					newPaths := make([]string, len(cfg.Devsync.AgentWatchs))
+					for i, wp := range cfg.Devsync.AgentWatchs {
+						if workingDir != "" && !filepath.IsAbs(wp) {
+							newPaths[i] = filepath.Join(workingDir, wp)
+						} else {
+							newPaths[i] = wp
+						}
+					}
+					fmt.Printf("✅ Detected new watch paths: %v — starting watcher\n", newPaths)
+					setupWatcher(newPaths)
+					return
+				}
+			}
+		}()
+
+		// Block main goroutine so agent stays alive even when not watching
+		select {}
 	}
 
 	fmt.Printf("📋 Loaded config with %d watch paths\n", len(watchPaths))

@@ -51,6 +51,12 @@ func (p *unixPTY) Close() error {
 }
 func (p *unixPTY) Fd() uintptr    { return p.f.Fd() }
 func (p *unixPTY) File() *os.File { return p.f }
+
+// InPipe returns the master file used to write to the PTY.
+func (p *unixPTY) InPipe() *os.File { return p.f }
+
+// OutPipe returns the master file used to read from the PTY.
+func (p *unixPTY) OutPipe() *os.File { return p.f }
 func (p *unixPTY) SetSize(rows, cols int) error {
 	return creackpty.Setsize(p.f, &creackpty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 }

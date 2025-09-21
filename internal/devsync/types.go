@@ -2,6 +2,7 @@ package devsync
 
 import (
 	"os/exec"
+	"runtime"
 	"sync"
 	"time"
 
@@ -35,8 +36,13 @@ const (
 func (w *Watcher) executeLocalCommandWithOutput(cmd string) (string, error) {
 	util.Default.Printf("🔧 Executing: %s\n", cmd)
 
-	// Execute the command using bash -c for complex commands
-	command := exec.Command("bash", "-c", cmd)
+	// Use platform-appropriate shell: on Windows use cmd /C, otherwise bash -c
+	var command *exec.Cmd
+	if runtime.GOOS == "windows" {
+		command = exec.Command("cmd", "/C", cmd)
+	} else {
+		command = exec.Command("bash", "-c", cmd)
+	}
 	command.Dir = "." // Execute in current directory
 
 	output, err := command.CombinedOutput()

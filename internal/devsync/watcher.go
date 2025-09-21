@@ -1,20 +1,26 @@
 package devsync
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"make-sync/internal/config"
 	"make-sync/internal/devsync/sshclient"
 	"make-sync/internal/util"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/asaskevich/EventBus"
+	"github.com/cespare/xxhash/v2"
 	"github.com/rjeczalik/notify"
 	"gopkg.in/yaml.v3"
 )
@@ -298,7 +304,7 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 	}
 
 	// Hide cursor while streaming and print a one-line status
-	w.hideCursor()
+	// w.hideCursor()
 	w.safeStatusln("📡 Agent watch command started, monitoring output stream...")
 
 	// Process output in real-time
@@ -381,7 +387,11 @@ func (w *Watcher) processAgentOutput(output string) {
 					hashValue := hashParts[2]
 
 					// Determine remote base and try to compute relative path
-					localPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
+					localPath, lerr := util.RemoteToLocal(w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath, filePath)
+					if lerr != nil {
+						w.safePrintf("⚠️  Could not map remote path to local: %v\n", lerr)
+						continue
+					}
 
 					// Map to local path under watchPath
 					var err error
@@ -435,7 +445,11 @@ func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 		w.safePrintf("🗑️  Received delete event for %s\n", filePath)
 
 		// Map remote path to local path
-		relPath := strings.ReplaceAll(filePath, w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath)
+		relPath, rerr := util.RemoteToLocal(w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath, filePath)
+		if rerr != nil {
+			w.safePrintf("⚠️  Could not map remote delete path to local: %v\n", rerr)
+			return
+		}
 
 		// Attempt to remove local file or directory
 		if err := os.RemoveAll(relPath); err != nil {
@@ -606,12 +620,64 @@ func (w *Watcher) buildAgentForTarget(targetOS string) (string, error) {
 		goos = "linux"
 	}
 
-	// Build command with absolute path
-	buildCmd := fmt.Sprintf("cd %s && GOOS=%s go build -o %s .", agentSourceDir, goos, filepath.Join(projectRoot, agentBinaryName))
+	// Build directly using the go tool to avoid OS-specific shell quoting and
+	// path issues (previously used a shell one-liner which broke on Windows).
+	outputPath := filepath.Join(projectRoot, agentBinaryName)
 
-	// Execute build
-	if err := w.executeLocalCommand(buildCmd); err != nil {
-		return "", fmt.Errorf("build failed: %v", err)
+	w.safePrintf("🔨 Building agent in %s (GOOS=%s) -> %s\n", agentSourceDir, goos, outputPath)
+
+	// Prepare build command
+	cmd := exec.Command("go", "build", "-o", outputPath, ".")
+	cmd.Dir = agentSourceDir
+
+	// Start from existing env but sanitize any GOOS/GOARCH/GOARM entries so we
+	// can set explicit values for cross-compilation.
+	env := []string{}
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "GOOS=") || strings.HasPrefix(e, "GOARCH=") || strings.HasPrefix(e, "GOARM=") {
+			continue
+		}
+		env = append(env, e)
+	}
+
+	// Always set GOOS
+	env = append(env, "GOOS="+goos)
+
+	// If we have an SSH client, try to detect remote architecture and set GOARCH accordingly
+	if w.sshClient != nil {
+		if output, err := w.sshClient.RunCommandWithOutput("uname -m"); err == nil {
+			arch := strings.TrimSpace(output)
+			// Map uname -m to GOARCH/GOARM values
+			switch arch {
+			case "x86_64", "amd64":
+				env = append(env, "GOARCH=amd64")
+			case "aarch64", "arm64":
+				env = append(env, "GOARCH=arm64")
+			case "armv7l", "armv7":
+				env = append(env, "GOARCH=arm")
+				env = append(env, "GOARM=7")
+			case "armv6l", "armv6":
+				env = append(env, "GOARCH=arm")
+				env = append(env, "GOARM=6")
+			default:
+				// fallback: do not set GOARCH and let Go use defaults
+			}
+		} else {
+			w.safePrintf("⚠️  Could not detect remote arch: %v\n", err)
+		}
+	}
+
+	cmd.Env = env
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		w.safePrintf("❌ Build failed: %v\n", err)
+		w.safePrintf("Output: %s\n", string(out))
+		return "", fmt.Errorf("build failed: %v\nOutput: %s", err, string(out))
+	}
+
+	if len(out) > 0 {
+		w.safePrintf("✅ Build output: %s\n", string(out))
 	}
 
 	return agentBinaryName, nil
@@ -648,6 +714,8 @@ func (w *Watcher) deployAgentToRemote(agentPath string) error {
 		w.safePrintln("📦 Uploading new agent to remote server...")
 		// fmt.Println("absolute agent path:", absAgentPath)
 		// fmt.Println("remote agent path:", remoteAgentPath)
+		fmt.Println("absolute agent path:", absAgentPath)
+		fmt.Println("remote agent path:", remoteAgentPath)
 		if err := w.sshClient.SyncFile(absAgentPath, remoteAgentPath); err != nil {
 			w.safePrintf("err: %v\n", err)
 			return fmt.Errorf("failed to upload agent: %v", err)
@@ -692,8 +760,17 @@ func (w *Watcher) shouldSkipAgentUpload(localAgentPath, remoteAgentPath string) 
 		return false // Don't skip if we can't get local identity
 	}
 
+	remoteBase := w.config.Devsync.Auth.RemotePath
+	if remoteBase == "" {
+		remoteBase = "." // fallback to current directory
+	}
+	// Create .sync_temp directory on remote using full path (always use / for remote)
+	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
+	remoteAgentPath = w.joinRemotePath(remoteSyncTemp, "sync-agent")
+
 	// Get remote agent identity
-	remoteIdentityCmd := fmt.Sprintf("cd %s && chmod +x sync-agent && ./sync-agent identity", filepath.Dir(remoteAgentPath))
+	remoteIdentityCmd := fmt.Sprintf("chmod +x %s && %s identity", remoteAgentPath, remoteAgentPath)
+
 	if output, err := w.sshClient.RunCommandWithOutput(remoteIdentityCmd); err != nil {
 		w.safePrintf("⚠️  Could not get remote agent identity: %v\n", err)
 		return false // Don't skip if we can't get remote identity
@@ -715,29 +792,40 @@ func (w *Watcher) shouldSkipAgentUpload(localAgentPath, remoteAgentPath string) 
 
 // getLocalAgentIdentity gets the identity hash of the local agent binary
 func (w *Watcher) getLocalAgentIdentity(agentPath string) (string, error) {
-	// Execute local agent with identity command
-	identityCmd := fmt.Sprintf("%s identity", agentPath)
-	output, err := w.executeLocalCommandWithOutput(identityCmd)
+	// Compute hash of the local agent binary directly (xxhash, same as agent)
+	h, err := calculateFileHash(agentPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to get local agent identity: %v", err)
+		return "", fmt.Errorf("failed to calculate local agent hash: %v", err)
 	}
+	return h, nil
+}
 
-	// The output should be just the hash
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) == 0 {
-		return "", fmt.Errorf("no identity output from local agent")
+// calculateFileHash computes xxhash of a local file (matches agent implementation)
+func calculateFileHash(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
 	}
+	defer f.Close()
 
-	// Get the last line which should contain the hash
-	return strings.TrimSpace(lines[len(lines)-1]), nil
+	h := xxhash.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 // executeLocalCommand executes a command locally
 func (w *Watcher) executeLocalCommand(cmd string) error {
 	w.safePrintf("🔧 Executing: %s\n", cmd)
 
-	// Execute the command using bash -c for complex commands
-	command := exec.Command("bash", "-c", cmd)
+	// Use platform-appropriate shell: on Windows use cmd /C, otherwise bash -c
+	var command *exec.Cmd
+	if runtime.GOOS == "windows" {
+		command = exec.Command("cmd", "/C", cmd)
+	} else {
+		command = exec.Command("bash", "-c", cmd)
+	}
 	command.Dir = "." // Execute in current directory
 
 	output, err := command.CombinedOutput()
@@ -785,10 +873,10 @@ func (w *Watcher) Start() error {
 
 	w.safePrintf("🔍 Starting file watcher on: %s\n", absWatchPath)
 	w.safePrintf("📋 Watch permissions - Add: %v, Change: %v, Unlink: %v, UnlinkFolder: %v\n",
-		w.config.TriggerPerm.Add,
-		w.config.TriggerPerm.Change,
-		w.config.TriggerPerm.Unlink,
-		w.config.TriggerPerm.UnlinkFolder)
+		w.config.Devsync.TriggerPerm.Add,
+		w.config.Devsync.TriggerPerm.Change,
+		w.config.Devsync.TriggerPerm.Unlink,
+		w.config.Devsync.TriggerPerm.UnlinkFolder)
 
 	// Ensure we safely initialize watchChan if needed. Accesses to watchChan
 	// race when other goroutines (StopNotify) set/close it, so take a small
@@ -977,19 +1065,19 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 	if cfgSnapshot != nil {
 		switch eventType {
 		case EventCreate:
-			if !cfgSnapshot.TriggerPerm.Add {
+			if !cfgSnapshot.Devsync.TriggerPerm.Add {
 				return
 			}
 		case EventWrite:
-			if !cfgSnapshot.TriggerPerm.Change {
+			if !cfgSnapshot.Devsync.TriggerPerm.Change {
 				return
 			}
 		case EventRemove:
-			if !cfgSnapshot.TriggerPerm.Unlink {
+			if !cfgSnapshot.Devsync.TriggerPerm.Unlink {
 				return
 			}
 		case EventRename:
-			if !cfgSnapshot.TriggerPerm.Unlink {
+			if !cfgSnapshot.Devsync.TriggerPerm.Unlink {
 				return
 			}
 		}
@@ -1030,8 +1118,24 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 	// Handle SSH sync / delete if SSH client is available
 	if w.sshClient != nil {
 		if event.EventType == EventRemove {
-			// Map local path to remote path and attempt to remove remotely
-			remotePath := strings.ReplaceAll(event.Path, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
+			// Map local path to remote path using POSIX join (preserve forward slashes)
+			remoteBase := w.config.Devsync.Auth.RemotePath
+			if remoteBase == "" {
+				remoteBase = "."
+			}
+			var remotePath string
+			if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, event.Path); rerr == nil {
+				remotePath = w.joinRemotePath(remoteBase, filepath.ToSlash(rel))
+			} else {
+				// Try robust helper conversion instead of naive replace
+				rp, merr := util.LocalToRemote(w.config.Devsync.Auth.LocalPath, remoteBase, event.Path)
+				if merr != nil {
+					w.safePrintf("⚠️  Could not map local path to remote: %v\n", merr)
+					return
+				}
+				remotePath = rp
+			}
+
 			// Final failsafe: don't try to delete .sync_temp on remote
 			if strings.Contains(remotePath, ".sync_temp") {
 				w.safePrintf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remotePath)
@@ -1143,10 +1247,26 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 	}
 
 	localPath := event.Path
-	remotePath := strings.ReplaceAll(localPath, w.config.Devsync.Auth.LocalPath, w.config.Devsync.Auth.RemotePath)
 
-	// Create remote directory if it doesn't exist
-	remoteDir := filepath.Dir(remotePath)
+	// Compute remote path using POSIX join (ensure forward slashes)
+	remoteBase := w.config.Devsync.Auth.RemotePath
+	if remoteBase == "" {
+		remoteBase = "."
+	}
+	var remotePath string
+	if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, localPath); rerr == nil {
+		remotePath = w.joinRemotePath(remoteBase, filepath.ToSlash(rel))
+	} else {
+		rp, merr := util.LocalToRemote(w.config.Devsync.Auth.LocalPath, remoteBase, localPath)
+		if merr != nil {
+			w.safePrintf("⚠️  Could not map local path to remote for sync: %v\n", merr)
+			return
+		}
+		remotePath = rp
+	}
+
+	// Create remote directory if it doesn't exist (use path.Dir for POSIX paths)
+	remoteDir := path.Dir(remotePath)
 	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
 	if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
 		w.safePrintf("❌ Failed to create remote directory %s: %v\n", remoteDir, err)
@@ -1375,17 +1495,32 @@ func (w *Watcher) matchesPattern(path, pattern string) bool {
 	return strings.Contains(path, pattern)
 }
 
+// fileSHA256 computes the SHA256 hex digest of a local file
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // isEventAllowed checks if an event type is allowed by trigger permissions
 func (w *Watcher) isEventAllowed(eventType EventType) bool {
 	switch eventType {
 	case EventCreate:
-		return w.config.TriggerPerm.Add
+		return w.config.Devsync.TriggerPerm.Add
 	case EventWrite:
-		return w.config.TriggerPerm.Change
+		return w.config.Devsync.TriggerPerm.Change
 	case EventRemove:
-		return w.config.TriggerPerm.Unlink
+		return w.config.Devsync.TriggerPerm.Unlink
 	case EventRename:
-		return w.config.TriggerPerm.Unlink // For rename, we use unlink permission
+		return w.config.Devsync.TriggerPerm.Unlink // For rename, we use unlink permission
 	default:
 		return false
 	}
@@ -1398,7 +1533,7 @@ func (w *Watcher) isDuplicateEvent(event FileEvent) bool {
 	key := event.Path + string(rune(event.EventType))
 	if lastEvent, exists := w.lastEvents[key]; exists {
 		// If same event type for same path within 1000ms, consider it duplicate
-		if time.Since(lastEvent.Timestamp) < 1*time.Second {
+		if time.Since(lastEvent.Timestamp) < 3*time.Second {
 			return true
 		}
 	}

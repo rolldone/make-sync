@@ -57,13 +57,18 @@ func (rcm *RemoteCommandManager) HandleDeployAgentCommand() {
 		fmt.Printf("❌ Failed to build/deploy agent: %v\n", err)
 		return
 	}
-
+	remoteBase := rcm.watcher.config.Devsync.Auth.RemotePath
+	if remoteBase == "" {
+		remoteBase = "." // fallback to current directory
+	}
+	// Create .sync_temp directory on remote using full path (always use / for remote)
+	remoteSyncTemp := rcm.watcher.joinRemotePath(remoteBase, ".sync_temp")
 	fmt.Printf("✅ Agent deployed successfully!\n")
-	fmt.Printf("💡 Agent is now available at: ~/.sync_temp/sync-agent\n")
-
+	fmt.Printf("💡 Agent is now available at: %s/sync-agent\n", remoteSyncTemp)
+	remoteAgentPath := rcm.watcher.joinRemotePath(remoteSyncTemp, "sync-agent")
 	// Additional verification - show agent info
-	if output, err := rcm.watcher.sshClient.RunCommandWithOutput("file .sync_temp/sync-agent"); err == nil {
-		fmt.Printf("📋 Agent info: %s", strings.TrimSpace(output))
+	if output, err := rcm.watcher.sshClient.RunCommandWithOutput(fmt.Sprintf("%s identity", remoteAgentPath)); err == nil {
+		fmt.Printf("📋 Agent identity: %s", strings.TrimSpace(output))
 	}
 }
 

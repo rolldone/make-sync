@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -86,6 +86,7 @@ func (fc *FileCache) ShouldSyncFile(filePath string) (bool, error) {
 	}
 
 	// Calculate current hash
+	// fmt.Println("filePath:", filePath)
 	currentHash, err := fc.CalculateFileHash(filePath)
 	if err != nil {
 		return false, err
@@ -118,7 +119,8 @@ func (fc *FileCache) ShouldSyncFile(filePath string) (bool, error) {
 	}
 
 	existing := existingRecords[0]
-
+	// fmt.Println("currentHash:", currentHash)
+	// fmt.Println("💾 Existing cache for", relPath, "with hash", existing.Hash)
 	// Check if file has changed
 	if existing.Hash != currentHash {
 		// File has changed, should sync
