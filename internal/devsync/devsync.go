@@ -223,7 +223,7 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	sshClient.Close()
 
 	flushStdin()
-	sendEnter()
+	sendKeyA()
 	time.Sleep(70 * time.Millisecond)
 
 	return nil
