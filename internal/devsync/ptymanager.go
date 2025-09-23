@@ -3,7 +3,8 @@ package devsync
 import (
 	"fmt"
 	"make-sync/internal/util"
-	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,14 +19,15 @@ type PTYSession struct {
 
 // PTYManager manages multiple persistent PTY sessions (slots 3..9)
 type PTYManager struct {
-	w            *Watcher
-	sessions     map[int]*PTYSession
-	Pendingchan  chan string  // channel to send pause/unpause/exit commands
-	mu           sync.RWMutex // protect sessions map
-	pendingMu    sync.Mutex   // protect Pendingchan creation/close
-	bridgeActive Bridge       // currently active bridge (if any)
-	routerStop   chan struct{}
-	wgGroup      sync.WaitGroup
+	w                *Watcher
+	sessions         map[int]*PTYSession
+	Pendingchan      chan string  // channel to send pause/unpause/exit commands
+	mu               sync.RWMutex // protect sessions map
+	pendingMu        sync.Mutex   // protect Pendingchan creation/close
+	bridgeActive     Bridge       // currently active bridge (if any)
+	routerStop       chan struct{}
+	wgGroup          sync.WaitGroup
+	bridgeActiveSlot int // slot number of currently active bridge
 }
 
 // setPending sets the Pendingchan under lock
@@ -84,6 +86,7 @@ func (m *PTYManager) OpenRemoteSlot(slot int, remoteCmd string) error {
 // This call will block until the interactive session exits. Caller must ensure keyboard
 // handler isn't concurrently reading (watcher should restore terminal before calling Focus).
 func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) error {
+
 	m.mu.RLock()
 	s, ok := m.sessions[slot]
 	m.mu.RUnlock()
@@ -92,6 +95,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	}
 
 	m.bridgeActive = s.Bridge
+	m.bridgeActiveSlot = slot // simpan slot aktif
 
 	util.Default.Resume()
 
@@ -119,119 +123,86 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	if m.bridgeActive != nil {
 		m.bridgeActive.SetOnExitListener(func() {
 			// close pending and router in a goroutine to avoid blocking bridge
-			go m.CloseSlot(slot)
+			fmt.Println("------------PTYManager: Bridge exit listener called, closing slot", slot)
+			m.CloseSlot(slot)
+			callback(slot)
 		})
 	}
 	m.wgGroup.Add(1)
 	go func() {
 		defer func() {
 			m.wgGroup.Done()
-			// fmt.Println("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< router goroutine exiting for slot ", slot)
+			fmt.Println("DEBUG: router goroutine exiting")
 		}()
-		// defer routerWg.Done()
-		buf := make([]byte, 4096)
-		// escPending holds whether last read ended with ESC (0x1b)
-		// escPending := false
 		for {
 			select {
 			case <-m.routerStop:
-				// fmt.Println(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>> router stop detected for slot ", slot)
 				return
 			default:
-				n, err := os.Stdin.Read(buf)
-				if n <= 0 {
-					if err != nil {
-						return
-					}
-					continue
-				}
-				data := buf[:n]
-				i := 0
-
-				for i < len(data) {
-					b := data[i]
-					if b == 0x1b {
-						nb := data[i+1]
-						if nb == '1' || nb == '2' {
-							slotNum := int(nb - '0')
-							callback(slotNum)
-							m.PauseSlot(slot)
-							close(m.routerStop)
-							i += 2
-							continue
-						}
-						if nb == '0' {
-							// Alt+0 - close current session
-							m.CloseSlot(slot)
-							i += 2
-							continue
-						}
-						if nb >= '3' && nb <= '9' {
-							slotNum := int(nb - '0')
-							if slotNum == slot {
-								// already in this slot: ignore
-							} else {
-								if callback != nil {
-									// fmt.Println(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>> xxxxxxxxxxxxxxxxxxxxxxxxxx :: ", slotNum)
-									callback(slotNum)
-									m.PauseSlot(slot)
-									close(m.routerStop)
-								}
+				m.bridgeActive.SetOnInputListener(func(b []byte) {
+					// fmt.Println("DEBUG: input listener received data:", string(b))
+				})
+				m.bridgeActive.SetOnInputHitCodeListener(func(b string) {
+					// Only process alt-style messages like "alt+N" or "alt+NN".
+					if strings.Contains(b, "alt") {
+						// extract digits from the string
+						newSlot := ""
+						for _, r := range b {
+							if r >= '0' && r <= '9' {
+								newSlot += string(r)
 							}
-							// m.safeSend("pause")
-							i += 2
-							continue
 						}
-						// unknown sequence: forward ESC normally
-						w := m.bridgeActive.GetStdinWriter()
-						if w != nil {
-							_, _ = w.Write([]byte{0x1b})
+						if newSlot != "" {
+							// fmt.Println("DEBUG: input hit digits:", digits)
+							gg, err := strconv.Atoi(newSlot)
+							if err != nil {
+								fmt.Println("DEBUG: invalid slot number:", newSlot)
+								return
+							}
+							callback(gg)
+							m.PauseSlot(slot)
 						}
-						i++
-						continue
 					}
-					// otherwise forward normal byte to bridge
-					w := m.bridgeActive.GetStdinWriter()
-					if w != nil {
-						_, _ = w.Write(data[i : i+1])
-					}
-					i++
-				}
-				// fmt.Println("kkkkkkkkkkkkkk :: ", slot, data)
+				})
 			}
+
 		}
 	}()
 
 	// message loop (blocks until Pendingchan closed)
-	for msg := range m.Pendingchan {
-		switch msg {
-		case "pause":
-			util.Default.PrintBlock("⏸️  Press any key to return to menu...", true)
-			util.Default.ClearLine()
-			return nil
+	m.wgGroup.Add(1)
+	go func() {
+		defer func() {
+			m.wgGroup.Done()
+			fmt.Println("DEBUG: message loop goroutine exiting")
+		}()
+		for msg := range m.Pendingchan {
+			switch msg {
+			case "pause":
+				util.Default.PrintBlock("⏸️  Press any key to return to menu...", true)
+				util.Default.ClearLine()
 
-		case "unpause":
-			if err := m.ResumeSlot(slot); err != nil {
-				util.Default.Printf("❌ Failed to resume PTY session: %v\n", err)
-				os.Exit(1)
-			}
-			util.Default.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
-			util.Default.ClearLine()
-		case "start":
-			go func() {
-				if err := m.bridgeActive.StartInteractiveShell(nil); err != nil {
-					util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
+			case "unpause":
+				if err := m.ResumeSlot(slot); err != nil {
+					util.Default.Printf("❌ Failed to resume PTY session: %v\n", err)
 					// os.Exit(1)
 				}
-				// _ = m.CloseSlot(slot)
-			}()
+				util.Default.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
+				// util.Default.ClearLine()
+			case "start":
+				go func() {
+					if err := m.bridgeActive.StartInteractiveShell(nil); err != nil {
+						util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
+						// os.Exit(1)
+					}
+				}()
+			}
 		}
-	}
+	}()
 	m.wgGroup.Wait()
-	// fmt.Println("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< Focus exiting for slot ", slot)
 	// No per-bridge stdin matchers/callbacks to restore; keyboard shortcuts
 	// are handled by the Watcher/PTYManager input router.
-
+	fmt.Println("DEBUG: Focus exiting normally")
 	return nil
 }
 
@@ -245,8 +216,12 @@ func (m *PTYManager) PauseSlot(slot int) error {
 	}
 	// clear callback then pause
 	s.Bridge.SetStdinCallback(nil)
+	s.Bridge.SetOnInputListener(nil)
+	s.Bridge.SetOnInputHitCodeListener(nil)
 	err := s.Bridge.Pause()
+
 	close(m.Pendingchan)
+	close(m.routerStop)
 
 	return err
 }
@@ -267,16 +242,12 @@ func (m *PTYManager) ResumeSlot(slot int) error {
 func (m *PTYManager) CloseSlot(slot int) error {
 
 	// cleanup
-	if m.routerStop != nil {
-		close(m.routerStop)
-	}
+	close(m.routerStop)
 
-	if m.Pendingchan != nil {
-		close(m.Pendingchan)
-	}
+	close(m.Pendingchan)
 
-	util.Default.ClearScreen()
-	time.Sleep(400 * time.Millisecond)
+	// util.Default.ClearScreen()
+	// time.Sleep(400 * time.Millisecond)
 	util.Default.Resume()
 	util.Default.PrintBlock("", true)
 	util.Default.PrintBlock("🔌 Remote PTY session closed. Press Enter to return menu...", true)
@@ -294,8 +265,7 @@ func (m *PTYManager) CloseSlot(slot int) error {
 	if s.Bridge != nil {
 		_ = s.Bridge.Close()
 	}
-
-	util.RestoreGlobal()
+	fmt.Println("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	return nil
 }
 

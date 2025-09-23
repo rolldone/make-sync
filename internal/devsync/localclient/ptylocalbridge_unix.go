@@ -4,6 +4,7 @@
 package localclient
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -12,15 +13,25 @@ import (
 	"golang.org/x/term"
 
 	"make-sync/internal/pty"
-	"make-sync/internal/util"
 )
+
+// StartInteractiveShell implements the Bridge interface. The local bridge does
+// not require a callback argument for startup; the callback is applied via
+// SetStdinCallback prior to StartInteractiveShell being invoked. For backward
+// compatibility with other call-sites we accept the cb param and set it.
+func (b *PTYLocalBridge) StartInteractiveShell(cb func([]byte)) error {
+	if cb != nil {
+		b.SetStdinCallback(cb)
+	}
+	// default to launching an interactive shell with no initial command
+	return b.startLocalWithCommand(b.initialCommand)
+}
 
 // StartInteractiveShell starts the provided command in a PTY and bridges IO to the terminal.
 // startLocalWithCommand starts the provided command in a PTY and bridges IO to the terminal.
 // This is the existing implementation that accepts a shell command string.
 func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 	// Detect whether stdin/stdout are real terminals. Mirror SSH bridge behavior.
-	isTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 
 	// prepare command
 	cmd := exec.Command("/bin/sh", "-lc", command)
@@ -30,14 +41,6 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 		return fmt.Errorf("failed to start local pty: %w", err)
 	}
 	b.localPTY = pt
-
-	if isTTY {
-		restore, err := util.EnableRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			return fmt.Errorf("failed to enable raw mode: %w", err)
-		}
-		b.termRestore = restore
-	}
 
 	// set PTY size to match current terminal if possible
 	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
@@ -49,25 +52,13 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 	// expose PTY writer so PTYManager can forward stdin
 	b.SetStdinWriter(f)
 
-	// handle output
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := f.Read(buf)
-			if n > 0 {
-				b.outputMu.Lock()
-				disabled := b.outputDisabled
-				b.outputMu.Unlock()
-				if !disabled {
-					os.Stdout.Write(buf[:n])
-				}
-			}
-			if err != nil {
-				b.ioOnce.Do(func() { close(b.ioCancel) })
-				return
-			}
-		}
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	b.cancelFunc = cancel
+
+	b.ProcessPTYReadInput(ctx, cancel)
+	// Start a simple keyboard forwarder: read from os.Stdin and write into
+	// the PTY file. If an inputListener is registered, notify it asynchronously
+	// with a copy of the bytes read.
 
 	err = cmd.Wait()
 	b.ioOnce.Do(func() { close(b.ioCancel) })
@@ -84,26 +75,103 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 	return err
 }
 
-// StartInteractiveShell implements the Bridge interface. The local bridge does
-// not require a callback argument for startup; the callback is applied via
-// SetStdinCallback prior to StartInteractiveShell being invoked. For backward
-// compatibility with other call-sites we accept the cb param and set it.
-func (b *PTYLocalBridge) StartInteractiveShell(cb func([]byte)) error {
-	if cb != nil {
-		b.SetStdinCallback(cb)
-	}
-	// default to launching an interactive shell with no initial command
-	return b.startLocalWithCommand(b.initialCommand)
+func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context.CancelFunc) error {
+	// Goroutine stdin reader
+	go func(ctx context.Context) {
+		buf := make([]byte, 256)
+
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Println("Unix stdin reader: context done, exiting")
+				return
+			default:
+				n, rerr := os.Stdin.Read(buf)
+				if n > 0 {
+					b.mu.RLock()
+					w := b.stdin
+					il := b.inputListener
+					ih := b.inputHitCodeListener
+					b.mu.RUnlock()
+
+					// forward to PTY stdin writer
+					if w != nil {
+						_, werr := w.Write(buf[:n])
+						if werr != nil {
+							return
+						}
+					}
+
+					// call inputListener asynchronously
+					if il != nil {
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						go func(cb func([]byte), d []byte) {
+							defer func() { _ = recover() }()
+							cb(d)
+						}(il, data)
+					}
+
+					// detect ESC + digit (Alt+1..Alt+9, Alt+0)
+					if ih != nil {
+						for i := 0; i < n-1; i++ {
+							if buf[i] == 0x1b { // ESC
+								c := buf[i+1]
+								if (c >= '1' && c <= '9') || c == '0' {
+									digit := string([]byte{c})
+									go func(cb func(string), d string) {
+										defer func() { _ = recover() }()
+										cb("alt+" + d)
+									}(ih, digit)
+									i++
+								}
+							}
+						}
+					}
+				}
+
+				if rerr != nil {
+					return
+				}
+			}
+		}
+	}(ctx)
+
+	// Goroutine stdout/output reader
+	go func(ctx context.Context) {
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Println("Unix stdout reader: context done, exiting")
+				return
+			default:
+				n, err := b.localPTY.Read(buf)
+				if n > 0 {
+					b.outputMu.Lock()
+					disabled := b.outputDisabled
+					b.outputMu.Unlock()
+					if !disabled {
+						_, _ = os.Stdout.Write(buf[:n])
+					}
+				}
+				if err != nil {
+					b.ioOnce.Do(func() { close(b.ioCancel) })
+					return
+				}
+			}
+		}
+	}(ctx)
+
+	return nil
 }
 
 func (b *PTYLocalBridge) Pause() error {
 	b.outputMu.Lock()
 	b.outputDisabled = true
 	b.outputMu.Unlock()
-	if b.termRestore != nil {
-		_ = b.termRestore()
-		b.termRestore = nil
-	}
+	b.localPTY.Pause()
+	b.cancelFunc()
 	return nil
 }
 
@@ -112,13 +180,7 @@ func (b *PTYLocalBridge) Resume() error {
 	b.outputMu.Lock()
 	b.outputDisabled = false
 	b.outputMu.Unlock()
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		restore, err := util.EnableRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			return fmt.Errorf("failed to set raw mode: %v", err)
-		}
-		b.termRestore = restore
-	}
+
 	if b.localPTY != nil {
 		// try to update size on resume
 		if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
@@ -132,10 +194,7 @@ func (b *PTYLocalBridge) Resume() error {
 
 func (b *PTYLocalBridge) Close() error {
 	b.ioOnce.Do(func() { close(b.ioCancel) })
-	if b.termRestore != nil {
-		_ = b.termRestore()
-		b.termRestore = nil
-	}
+
 	if b.localPTY != nil {
 		_ = b.localPTY.Close()
 		b.localPTY = nil

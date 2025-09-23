@@ -4,13 +4,18 @@
 package localclient
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"make-sync/internal/pty"
 	"make-sync/internal/util"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
+
+	"golang.org/x/term"
+	// strings removed (unused)
 )
 
 // StartInteractiveShell starts an interactive shell using ConPTY. The callback
@@ -26,6 +31,13 @@ func (b *PTYLocalBridge) StartInteractiveShell(cb func([]byte)) error {
 // StartInteractiveShellWithCommand starts the provided command in a ConPTY and
 // wires IO to the current process' stdout/stdin.
 func (b *PTYLocalBridge) StartInteractiveShellWithCommand(command string) error {
+
+	oldstate, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to snapshot terminal state: %v", err)
+	}
+	b.oldState = oldstate
+
 	if command == "" {
 		// default to system shell
 		shell := os.Getenv("COMSPEC")
@@ -45,86 +57,236 @@ func (b *PTYLocalBridge) StartInteractiveShellWithCommand(command string) error 
 
 	// store PTY and expose writer so manager can forward stdin
 	b.localPTY = p
-	// Use the PTY interface methods directly
-	b.SetStdinWriter(p.InPipe())
-
-	// ioCancel and ioOnce are created by NewPTYLocalBridge; follow the same
-	// channel/Once cancellation pattern used by other bridge implementations.
-
-	// read output and write to stdout
-	go func() {
-		out := p.OutPipe()
-		buf := make([]byte, 4096)
-		for {
-			n, err := out.Read(buf)
-			if n > 0 {
-				b.outputMu.Lock()
-				disabled := b.outputDisabled
-				b.outputMu.Unlock()
-				if !disabled {
-					_, _ = os.Stdout.Write(buf[:n])
-				}
-			}
-			if err != nil {
-				// signal goroutine cancellation like other implementations
-				b.ioOnce.Do(func() { close(b.ioCancel) })
-				// invoke exit listener
-				b.exitMu.Lock()
-				if b.exitListener != nil {
-					go func(cb func()) {
-						defer func() { _ = recover() }()
-						cb()
-					}(b.exitListener)
-					b.exitListener = nil
-				}
-				b.exitMu.Unlock()
-				return
-			}
-		}
-	}()
-
-	// Write initial command if provided.
-	if b.initialCommand != "" {
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			// use stored stdin writer if available
-			b.mu.RLock()
-			w := b.stdin
-			b.mu.RUnlock()
-			if w != nil {
-				_, _ = io.WriteString(w, b.initialCommand)
-				_, _ = io.WriteString(w, "\r")
-			}
-		}()
+	// re-expose stdin writer
+	if ptyIn := p.InPipe(); ptyIn != nil {
+		b.SetStdinWriter(ptyIn)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	b.cancelFunc = cancel
+
+	b.outPipe = p.OutPipe()
+
+	b.ProcessPTYReadInput(ctx, cancel)
+
+	if err := p.Wait(); err != nil {
+		fmt.Println("process exited:", err)
+	}
+	b.outputMu.Lock()
+	b.exitListener()
+	b.outputMu.Unlock()
+	fmt.Println("Process exited, restoring terminal state")
 
 	return nil
 }
 
+func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context.CancelFunc) error {
+	go func(ctx context.Context) {
+		defer func() {
+			// fmt.Println("PTY output reader: exiting, cancelling context")
+		}()
+		out := b.outPipe
+		fmt.Println("PTY output reader: started")
+		buf := make([]byte, 4096)
+
+		readFn := func() (int, error) {
+			if out != nil {
+				return out.Read(buf)
+			}
+			return b.localPTY.Read(buf)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				// fmt.Println("PTY output reader: context done, exiting")
+				return
+			default:
+				n, err := readFn()
+				if err != nil {
+					fmt.Println("PTY output reader: read error:", err)
+				}
+				if n > 0 {
+					b.outputMu.Lock()
+					disabled := b.outputDisabled
+					b.outputMu.Unlock()
+					if !disabled {
+						_, _ = os.Stdout.Write(buf[:n])
+					}
+				}
+				if err != nil {
+					b.ioOnce.Do(func() { close(b.ioCancel) })
+					b.exitMu.Lock()
+					if b.exitListener != nil {
+						go func(cb func()) { defer func() { _ = recover() }(); cb() }(b.exitListener)
+						b.exitListener = nil
+					}
+					b.exitMu.Unlock()
+					return
+				}
+			}
+		}
+	}(ctx)
+	go func(ctx context.Context) {
+		defer func() {
+			// fmt.Println("PTY stdin reader: exiting, cancelling context")
+		}()
+		in := os.Stdin
+		buf := make([]byte, 1024)
+		fnCallbackHit := func(s string) {
+			if b.inputHitCodeListener != nil {
+				b.inputHitCodeListener(s)
+			}
+		}
+		throttledMyFunc := util.ThrottledFunction(300 * time.Millisecond)
+		var carry []byte // carry-over bytes from previous read
+
+		for {
+			select {
+			case <-ctx.Done():
+				// fmt.Println("PTY stdin reader: context done, exiting")
+				return
+			default:
+				n, err := in.Read(buf)
+				if n > 0 {
+					// prepend carry-over bytes dari read sebelumnya
+					data := append(carry, buf[:n]...)
+					carry = carry[:0]
+					// fmt.Println("PTY stdin reader: read :: ", data)
+
+					isMatch := false
+					// parse Alt sequences
+					results := util.ParseAltUniversal(data)
+					for _, r := range results {
+						if !r.IsAltOnly {
+							throttledMyFunc(func() {
+								fnCallbackHit(fmt.Sprintf("alt+%s", r.Key))
+							})
+							isMatch = true
+							break
+						}
+					}
+					if isMatch {
+						continue
+					}
+
+					isMatch = false
+					// Parse Alt versi linux
+					// detect ESC + digit (Alt+1..Alt+9, Alt+0)
+					for i := 0; i < n-1; i++ {
+						if buf[i] == 0x1b { // ESC
+							c := buf[i+1]
+							if (c >= '1' && c <= '9') || c == '0' {
+								digit := string([]byte{c})
+								throttledMyFunc(func() {
+									fnCallbackHit(fmt.Sprintf("alt+%s", digit))
+								})
+								isMatch = true
+								i++
+							}
+							break
+						}
+					}
+
+					if isMatch {
+						continue
+					}
+					// forward ke PTY stdin writer
+					if w := b.GetStdinWriter(); w != nil {
+						_, _ = w.Write(data)
+						// fmt.Println("ProcessPTYReadInput: wrote to PTY:", string(data))
+						if b.inputListener != nil {
+							b.inputListener(data)
+						}
+					}
+				}
+
+				if err != nil {
+					b.ioOnce.Do(func() { close(b.ioCancel) })
+					return
+				}
+			}
+		}
+	}(ctx)
+
+	return nil
+
+}
+
 func (b *PTYLocalBridge) Pause() error {
+	// Matikan output & cancel reader goroutine
 	b.outputMu.Lock()
 	b.outputDisabled = true
 	b.outputMu.Unlock()
-	if b.termRestore != nil {
-		_ = b.termRestore()
-		b.termRestore = nil
+	b.localPTY.Pause()
+	b.cancelFunc()
+
+	fmt.Println("1.PTYLocalBridge: reader cancelled")
+
+	// flush dan reset mode Windows console
+	if err := b.resetConsoleMode(); err != nil {
+		fmt.Println("resetConsoleMode error:", err)
 	}
+
+	fmt.Println("2.PTYLocalBridge: console restored + flushed")
+
+	return nil
+}
+
+var (
+	kernel32                    = syscall.NewLazyDLL("kernel32.dll")
+	procFlushConsoleInputBuffer = kernel32.NewProc("FlushConsoleInputBuffer")
+	procSetConsoleMode          = kernel32.NewProc("SetConsoleMode")
+)
+
+// resetConsoleMode mengembalikan mode console ke default dasar (non-raw)
+func (b *PTYLocalBridge) resetConsoleMode() error {
+
+	currentState, err := term.GetState(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to get terminal state: %v", err)
+	}
+
+	// term.Restore(int(os.Stdin.Fd()), b.oldState)
+
+	b.oldState = currentState
+
+	// step 2: reset console mode
+	handle := syscall.Handle(os.Stdin.Fd())
+	const (
+	// ENABLE_PROCESSED_INPUT = 0x0001
+	// ENABLE_LINE_INPUT      = 0x0002
+	// ENABLE_ECHO_INPUT      = 0x0004
+	)
+	// procSetConsoleMode.Call(uintptr(handle))
+
+	// step 3: flush buffer biar gak ada "sampah" escape sequence
+	procFlushConsoleInputBuffer.Call(uintptr(handle))
+
+	// step 4: ANSI reset biar cursor & screen bersih
+	fmt.Print("\033c")
+
 	return nil
 }
 
 func (b *PTYLocalBridge) Resume() error {
+	// util.Default.ClearScreen()
+
+	err := term.Restore(int(os.Stdin.Fd()), b.oldState)
+	if err != nil {
+		return fmt.Errorf("failed to snapshot terminal state: %v", err)
+	}
+
 	b.outputMu.Lock()
 	b.outputDisabled = false
 	b.outputMu.Unlock()
-	if util.IsEffectiveRaw() {
-		// if TUI owns terminal we shouldn't change raw mode; otherwise enable raw
-	} else if os.Getenv("TERM") != "" || true {
-		// attempt to enable raw mode if possible
-		restore, err := util.EnableRaw(int(os.Stdin.Fd()))
-		if err == nil {
-			b.termRestore = restore
-		}
-	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	b.cancelFunc = cancel
+
+	b.ProcessPTYReadInput(ctx, cancel)
+
+	fmt.Println("PTYLocalBridge: reader resumed")
 	if b.localPTY != nil {
 		// re-expose stdin writer
 		b.SetStdinWriter(b.localPTY.InPipe())
@@ -197,11 +359,8 @@ func (b *PTYLocalBridge) SetOnExitListener(cb func()) {
 // Close shuts down IO goroutines, closes the PTY, and invokes the exit listener.
 func (b *PTYLocalBridge) Close() error {
 	// cancel IO goroutines if configured
-	b.ioOnce.Do(func() { close(b.ioCancel) })
-	if b.termRestore != nil {
-		_ = b.termRestore()
-		b.termRestore = nil
-	}
+	// b.ioOnce.Do(func() { close(b.ioCancel) })
+
 	if b.localPTY != nil {
 		_ = b.localPTY.Close()
 		b.localPTY = nil
@@ -213,14 +372,12 @@ func (b *PTYLocalBridge) Close() error {
 	}
 
 	// invoke registered exit listener (at most once)
-	b.exitMu.Lock()
-	if b.exitListener != nil {
-		go func(cb func()) {
-			defer func() { _ = recover() }()
-			cb()
-		}(b.exitListener)
-		b.exitListener = nil
-	}
-	b.exitMu.Unlock()
+
+	b.cancelFunc()
+	b.SetOnExitListener(nil)
+	b.SetOnInputHitCodeListener(nil)
+	b.SetOnInputListener(nil)
+	b.resetConsoleMode()
+
 	return nil
 }

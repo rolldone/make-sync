@@ -3,11 +3,14 @@ package devsync
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 
 	"make-sync/internal/util"
 
 	"github.com/manifoldco/promptui"
+	"golang.org/x/term"
 )
 
 // promptMu serializes creation/running of promptui/readline prompts because
@@ -17,6 +20,12 @@ var promptMu sync.Mutex
 
 // displayMainMenu moved to view so watcher UI code is grouped
 func (w *Watcher) displayMainMenu() {
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		w.safePrintln("⚠️  failed to snapshot terminal state:", err)
+		os.Exit(1)
+	}
+	w.oldState = oldState
 	lines := []string{
 		"🔧 DevSync Main Menu",
 		"====================",
@@ -38,14 +47,34 @@ func (w *Watcher) displayMainMenu() {
 
 // showCommandMenuDisplay moved to view (keeps promptui usage local)
 func (w *Watcher) showCommandMenuDisplay() {
+	if w == nil || w.config == nil {
+		util.Default.Printf("❌ watcher or config not available for command menu\n")
+		return
+	}
 	callback := func(slotNew int) {
 		// Disable raw mode to allow promptui to work
-		util.RestoreGlobal()
+		fmt.Println("Callback: new slot is", slotNew)
 		w.Slot = &slotNew
 	}
+
+	// Snapshot config for local use in this function to avoid repeated nil-checks
+	cfg := w.config
 	for {
 		slot := w.Slot
-
+		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		if err != nil {
+			w.safePrintln("⚠️  failed to enable raw mode:", err)
+			os.Exit(1)
+		}
+		w.oldState = oldState
+		// if w.oldState != nil {
+		// 	err := term.Restore(int(os.Stdin.Fd()), w.oldState)
+		// 	if err != nil {
+		// 		w.safePrintln("⚠️  failed to re-enable raw mode:", err)
+		// 		os.Exit(1)
+		// 	}
+		// 	fmt.Println("33333333333333333333pty: re-enabled raw mode for command menu")
+		// }
 		if *slot == 1 {
 			w.displayMainMenu()
 			break
@@ -61,33 +90,29 @@ func (w *Watcher) showCommandMenuDisplay() {
 				w.safePrintf("❌ Failed to focus slot %d: %v\n", *slot, err)
 			}
 			continue
+		} else {
+			fmt.Println("1.wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww")
 		}
 
 		var items []string
 		// If in local submenu mode, show local commands
 		if w != nil && w.isLocal {
-			if w != nil && w.config != nil && w.config.Devsync.Script.Local.Commands != nil {
-				items = append(items, w.config.Devsync.Script.Local.Commands...)
+			if cfg != nil && cfg.Devsync.Script.Local.Commands != nil {
+				items = append(items, cfg.Devsync.Script.Local.Commands...)
 			}
 			// fallback for local if none
 			if len(items) == 0 {
-				items = []string{"echo 'No local commands configured'"}
+				items = []string{"Enter Local Shell"}
 			}
 			items = append(items, "Exit")
 		} else {
 			var remoteCmds []string
-			if w != nil && w.config != nil && w.config.Devsync.Script.Remote.Commands != nil {
-				remoteCmds = append(remoteCmds, w.config.Devsync.Script.Remote.Commands...)
+			if cfg != nil && cfg.Devsync.Script.Remote.Commands != nil {
+				remoteCmds = append(remoteCmds, cfg.Devsync.Script.Remote.Commands...)
 			}
 			// fallback defaults if none configured
 			if len(remoteCmds) == 0 {
-				remoteCmds = []string{
-					"docker-compose up",
-					"docker-compose down && docker-compose up --build",
-					"docker-compose down && docker-compose up",
-					"tail -f storage/log/*.log >>> my.log",
-					"docker-compose exec app bash -l",
-				}
+				remoteCmds = []string{}
 			}
 			items = make([]string, 0, len(remoteCmds)+2)
 			items = append(items, remoteCmds...)
@@ -97,9 +122,6 @@ func (w *Watcher) showCommandMenuDisplay() {
 
 		// Suspend background printing while the interactive menu is active
 		util.Default.Suspend()
-
-		// Ensure terminal is in cooked mode for promptui
-		_ = util.RestoreGlobal()
 
 		promptMu.Lock()
 		prompt := promptui.Select{
@@ -116,6 +138,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 		}
 		i, result, err := prompt.Run()
 		promptMu.Unlock()
+
 		if err != nil {
 			util.Default.Resume()
 			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
@@ -123,8 +146,12 @@ func (w *Watcher) showCommandMenuDisplay() {
 			return
 		}
 
-		// re-enable raw mode after prompt so keyboard loop can continue
-		_, _ = util.EnableRawGlobalAuto()
+		oldState, err = term.GetState(int(os.Stdin.Fd()))
+		if err != nil {
+			w.safePrintln("⚠️  failed to enable raw mode:", err)
+			os.Exit(1)
+		}
+		w.oldState = oldState
 
 		// Handle special items when not in local submenu
 		if !w.isLocal {
@@ -150,7 +177,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 			util.Default.Resume()
 			util.RestoreGlobal()
 			w.displayMainMenu()
-			return
+			break
 		}
 
 		util.Default.Printf("Selected: %s (index %d)\n", result, i)
@@ -158,14 +185,24 @@ func (w *Watcher) showCommandMenuDisplay() {
 
 		// If we're in local submenu, handle local command selection
 		if w.isLocal {
-			util.RestoreGlobal()
 			// persistent slot behavior if user currently on a slot
 			if *slot >= 3 && *slot <= 9 && w != nil && w.ptyMgr != nil {
-				localPath := w.config.Devsync.Auth.LocalPath
+				localPath := cfg.Devsync.Auth.LocalPath
 				if localPath == "" {
 					localPath = "."
 				}
-				initialCmd := fmt.Sprintf("cd %s && bash -c %s ; exec bash", shellEscape(localPath), shellEscape(result))
+				if result == "Enter Local Shell" {
+					result = ""
+				}
+				// Choose local initial command template based on HOST OS
+				// (local shell should reflect the OS running this watcher)
+				isWindowsTarget := runtime.GOOS == "windows"
+				var initialCmd string
+				if isWindowsTarget {
+					initialCmd = ""
+				} else {
+					initialCmd = fmt.Sprintf("cd %s && bash -c %s ; exec bash", shellEscape(localPath), shellEscape(result))
+				}
 				isExist := false
 				if !w.ptyMgr.HasSlot(*slot) {
 					util.Default.ClearLine()
@@ -204,12 +241,32 @@ func (w *Watcher) showCommandMenuDisplay() {
 
 		// PTY slot handling (3..9) or run once
 		if *slot >= 3 && *slot <= 9 && w != nil && w.ptyMgr != nil {
-			remotePath := w.config.Devsync.Auth.RemotePath
-			if remotePath == "" {
-				remotePath = "/tmp"
+			remotePath := "/tmp"
+			if cfg != nil && cfg.Devsync.Auth.RemotePath != "" {
+				remotePath = cfg.Devsync.Auth.RemotePath
 			}
-			initialCmd := fmt.Sprintf("mkdir -p %s || true && cd %s && bash -c %s ; exec bash",
-				shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
+			// choose remote command template based on target OS
+			targetOS := ""
+			if cfg != nil {
+				targetOS = strings.ToLower(cfg.Devsync.OSTarget)
+			}
+			isWindowsTarget := strings.Contains(targetOS, "windows")
+			var initialCmd string
+			if isWindowsTarget {
+				// Use cmd.exe on remote Windows targets instead of PowerShell
+				// escCmd := func(s string) string {
+				// 	s = strings.ReplaceAll(s, "%", "%%")
+				// 	s = strings.ReplaceAll(s, "^", "^^")
+				// 	return s
+				// }
+				// cmdPart := escCmd(result)
+				// // body := fmt.Sprintf("if not exist \"%s\" mkdir \"%s\" & cd /d \"%s\" & %s", remotePath, remotePath, remotePath, cmdPart)
+				// escapeInner := func(s string) string { return strings.ReplaceAll(s, `"`, `\\"`) }
+				initialCmd = ""
+			} else {
+				initialCmd = fmt.Sprintf("mkdir -p %s || true && cd %s && bash -c %s ; exec bash",
+					shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
+			}
 			isExist := false
 			if !w.ptyMgr.HasSlot(*slot) {
 				util.Default.Println("➕ Creating new slot", *slot, "...")
@@ -231,7 +288,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 				util.Default.Resume()
 			}
 		}
-
+		fmt.Println("fffffffffffffffffffffffffffffffffff")
 		continue
 	}
 }
@@ -243,17 +300,35 @@ func (w *Watcher) enterShellNonCommand() {
 		util.Default.Println("❌ PTY manager not initialized")
 		return
 	}
-	remotePath := w.config.Devsync.Auth.RemotePath
-	if remotePath == "" {
-		remotePath = "/tmp"
+	// Snapshot config and derive remote path safely
+	cfg := w.config
+	remotePath := "/tmp"
+	if cfg != nil {
+		if cfg.Devsync.Auth.RemotePath != "" {
+			remotePath = cfg.Devsync.Auth.RemotePath
+		}
 	}
 	isExist := false
-	initialCmd := fmt.Sprintf("mkdir -p %s || true && cd %s && bash -l", shellEscape(remotePath), shellEscape(remotePath))
+	targetOS := ""
+	if cfg != nil {
+		targetOS = strings.ToLower(cfg.Devsync.OSTarget)
+	}
+	isWindowsTarget := strings.Contains(targetOS, "windows")
+	var initialCmd string
+	if isWindowsTarget {
+		// Start an interactive cmd.exe shell in the desired directory
+		body := fmt.Sprintf("if not exist \"%s\" mkdir \"%s\" & cd /d \"%s\" & cmd.exe", remotePath, remotePath, remotePath)
+		escapeInner := func(s string) string { return strings.ReplaceAll(s, `"`, `\\"`) }
+		initialCmd = fmt.Sprintf("cmd.exe /K \"%s\"", escapeInner(body))
+	} else {
+		initialCmd = fmt.Sprintf("mkdir -p %s || true && cd %s && bash -l", shellEscape(remotePath), shellEscape(remotePath))
+	}
 	if !w.ptyMgr.HasSlot(slot) {
-		util.Default.Println("➕ Creating new local slot", slot, "...")
+		util.Default.Println("➕ Creating new remote slot", slot, "...")
 		if err := w.ptyMgr.OpenRemoteSlot(slot, initialCmd); err != nil {
-			util.Default.Printf("⚠️  Failed to open local slot %d: %v - returning to menu\n", slot, err)
-			os.Exit(1)
+			util.Default.Printf("⚠️  Failed to open remote slot %d: %v - returning to menu\n", slot, err)
+			util.Default.Resume()
+			return
 		}
 	} else {
 		isExist = true
@@ -262,7 +337,6 @@ func (w *Watcher) enterShellNonCommand() {
 	util.Default.Suspend()
 	util.Default.PrintBlock(fmt.Sprintf("🔗 Attaching to slot %d ...", slot), true)
 	if err := w.ptyMgr.Focus(slot, isExist, func(slotNew int) {
-		util.RestoreGlobal()
 		w.Slot = &slotNew
 	}); err != nil {
 		util.Default.Printf("⚠️  Failed to focus slot %d: %v\n", slot, err)

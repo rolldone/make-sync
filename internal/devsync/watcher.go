@@ -22,11 +22,13 @@ import (
 	"github.com/asaskevich/EventBus"
 	"github.com/cespare/xxhash/v2"
 	"github.com/rjeczalik/notify"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
 // NewWatcher creates a new file watcher instance
 func NewWatcher(cfg *config.Config) (*Watcher, error) {
+
 	// Calculate watch path
 	watchPath := cfg.LocalPath
 	if watchPath == "" {
@@ -145,6 +147,149 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 
 	// start goroutines here as before (they'll wait on ready)
 	return watcher, nil
+}
+
+// Start begins watching files in the configured directory
+func (w *Watcher) Start() error {
+
+	restore, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return fmt.Errorf("failed to enable raw mode: %w", err)
+	}
+	w.oldState = restore
+	w.firstOld = restore
+
+	// make Start idempotent for repeated UI navigation
+	w.runningMu.Lock()
+	if w.running {
+		w.runningMu.Unlock()
+		return nil // already running
+	}
+	w.running = true
+	w.runningMu.Unlock()
+	// ensure we reset running flag when Start returns
+	defer func() {
+		w.runningMu.Lock()
+		w.running = false
+		w.runningMu.Unlock()
+	}()
+
+	// Get the watch path from config
+	watchPath := w.config.LocalPath
+	if watchPath == "" {
+		watchPath = "."
+	}
+
+	// Convert to absolute path
+	absWatchPath, err := filepath.Abs(watchPath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for %s: %v", watchPath, err)
+	}
+
+	w.safePrintf("🔍 Starting file watcher on: %s\n", absWatchPath)
+	w.safePrintf("📋 Watch permissions - Add: %v, Change: %v, Unlink: %v, UnlinkFolder: %v\n",
+		w.config.Devsync.TriggerPerm.Add,
+		w.config.Devsync.TriggerPerm.Change,
+		w.config.Devsync.TriggerPerm.Unlink,
+		w.config.Devsync.TriggerPerm.UnlinkFolder)
+
+	// Ensure we safely initialize watchChan if needed. Accesses to watchChan
+	// race when other goroutines (StopNotify) set/close it, so take a small
+	// snapshot under notifyMu and perform initialization while holding the lock.
+	w.notifyMu.Lock()
+	needInit := (w.watchChan == nil)
+	w.notifyMu.Unlock()
+	if needInit {
+		// If a previous notify loop existed, wait for it to fully stop
+		w.notifyMu.Lock()
+		prevStopped := w.notifyStopped
+		w.notifyMu.Unlock()
+		if prevStopped != nil {
+			select {
+			case <-prevStopped:
+				// previous notify stopped
+			case <-time.After(5 * time.Second):
+				w.safePrintf("⚠️  Start: timeout waiting for previous notifyStopped\n")
+			}
+		}
+
+		// reset so StopNotify can be called again later and allocate watchChan
+		w.notifyMu.Lock()
+		w.notifyStopOnce = sync.Once{}
+		w.notifyStopped = make(chan struct{})
+		w.watchChan = make(chan notify.EventInfo, 100)
+		w.notifyMu.Unlock()
+	}
+
+	// Setup recursive watching
+	watchPattern := filepath.Join(absWatchPath, "...")
+	err = notify.Watch(watchPattern, w.watchChan, notify.All)
+	if err != nil {
+		return fmt.Errorf("failed to setup file watcher: %v", err)
+	}
+
+	// close ready exactly once to signal goroutines the watcher init completed
+	w.readyOnce.Do(func() {
+		// ensure channel exists (created in NewWatcher)
+		if w.ready == nil {
+			w.ready = make(chan struct{})
+		}
+		close(w.ready)
+	})
+
+	// Start keyboard input handler goroutine
+	// Start legacy keyboard handler only when TUI is not active
+	go w.handleKeyboardInput()
+
+	// Start session completion event handler
+	go w.handleSessionCompletionEvents()
+
+	// Start event processing goroutine
+	go w.processEvents()
+
+	w.safeStatus("✅ File watcher started successfully\n")
+	w.safeStatus("💡 Press Ctrl+C to stop watching, R+Enter to reload .sync_ignore, S+Enter to show cache stats, A+Enter to deploy agent\n")
+
+	select {
+	case <-w.done:
+		w.safePrintln("done:", w.notifyStopped)
+		return nil
+	case <-w.notifyStopped:
+		w.safePrintln("notifyStopped:", w.notifyStopped)
+		// notify subsystem stopped -> return to menu
+		return nil
+	}
+}
+
+// Stop stops the file watcher
+func (w *Watcher) Stop() {
+	// Close file cache if exists
+	if w.fileCache != nil {
+		if totalFiles, totalSize, err := w.fileCache.GetFileStats(); err == nil {
+			w.safePrintf("💾 Cache stats: %d files, %.2f MB\n", totalFiles, float64(totalSize)/(1024*1024))
+		}
+
+		if err := w.fileCache.Close(); err != nil {
+			w.safePrintf("⚠️  Failed to close file cache: %v\n", err)
+		} else {
+			w.safePrintln("💾 File cache closed")
+		}
+	}
+
+	// Close SSH connection if exists
+	if w.sshClient != nil {
+		if err := w.sshClient.Close(); err != nil {
+			w.safePrintf("⚠️  Failed to close SSH connection: %v\n", err)
+		} else {
+			w.safePrintln("🔌 SSH connection closed")
+		}
+	}
+
+	select {
+	case w.done <- true:
+	default:
+		// Channel already has value or is closed
+	}
 }
 
 func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
@@ -838,143 +983,6 @@ func (w *Watcher) executeLocalCommand(cmd string) error {
 	}
 
 	return nil
-}
-
-// Start begins watching files in the configured directory
-func (w *Watcher) Start() error {
-	// make Start idempotent for repeated UI navigation
-	w.runningMu.Lock()
-	if w.running {
-		w.runningMu.Unlock()
-		return nil // already running
-	}
-	w.running = true
-	w.runningMu.Unlock()
-	// ensure we reset running flag when Start returns
-	defer func() {
-		w.runningMu.Lock()
-		w.running = false
-		w.runningMu.Unlock()
-	}()
-
-	// Get the watch path from config
-	watchPath := w.config.LocalPath
-	if watchPath == "" {
-		watchPath = "."
-	}
-
-	// Convert to absolute path
-	absWatchPath, err := filepath.Abs(watchPath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path for %s: %v", watchPath, err)
-	}
-
-	w.safePrintf("🔍 Starting file watcher on: %s\n", absWatchPath)
-	w.safePrintf("📋 Watch permissions - Add: %v, Change: %v, Unlink: %v, UnlinkFolder: %v\n",
-		w.config.Devsync.TriggerPerm.Add,
-		w.config.Devsync.TriggerPerm.Change,
-		w.config.Devsync.TriggerPerm.Unlink,
-		w.config.Devsync.TriggerPerm.UnlinkFolder)
-
-	// Ensure we safely initialize watchChan if needed. Accesses to watchChan
-	// race when other goroutines (StopNotify) set/close it, so take a small
-	// snapshot under notifyMu and perform initialization while holding the lock.
-	w.notifyMu.Lock()
-	needInit := (w.watchChan == nil)
-	w.notifyMu.Unlock()
-	if needInit {
-		// If a previous notify loop existed, wait for it to fully stop
-		w.notifyMu.Lock()
-		prevStopped := w.notifyStopped
-		w.notifyMu.Unlock()
-		if prevStopped != nil {
-			select {
-			case <-prevStopped:
-				// previous notify stopped
-			case <-time.After(5 * time.Second):
-				w.safePrintf("⚠️  Start: timeout waiting for previous notifyStopped\n")
-			}
-		}
-
-		// reset so StopNotify can be called again later and allocate watchChan
-		w.notifyMu.Lock()
-		w.notifyStopOnce = sync.Once{}
-		w.notifyStopped = make(chan struct{})
-		w.watchChan = make(chan notify.EventInfo, 100)
-		w.notifyMu.Unlock()
-	}
-
-	// Setup recursive watching
-	watchPattern := filepath.Join(absWatchPath, "...")
-	err = notify.Watch(watchPattern, w.watchChan, notify.All)
-	if err != nil {
-		return fmt.Errorf("failed to setup file watcher: %v", err)
-	}
-
-	// close ready exactly once to signal goroutines the watcher init completed
-	w.readyOnce.Do(func() {
-		// ensure channel exists (created in NewWatcher)
-		if w.ready == nil {
-			w.ready = make(chan struct{})
-		}
-		close(w.ready)
-	})
-
-	// Start keyboard input handler goroutine
-	// Start legacy keyboard handler only when TUI is not active
-	if !w.TUIActive {
-		go w.handleKeyboardInput()
-	}
-
-	// Start session completion event handler
-	go w.handleSessionCompletionEvents()
-
-	// Start event processing goroutine
-	go w.processEvents()
-
-	w.safeStatus("✅ File watcher started successfully\n")
-	w.safeStatus("💡 Press Ctrl+C to stop watching, R+Enter to reload .sync_ignore, S+Enter to show cache stats, A+Enter to deploy agent\n")
-
-	select {
-	case <-w.done:
-		w.safePrintln("done:", w.notifyStopped)
-		return nil
-	case <-w.notifyStopped:
-		w.safePrintln("notifyStopped:", w.notifyStopped)
-		// notify subsystem stopped -> return to menu
-		return nil
-	}
-}
-
-// Stop stops the file watcher
-func (w *Watcher) Stop() {
-	// Close file cache if exists
-	if w.fileCache != nil {
-		if totalFiles, totalSize, err := w.fileCache.GetFileStats(); err == nil {
-			w.safePrintf("💾 Cache stats: %d files, %.2f MB\n", totalFiles, float64(totalSize)/(1024*1024))
-		}
-
-		if err := w.fileCache.Close(); err != nil {
-			w.safePrintf("⚠️  Failed to close file cache: %v\n", err)
-		} else {
-			w.safePrintln("💾 File cache closed")
-		}
-	}
-
-	// Close SSH connection if exists
-	if w.sshClient != nil {
-		if err := w.sshClient.Close(); err != nil {
-			w.safePrintf("⚠️  Failed to close SSH connection: %v\n", err)
-		} else {
-			w.safePrintln("🔌 SSH connection closed")
-		}
-	}
-
-	select {
-	case w.done <- true:
-	default:
-		// Channel already has value or is closed
-	}
 }
 
 // processEvents processes file system events

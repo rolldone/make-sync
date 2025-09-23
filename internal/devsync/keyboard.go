@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"make-sync/internal/util"
+
+	"golang.org/x/term"
 )
 
 // handleKeyboardInput captures single-key shortcuts when the TUI is not active.
@@ -16,11 +18,11 @@ func (w *Watcher) handleKeyboardInput() {
 
 	// Try to enable raw mode using util helper so we can capture single keypresses
 	// Do not enable if TUI currently owns the terminal.
-	if !util.TUIActive {
-		if _, err := util.EnableRawGlobalAuto(); err != nil {
-			w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
-		}
-	}
+	// if !util.TUIActive {
+	// 	if _, err := util.EnableRawGlobalAuto(); err != nil {
+	// 		w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
+	// 	}
+	// }
 
 	// Ensure terminal state is restored when this handler returns
 	defer func() {
@@ -67,7 +69,7 @@ func (w *Watcher) handleKeyboardInput() {
 			}
 			// Ctrl+C (0x03) - exit immediately
 			if b0 == 0x03 {
-				_ = util.RestoreGlobal()
+				term.Restore(int(os.Stdin.Fd()), w.firstOld)
 				os.Exit(0)
 				return
 			}
@@ -100,13 +102,13 @@ func (w *Watcher) handleKeyboardInput() {
 					}
 				}
 			case "S", "s":
-				_ = util.RestoreGlobal()
-				w.HandleShowStatsCommand()
-				if !util.TUIActive {
-					if _, err := util.EnableRawGlobalAuto(); err != nil {
-						w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
-					}
-				}
+				// _ = util.RestoreGlobal()
+				// w.HandleShowStatsCommand()
+				// if !util.TUIActive {
+				// 	if _, err := util.EnableRawGlobalAuto(); err != nil {
+				// 		w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
+				// 	}
+				// }
 			case "A", "a":
 				_ = util.RestoreGlobal()
 				w.HandleDeployAgentCommand()

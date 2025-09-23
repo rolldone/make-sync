@@ -11,6 +11,7 @@ import (
 	"make-sync/internal/util"
 
 	"github.com/asaskevich/EventBus"
+	"golang.org/x/term"
 
 	"github.com/rjeczalik/notify"
 )
@@ -126,6 +127,10 @@ type Watcher struct {
 	KeyboardEvents chan string
 	// TUIActive indicates Bubble Tea is running; when true legacy raw keyboard handler should pause
 	TUIActive bool
+
+	oldState *term.State
+
+	firstOld *term.State
 }
 
 // RemoteAgentConfig represents the configuration sent to remote agent

@@ -1,10 +1,8 @@
 package util
 
 import (
-	"fmt"
 	"os"
 	"sync"
-	"time"
 
 	"golang.org/x/term"
 )
@@ -54,6 +52,14 @@ func IsEffectiveRaw() bool {
 	return IsRaw(int(os.Stdin.Fd())) || IsGlobalRaw()
 }
 
+// IsStdinRaw reports whether the process should consider stdin in raw mode.
+// It is a convenience wrapper over IsEffectiveRaw() and intended for callers
+// like ptymanager that need a simple check whether stdin is currently
+// controlled (raw) by any owner (TUI, global, or per-fd raw state).
+func IsStdinRaw() bool {
+	return IsEffectiveRaw()
+}
+
 // SetTUIActive sets the TUI ownership flag. Callers should set this to true when
 // the TUI takes ownership of the terminal (so other helpers avoid enabling raw mode).
 func SetTUIActive(v bool) {
@@ -99,47 +105,51 @@ func EnableRaw(fd int) (func() error, error) {
 // EnableRawGlobal enables raw on fd and stores the restore function as the global restore.
 // Use RestoreGlobal() to restore later.
 func EnableRawGlobal(fd int) (func() error, error) {
-	restore, err := EnableRaw(fd)
-	if err != nil {
-		return nil, err
-	}
-	f, _ := os.OpenFile("/tmp/make-sync-raw.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	defer f.Close()
-	f.WriteString(time.Now().Format(time.RFC3339Nano) + " EnableRawGlobal called fd=" + fmt.Sprint(fd) + "\n")
-	SetGlobalRestore(restore)
-	return restore, nil
+	// restore, err := EnableRaw(fd)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// f, _ := os.OpenFile("/tmp/make-sync-raw.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// defer f.Close()
+	// f.WriteString(time.Now().Format(time.RFC3339Nano) + " EnableRawGlobal called fd=" + fmt.Sprint(fd) + "\n")
+	// SetGlobalRestore(restore)
+	// return restore, nil
+	return nil, nil
 }
 
 // Convenience helper that enables raw on os.Stdin and stores global restore.
 func EnableRawGlobalAuto() (func() error, error) {
 	// If the TUI owns the terminal, don't change the global raw state.
-	if TUIActive {
-		return func() error { return nil }, nil
-	}
-	fd := int(os.Stdin.Fd())
-	return EnableRawGlobal(fd)
+	// if TUIActive {
+	// 	return func() error { return nil }, nil
+	// }
+	// fd := int(os.Stdin.Fd())
+	// return EnableRawGlobal(fd)
+	return nil, nil
 }
 
 // SetGlobalRestore sets the global restore function (overwrites previous).
 func SetGlobalRestore(restore func() error) {
-	globalMu.Lock()
-	defer globalMu.Unlock()
-	f, _ := os.OpenFile("/tmp/make-sync-raw.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	defer f.Close()
-	f.WriteString(time.Now().Format(time.RFC3339Nano) + " RestoreGlobal called\n")
-	globalRestore = restore
+	// globalMu.Lock()
+	// defer globalMu.Unlock()
+	// f, _ := os.OpenFile("/tmp/make-sync-raw.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// defer f.Close()
+	// f.WriteString(time.Now().Format(time.RFC3339Nano) + " RestoreGlobal called\n")
+	// globalRestore = restore
+
 }
 
 // RestoreGlobal calls the stored global restore (if any) and clears it.
 func RestoreGlobal() error {
-	globalMu.Lock()
-	r := globalRestore
-	globalRestore = nil
-	globalMu.Unlock()
-	if r == nil {
-		return nil
-	}
-	return r()
+	// globalMu.Lock()
+	// r := globalRestore
+	// globalRestore = nil
+	// globalMu.Unlock()
+	// if r == nil {
+	// 	return nil
+	// }
+	// return r()
+	return nil
 }
 
 // WithRaw is a convenience wrapper: enable raw, run fn, then restore.
