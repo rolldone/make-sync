@@ -24,29 +24,14 @@ func (w *Watcher) handleKeyboardInput() {
 	// 	}
 	// }
 
-	// Ensure terminal state is restored when this handler returns
-	defer func() {
-		_ = util.RestoreGlobal()
-	}()
-
 	for {
 		select {
 		case <-w.keyboardStop:
-			// Stop keyboard input during interactive session. Restore terminal so
-			// the session can enable raw mode itself. Wait for restart signal.
-			_ = util.RestoreGlobal()
-			// acknowledge that keyboard input is paused so TUI can take over stdin
 			select {
 			case w.keyboardStopped <- struct{}{}:
 			default:
 			}
 			<-w.keyboardRestart
-			// Re-enable raw mode after session if possible
-			if !util.TUIActive {
-				if _, err := util.EnableRawGlobalAuto(); err != nil {
-					w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
-				}
-			}
 			continue
 		default:
 			n, err := os.Stdin.Read(buffer)
@@ -133,12 +118,14 @@ func (w *Watcher) handleAltKey(input string) {
 	case "\x1br", "\x1br\n", "\x1bR", "\x1bR\n": // Alt + R (reload)
 		w.HandleReloadCommand()
 		return
-	case "\x1b2", "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9":
+	case "\x1b1", "\x1b2", "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9":
 		// Alt + 2-9: map to slot numbers and show the command menu
 		util.Default.PrintBlock("", true) // ensure any status line cleared
 		var slot int
-		if strings.HasPrefix(input, "\x1b") && len(input) >= 2 {
+		if strings.HasPrefix(input, "\x1b") && len(input) >= 1 {
 			switch input[1] {
+			case '1':
+				slot = 1
 			case '2':
 				slot = 2
 			case '3':
@@ -160,6 +147,10 @@ func (w *Watcher) handleAltKey(input string) {
 		w.Slot = &slot
 		if slot == 2 {
 			w.enterShellNonCommand()
+			return
+		}
+		if slot == 1 {
+			w.displayMainMenu()
 			return
 		}
 		w.showCommandMenuDisplay()
