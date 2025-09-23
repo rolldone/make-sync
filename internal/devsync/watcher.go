@@ -26,9 +26,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// NewWatcher creates a new file watcher instance
-func NewWatcher(cfg *config.Config) (*Watcher, error) {
-
+func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 	// Calculate watch path
 	watchPath := cfg.LocalPath
 	if watchPath == "" {
@@ -123,6 +121,13 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 		KeyboardEvents: make(chan string, 8),
 		TUIActive:      false,
 	}
+	return watcher, nil
+}
+
+// NewWatcher creates a new file watcher instance
+func NewWatcher(cfg *config.Config) (*Watcher, error) {
+
+	watcher, err := NewWatcherBasic(cfg)
 
 	// Initialize command manager after watcher is created
 	watcher.commands = NewCommandManager(watcher)
@@ -146,7 +151,7 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 	}
 
 	// start goroutines here as before (they'll wait on ready)
-	return watcher, nil
+	return watcher, err
 }
 
 // Start begins watching files in the configured directory

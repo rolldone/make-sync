@@ -2,21 +2,28 @@ package devsync
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"sync"
-	"time"
-
 	"make-sync/internal/config"
 	"make-sync/internal/devsync/sshclient"
 	"make-sync/internal/tui"
 	"make-sync/internal/util"
+	"os"
+	"path/filepath"
+	"time"
 )
 
 var watcher *Watcher
 
 // ShowDevSyncModeMenu displays the DevSync mode selection menu
 func ShowDevSyncModeMenu(cfg *config.Config) string {
+	// oldstate, err := term.MakeRaw(int(os.Stdin.Fd()))
+	// if err != nil {
+	// 	util.Default.Printf("❌ Failed to enable raw mode: %v\n", err)
+	// 	return "error"
+	// }
+	// defer func() {
+	// 	term.Restore(int(os.Stdin.Fd()), oldstate)
+	// 	util.Default.Printf("✅ Terminal state restored\n")
+	// }()
 	// Loop the menu so when a session exits we return to the menu.
 	for {
 		// Clear screen before showing menu
@@ -33,29 +40,28 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 			"back :: Return to main menu",
 		}
 
-		// pause legacy keyboard handler while TUI runs and let TUI own the terminal
-		if watcher != nil {
-			select {
-			case watcher.keyboardStop <- true:
-			default:
-			}
-			// wait up to 500ms for keyboard handler to ack that it stopped
-			select {
-			case <-watcher.keyboardStopped:
-				// acknowledged
-			case <-time.After(500 * time.Millisecond):
-				// timeout - continue anyway
-			}
-			watcher.TUIActive = true
-		}
-		// inform util that TUI owns the terminal so global raw-mode helpers are no-ops
-		util.TUIActive = true
+		// // pause legacy keyboard handler while TUI runs and let TUI own the terminal
+		// if watcher != nil {
+		// 	select {
+		// 	case watcher.keyboardStop <- true:
+		// 	default:
+		// 	}
+		// 	// wait up to 500ms for keyboard handler to ack that it stopped
+		// 	select {
+		// 	case <-watcher.keyboardStopped:
+		// 		// acknowledged
+		// 	case <-time.After(500 * time.Millisecond):
+		// 		// timeout - continue anyway
+		// 	}
+		// 	watcher.TUIActive = true
+		// }
+		// // inform util that TUI owns the terminal so global raw-mode helpers are no-ops
+		// util.TUIActive = true
 
 		// use TUI menu (bubbletea + bubbles/list) to show selection
 		result, err := tui.ShowMenuWithPrints(menuItems, "Select DevSync Mode")
 		if err != nil {
 			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
-			util.RestoreGlobal()
 			return "cancelled"
 		}
 
@@ -114,122 +120,13 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 		case 3: // force_single_sync
 			return "force_single_sync"
 		case 4: // remote_session
-			util.Default.Println("🔗 Creating new remote session...")
-
-			// Get absolute path for private key
-			privateKeyPath := cfg.Devsync.Auth.PrivateKey
-			if !filepath.IsAbs(privateKeyPath) {
-				absPath, err := filepath.Abs(privateKeyPath)
-				if err != nil {
-					util.Default.Printf("❌ Failed to get absolute path for private key: %v\n", err)
-					// continue to menu
-					continue
-				}
-				privateKeyPath = absPath
-			}
-
-			// Create SSH client directly
-			sshClient, err := sshclient.NewPersistentSSHClient(
-				cfg.Devsync.Auth.Username,
-				privateKeyPath,
-				cfg.Devsync.Auth.Host,
-				cfg.Devsync.Auth.Port,
-			)
+			err := basicNewSessionSSH(cfg)
 			if err != nil {
-				util.Default.Printf("❌ Failed to initialize SSH client: %v\n", err)
-				// continue to menu
+				util.Default.Printf("❌ Remote session failed: %v\n", err)
 				continue
 			}
-
-			// Connect to SSH server
-			if err := sshClient.Connect(); err != nil {
-				util.Default.Printf("❌ Failed to connect SSH server: %v\n", err)
-				sshClient.Close()
-				// continue to menu
-				continue
-			}
-			util.Default.Printf("🔗 SSH client connected successfully\n")
-
-			// Build the remote command that sets working directory and launches a shell
-			remotePath := cfg.Devsync.Auth.RemotePath
-			if remotePath == "" {
-				remotePath = "/tmp"
-			}
-			remoteCommand := fmt.Sprintf("mkdir -p %s || true && cd %s && bash -l", remotePath, remotePath)
-
-			// Create PTY-SSH bridge with initial command so working dir is set
-			bridge, err := sshclient.NewPTYSSHBridgeWithCommand(sshClient, remoteCommand)
-			if err != nil {
-				util.Default.Printf("❌ Failed to create PTY-SSH bridge: %v\n", err)
-				sshClient.Close()
-				// continue to menu
-				continue
-			}
-			// Start the interactive shell
-			util.Default.Println("🔗 Starting interactive SSH session with PTY bridge...")
-			// Install a small debug callback so we can verify the matcher runs
-			cb := func(_ []byte) {
-				// Print a visible debug marker to stderr
-				util.Default.Printf("DEBUG CALLBACK: Ctrl+G pressed (direct session)\n")
-				// Write a marker file with timestamp
-				fname := "/tmp/make-sync-direct-callback.log"
-				if f, err := os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-					defer f.Close()
-					f.WriteString(time.Now().Format(time.RFC3339) + " callback fired\n")
-				}
-			}
-			routerStop := make(chan struct{})
-			wg := sync.WaitGroup{}
-			wg.Add(1)
-			go func() {
-				defer func() {
-					fmt.Println("DEBUG: stdin reader exiting")
-					wg.Done()
-				}()
-				buf := make([]byte, 4096)
-				for {
-					select {
-					case <-routerStop:
-						fmt.Println("DEBUG: router stopping")
-						return
-					default:
-						n, err := os.Stdin.Read(buf)
-						if n <= 0 {
-							if err != nil {
-								return
-							}
-							continue
-						}
-						data := buf[:n]
-						i := 0
-
-						for i < len(data) {
-							w := bridge.GetStdinWriter()
-							if w != nil {
-								_, _ = w.Write(data[i : i+1])
-							}
-							i++
-						}
-					}
-				}
-			}()
-
-			bridge.SetOnExitListener(func() {
-				close(routerStop)
-			})
-
-			if err := bridge.StartInteractiveShell(cb); err != nil {
-				util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
-			}
-			// Ensure bridge and client are closed before returning to menu
-			wg.Wait()
-			bridge.Close()
-			sshClient.Close()
-
-			// After the interactive session ends, loop back to the menu
 			continue
-		case 5: // remote_sessions
-			return "remote_sessions"
+			// After the interactive session ends, loop back to the menu
 		case 6: // local_sessions
 			return "local_sessions"
 		case 7: // back
@@ -239,3 +136,98 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 		}
 	}
 }
+
+func basicNewSessionSSH(cfg *config.Config) error {
+	// Get absolute path for private key
+	privateKeyPath := cfg.Devsync.Auth.PrivateKey
+	if !filepath.IsAbs(privateKeyPath) {
+		absPath, err := filepath.Abs(privateKeyPath)
+		if err != nil {
+			util.Default.Printf("❌ Failed to get absolute path for private key: %v\n", err)
+			// continue to menu
+			return err
+		}
+		privateKeyPath = absPath
+	}
+
+	// Create SSH client directly
+	sshClient, err := sshclient.NewPersistentSSHClient(
+		cfg.Devsync.Auth.Username,
+		privateKeyPath,
+		cfg.Devsync.Auth.Host,
+		cfg.Devsync.Auth.Port,
+	)
+	if err != nil {
+		util.Default.Printf("❌ Failed to initialize SSH client: %v\n", err)
+		// continue to menu
+		return err
+	}
+
+	// Connect to SSH server
+	if err := sshClient.Connect(); err != nil {
+		util.Default.Printf("❌ Failed to connect SSH server: %v\n", err)
+		sshClient.Close()
+		// continue to menu
+		return err
+	}
+	util.Default.Printf("🔗 SSH client connected successfully\n")
+
+	// Build the remote command that sets working directory and launches a shell
+	remotePath := cfg.Devsync.Auth.RemotePath
+	if remotePath == "" {
+		remotePath = "/tmp"
+	}
+	remoteCommand := fmt.Sprintf("mkdir -p %s || true && cd %s && exec bash", remotePath, remotePath)
+
+	// Create PTY-SSH bridge with initial command so working dir is set
+	bridge, err := sshclient.NewPTYSSHBridgeWithCommand(sshClient, remoteCommand)
+	if err != nil {
+		util.Default.Printf("❌ Failed to create PTY-SSH bridge: %v\n", err)
+		sshClient.Close()
+		// continue to menu
+		return err
+	}
+	// Start the interactive shell
+	util.Default.Println("🔗 Starting interactive SSH session with PTY bridge...")
+	// Install a small debug callback so we can verify the matcher runs
+	cb := func(_ []byte) {
+		// Print a visible debug marker to stderr
+		util.Default.Printf("DEBUG CALLBACK: Ctrl+G pressed (direct session)\n")
+		// Write a marker file with timestamp
+		fname := "/tmp/make-sync-direct-callback.log"
+		if f, err := os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			defer f.Close()
+			f.WriteString(time.Now().Format(time.RFC3339) + " callback fired\n")
+		}
+	}
+
+	bridge.SetOnExitListener(func() {
+		// close(routerStop)
+	})
+
+	bridge.SetOnInputHitCodeListener(func(code string) {
+		util.Default.Printf("DEBUG: Input hit code: 0x%02x\n", code)
+	})
+
+	bridge.SetOnInputListener(func(data []byte) {
+		// Uncomment to debug all input data
+		// util.Default.Printf("DEBUG: Input data: %q\n", data)
+	})
+
+	if err := bridge.StartInteractiveShell(cb); err != nil {
+		util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
+	}
+
+	// Ensure bridge and client are closed before returning to menu
+	bridge.Close()
+	sshClient.Close()
+
+	flushStdin()
+	sendEnter()
+	time.Sleep(70 * time.Millisecond)
+
+	return nil
+}
+
+// platform-specific implementations of flushStdin() and sendEnter()
+// are provided in separate files with build tags (termio_windows.go / termio_unix.go)

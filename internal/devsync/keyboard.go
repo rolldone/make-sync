@@ -104,6 +104,15 @@ func (w *Watcher) handleKeyboardInput() {
 				}
 			default:
 				// unhandled
+				// Ignore arrow-key fragments and other stray control bytes that may arrive
+				// as separate reads (e.g. "[" or "A"/"B"/"C"/"D") to avoid blanking the screen.
+				if input == "" || input == "[" || input == "O" ||
+					input == "A" || input == "B" || input == "C" || input == "D" {
+					continue
+				}
+				// unhandled
+				util.Default.ClearScreen()
+				w.displayMainMenu()
 			}
 		}
 	}
@@ -113,6 +122,14 @@ func (w *Watcher) handleKeyboardInput() {
 func (w *Watcher) handleAltKey(input string) {
 	// Clear screen and redraw status line as necessary
 	util.Default.PrintBlock("\033[2J\033[1;1H", false)
+
+	// Ignore arrow keys and common CSI/SS3 sequences so they don't clear the screen.
+	// Examples: ESC [ A  (cursor up), ESC O A (keypad up)
+	if input == "\x1b[A" || input == "\x1b[B" || input == "\x1b[C" || input == "\x1b[D" ||
+		input == "\x1bOA" || input == "\x1bOB" || input == "\x1bOC" || input == "\x1bOD" {
+		w.displayMainMenu()
+		return
+	}
 
 	switch input {
 	case "\x1br", "\x1br\n", "\x1bR", "\x1bR\n": // Alt + R (reload)

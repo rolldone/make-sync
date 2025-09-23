@@ -225,6 +225,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 				} else {
 					util.Default.Resume()
 				}
+
+				sendEnter()
 				continue
 			}
 
@@ -236,6 +238,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 				util.Default.PrintBlock(out, true)
 			}
 			util.Default.Resume()
+			sendEnter()
 			continue
 		}
 
@@ -289,7 +292,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 			}
 		}
 		fmt.Println("fffffffffffffffffffffffffffffffffff")
-		continue
+
+		sendEnter()
 	}
 }
 
