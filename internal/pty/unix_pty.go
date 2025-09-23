@@ -39,7 +39,6 @@ func Start(cmd *exec.Cmd) (PTY, error) {
 			fmt.Fprintf(os.Stderr, "pty: EnterRaw failed: %v\n", err)
 		}
 	}
-	os.Exit(1)
 	return p, nil
 }
 

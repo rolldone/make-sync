@@ -123,16 +123,18 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	if m.bridgeActive != nil {
 		m.bridgeActive.SetOnExitListener(func() {
 			// close pending and router in a goroutine to avoid blocking bridge
-			fmt.Println("------------PTYManager: Bridge exit listener called, closing slot", slot)
+			util.Default.Print("PTYManager: Bridge exit listener called, closing slot", slot)
+			util.Default.ClearLine()
 			m.CloseSlot(slot)
-			callback(slot)
 		})
 	}
 	m.wgGroup.Add(1)
 	go func() {
 		defer func() {
 			m.wgGroup.Done()
-			fmt.Println("DEBUG: router goroutine exiting")
+			util.Default.ClearLine()
+			util.Default.Println("DEBUG: router goroutine exiting")
+			util.Default.ClearLine()
 		}()
 		for {
 			select {
@@ -174,7 +176,9 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	go func() {
 		defer func() {
 			m.wgGroup.Done()
-			fmt.Println("DEBUG: message loop goroutine exiting")
+			util.Default.ClearLine()
+			util.Default.Println("DEBUG: message loop goroutine exiting")
+			util.Default.ClearLine()
 		}()
 		for msg := range m.Pendingchan {
 			switch msg {
@@ -202,7 +206,8 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	m.wgGroup.Wait()
 	// No per-bridge stdin matchers/callbacks to restore; keyboard shortcuts
 	// are handled by the Watcher/PTYManager input router.
-	fmt.Println("DEBUG: Focus exiting normally")
+	util.Default.ClearLine()
+	util.Default.Println("DEBUG: Focus exiting normally")
 	return nil
 }
 
@@ -265,7 +270,7 @@ func (m *PTYManager) CloseSlot(slot int) error {
 	if s.Bridge != nil {
 		_ = s.Bridge.Close()
 	}
-	fmt.Println("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
 	return nil
 }
 

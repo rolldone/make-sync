@@ -52,10 +52,6 @@ func ShowMenuWithPrints(items []string, title string) (string, error) {
 	prevCh := util.PrintChan
 	util.SetPrintChannel(ch)
 
-	// mark TUI active so SafePrinter forwards prints into our channel
-	prevTUI := util.TUIActive
-	util.TUIActive = true
-
 	// start program
 	m := NewMenu(items, title)
 	p := tea.NewProgram(m)
@@ -94,7 +90,6 @@ func ShowMenuWithPrints(items []string, title string) (string, error) {
 	if _, err := p.Run(); err != nil {
 		// restore previous channel and TUI flag
 		util.SetPrintChannel(prevCh)
-		util.TUIActive = prevTUI
 		return "", err
 	}
 
@@ -102,7 +97,6 @@ func ShowMenuWithPrints(items []string, title string) (string, error) {
 	util.SetPrintChannel(prevCh)
 	close(ch)
 	<-done
-	util.TUIActive = prevTUI
 	return m.choice, nil
 }
 

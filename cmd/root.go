@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +42,7 @@ var rootCmd = &cobra.Command{
 
 		for {d command execution.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := cmd.Context()
 		cwd, _ := os.Getwd()
 		fmt.Printf("You are in: %s\n", cwd)
 		fmt.Println("Initialize Bootstrap Is Done!")
@@ -59,7 +61,13 @@ var rootCmd = &cobra.Command{
 
 			// Main menu loop - return to menu after SSH sessions
 			for {
-				if !showDirectAccessMenu(cfg) {
+				select {
+				case <-ctx.Done():
+					fmt.Println("⏹ Cancelled")
+					return
+				default:
+				}
+				if !showDirectAccessMenu(ctx, cfg) {
 					// User chose to exit
 					break
 				}
@@ -355,7 +363,7 @@ func showLoadMenu() error {
 	return nil
 }
 
-func showDirectAccessMenu(loadedCfg *config.Config) bool {
+func showDirectAccessMenu(ctx context.Context, loadedCfg *config.Config) bool {
 	// Use the already loaded configuration
 	cfg := loadedCfg
 
@@ -430,7 +438,7 @@ func showDirectAccessMenu(loadedCfg *config.Config) bool {
 		return true
 	case "devsync :: Open Devsync":
 		fmt.Println("Opening devsync...")
-		devsync.ShowDevSyncModeMenu(cfg)
+		devsync.ShowDevSyncModeMenu(ctx, cfg)
 
 		return true
 	case "clean :: Git clean up":
@@ -557,7 +565,7 @@ var devsyncCmd = &cobra.Command{
 		fmt.Println("✅ Configuration is valid and rendered!")
 
 		// Run devsync mode menu
-		devsync.ShowDevSyncModeMenu(cfg)
+		devsync.ShowDevSyncModeMenu(cmd.Context(), cfg)
 	},
 }
 
@@ -876,4 +884,13 @@ func Execute() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+// ExecuteContext allows running the root command with a supplied context for cancellation.
+func ExecuteContext(ctx context.Context) error {
+	rootCmd.SetContext(ctx)
+	if err := rootCmd.Execute(); err != nil {
+		return err
+	}
+	return nil
 }

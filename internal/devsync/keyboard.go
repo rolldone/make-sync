@@ -16,14 +16,6 @@ import (
 func (w *Watcher) handleKeyboardInput() {
 	buffer := make([]byte, 16) // buffer for possible escape sequences
 
-	// Try to enable raw mode using util helper so we can capture single keypresses
-	// Do not enable if TUI currently owns the terminal.
-	// if !util.TUIActive {
-	// 	if _, err := util.EnableRawGlobalAuto(); err != nil {
-	// 		w.safePrintln("⚠️  keyboard handler: failed to enable raw mode:", err)
-	// 	}
-	// }
-
 	for {
 		select {
 		case <-w.keyboardStop:
@@ -37,7 +29,6 @@ func (w *Watcher) handleKeyboardInput() {
 			n, err := os.Stdin.Read(buffer)
 			if err != nil {
 				// On read error, restore terminal and exit handler
-				_ = util.RestoreGlobal()
 				return
 			}
 			if n == 0 {
@@ -48,7 +39,6 @@ func (w *Watcher) handleKeyboardInput() {
 			b0 := buffer[0]
 			// Ctrl+R (0x12) - trigger notify reload
 			if b0 == 0x12 {
-				_ = util.RestoreGlobal()
 				w.StopNotify()
 				return
 			}
@@ -64,14 +54,7 @@ func (w *Watcher) handleKeyboardInput() {
 			inputRaw := string(buffer[:n])
 			if strings.HasPrefix(inputRaw, "\x1b") {
 				// Restore terminal before running interactive handlers
-				_ = util.RestoreGlobal()
 				w.handleAltKey(inputRaw)
-				// Re-enable raw mode after handler returns if the TUI isn't active
-				if !util.TUIActive {
-					if _, err := util.EnableRawGlobalAuto(); err != nil {
-						w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
-					}
-				}
 				continue
 			}
 
@@ -81,11 +64,6 @@ func (w *Watcher) handleKeyboardInput() {
 			case "R", "r":
 				// _ = util.RestoreGlobal()
 				w.HandleReloadCommand()
-				if !util.TUIActive {
-					if _, err := util.EnableRawGlobalAuto(); err != nil {
-						w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
-					}
-				}
 			case "S", "s":
 				// _ = util.RestoreGlobal()
 				// w.HandleShowStatsCommand()
@@ -95,13 +73,7 @@ func (w *Watcher) handleKeyboardInput() {
 				// 	}
 				// }
 			case "A", "a":
-				_ = util.RestoreGlobal()
 				w.HandleDeployAgentCommand()
-				if !util.TUIActive {
-					if _, err := util.EnableRawGlobalAuto(); err != nil {
-						w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
-					}
-				}
 			default:
 				// unhandled
 				// Ignore arrow-key fragments and other stray control bytes that may arrive

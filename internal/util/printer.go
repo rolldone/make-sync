@@ -25,20 +25,6 @@ func SetPrintChannel(ch chan string) {
 	PrintChan = ch
 }
 
-func (p *printerShim) sendToChan(msg string) bool {
-	printChanMu.RLock()
-	ch := PrintChan
-	printChanMu.RUnlock()
-	if ch != nil {
-		select {
-		case ch <- msg:
-			return true
-		default:
-		}
-	}
-	return false
-}
-
 func (p *printerShim) Print(a ...interface{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -46,11 +32,6 @@ func (p *printerShim) Print(a ...interface{}) {
 		return
 	}
 	msg := fmt.Sprint(a...)
-	if TUIActive {
-		if p.sendToChan(msg) {
-			return
-		}
-	}
 	fmt.Print(msg)
 }
 
@@ -61,11 +42,6 @@ func (p *printerShim) Printf(format string, a ...interface{}) {
 		return
 	}
 	msg := fmt.Sprintf(format, a...)
-	if TUIActive {
-		if p.sendToChan(msg) {
-			return
-		}
-	}
 	fmt.Print(msg)
 }
 
@@ -76,11 +52,6 @@ func (p *printerShim) Println(a ...interface{}) {
 		return
 	}
 	msg := fmt.Sprintln(a...)
-	if TUIActive {
-		if p.sendToChan(msg) {
-			return
-		}
-	}
 	fmt.Print(msg)
 }
 
@@ -91,11 +62,6 @@ func (p *printerShim) ClearScreen() {
 		return
 	}
 	msg := "\x1b[2J\x1b[H"
-	if TUIActive {
-		if p.sendToChan(msg) {
-			return
-		}
-	}
 	fmt.Print(msg)
 }
 
@@ -111,11 +77,6 @@ func (p *printerShim) PrintBlock(block string, clearLine bool) {
 	if !strings.HasSuffix(block, "\n") {
 		block += "\n"
 	}
-	if TUIActive {
-		if p.sendToChan(block) {
-			return
-		}
-	}
 	fmt.Print(block)
 }
 
@@ -126,11 +87,6 @@ func (p *printerShim) ClearLine() {
 		return
 	}
 	msg := "\r\x1b[K"
-	if TUIActive {
-		if p.sendToChan(msg) {
-			return
-		}
-	}
 	fmt.Print(msg)
 }
 

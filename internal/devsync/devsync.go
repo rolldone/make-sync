@@ -1,6 +1,7 @@
 package devsync
 
 import (
+	"context"
 	"fmt"
 	"make-sync/internal/config"
 	"make-sync/internal/devsync/sshclient"
@@ -14,7 +15,8 @@ import (
 var watcher *Watcher
 
 // ShowDevSyncModeMenu displays the DevSync mode selection menu
-func ShowDevSyncModeMenu(cfg *config.Config) string {
+// and respects context cancellation.
+func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 	// oldstate, err := term.MakeRaw(int(os.Stdin.Fd()))
 	// if err != nil {
 	// 	util.Default.Printf("❌ Failed to enable raw mode: %v\n", err)
@@ -26,6 +28,12 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 	// }()
 	// Loop the menu so when a session exits we return to the menu.
 	for {
+		select {
+		case <-ctx.Done():
+			util.Default.Println("⏹ DevSync menu canceled")
+			return "cancelled"
+		default:
+		}
 		// Clear screen before showing menu
 		util.Default.Print("\033[2J\033[1;1H")
 		util.Default.Println("🚀 DevSync Mode Selection")
@@ -62,11 +70,11 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 		result, err := tui.ShowMenuWithPrints(menuItems, "Select DevSync Mode")
 		if err != nil {
 			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
+			util.Default.ClearLine()
 			return "cancelled"
 		}
 
 		// restore ownership back to legacy input handler
-		util.TUIActive = false
 		if watcher != nil {
 			select {
 			case watcher.keyboardRestart <- true:
@@ -94,6 +102,7 @@ func ShowDevSyncModeMenu(cfg *config.Config) string {
 		}
 
 		util.Default.Printf("Selected mode: %s\n", result)
+		util.Default.ClearLine()
 
 		// Handle selection
 		switch i {
@@ -171,6 +180,7 @@ func basicNewSessionSSH(cfg *config.Config) error {
 		return err
 	}
 	util.Default.Printf("🔗 SSH client connected successfully\n")
+	util.Default.ClearLine()
 
 	// Build the remote command that sets working directory and launches a shell
 	remotePath := cfg.Devsync.Auth.RemotePath

@@ -96,6 +96,7 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 
 					// forward to PTY stdin writer
 					if w != nil {
+						// fmt.Println("Writing to PTY:", string(buf[:n]))
 						_, werr := w.Write(buf[:n])
 						if werr != nil {
 							return
@@ -189,6 +190,10 @@ func (b *PTYLocalBridge) Resume() error {
 		// ensure PTY writer is exposed (manager will forward stdin into this)
 		b.SetStdinWriter(b.localPTY.File())
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.cancelFunc = cancel
+
+	b.ProcessPTYReadInput(ctx, cancel)
 	return nil
 }
 

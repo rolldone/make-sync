@@ -58,6 +58,7 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 				sshClient = nil
 			} else {
 				util.Default.Printf("🔗 SSH client connected successfully\n")
+				util.Default.ClearLine()
 
 				// Start persistent session for continuous monitoring
 				if err := sshClient.StartPersistentSession(); err != nil {
@@ -675,14 +676,6 @@ func (w *Watcher) safePrintln(a ...interface{}) {
 // safeStatus writes a single-line status at the start of the line (clears remainder)
 func (w *Watcher) safeStatus(format string, a ...interface{}) {
 	// Print clear-line and formatted status as a single atomic block to
-	// prevent other goroutines from interleaving prints between the clear
-	// and the status text.
-	// Prefer the centralized printer; fallback to direct stdout if needed
-	if !util.TUIActive {
-		util.Default.PrintBlock(fmt.Sprintf(format, a...), true)
-		return
-	}
-	// When TUI is active, try to send via util.Default (it will forward to TUI)
 	util.Default.PrintBlock(fmt.Sprintf(format, a...), true)
 }
 
@@ -1584,7 +1577,6 @@ func (w *Watcher) HandleReloadCommand() {
 // ReloadConfiguration reloads the configuration
 func (w *Watcher) ReloadConfiguration() error {
 
-	util.RestoreGlobal()
 	util.Default.PrintBlock("🔄 Reloading configuration...", true)
 
 	// Load new config

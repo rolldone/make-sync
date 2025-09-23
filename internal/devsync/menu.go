@@ -53,6 +53,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 	}
 	callback := func(slotNew int) {
 		// Disable raw mode to allow promptui to work
+		util.Default.ClearLine()
 		fmt.Println("Callback: new slot is", slotNew)
 		w.Slot = &slotNew
 	}
@@ -61,20 +62,13 @@ func (w *Watcher) showCommandMenuDisplay() {
 	cfg := w.config
 	for {
 		slot := w.Slot
-		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			w.safePrintln("⚠️  failed to enable raw mode:", err)
-			os.Exit(1)
-		}
-		w.oldState = oldState
-		// if w.oldState != nil {
-		// 	err := term.Restore(int(os.Stdin.Fd()), w.oldState)
-		// 	if err != nil {
-		// 		w.safePrintln("⚠️  failed to re-enable raw mode:", err)
-		// 		os.Exit(1)
-		// 	}
-		// 	fmt.Println("33333333333333333333pty: re-enabled raw mode for command menu")
+		// oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		// if err != nil {
+		// 	w.safePrintln("⚠️  failed to enable raw mode:", err)
+		// 	os.Exit(1)
 		// }
+		// w.oldState = oldState
+
 		if *slot == 1 {
 			w.displayMainMenu()
 			break
@@ -91,7 +85,6 @@ func (w *Watcher) showCommandMenuDisplay() {
 			}
 			continue
 		} else {
-			fmt.Println("1.wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww")
 		}
 
 		var items []string
@@ -122,7 +115,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 
 		// Suspend background printing while the interactive menu is active
 		util.Default.Suspend()
-
+		sendCtrlArrowDown()
 		promptMu.Lock()
 		prompt := promptui.Select{
 			Label: "? Remote Console Mode",
@@ -136,22 +129,16 @@ func (w *Watcher) showCommandMenuDisplay() {
 			},
 			HideHelp: true,
 		}
+
 		i, result, err := prompt.Run()
 		promptMu.Unlock()
 
 		if err != nil {
 			util.Default.Resume()
 			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
-			util.RestoreGlobal()
+			util.Default.ClearLine()
 			return
 		}
-
-		oldState, err = term.GetState(int(os.Stdin.Fd()))
-		if err != nil {
-			w.safePrintln("⚠️  failed to enable raw mode:", err)
-			os.Exit(1)
-		}
-		w.oldState = oldState
 
 		// Handle special items when not in local submenu
 		if !w.isLocal {
@@ -175,7 +162,6 @@ func (w *Watcher) showCommandMenuDisplay() {
 			}
 			util.Default.PrintBlock("", true)
 			util.Default.Resume()
-			util.RestoreGlobal()
 			w.displayMainMenu()
 			break
 		}
@@ -225,7 +211,6 @@ func (w *Watcher) showCommandMenuDisplay() {
 				} else {
 					util.Default.Resume()
 				}
-
 				sendKeyA()
 				continue
 			}
@@ -237,8 +222,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 			} else {
 				util.Default.PrintBlock(out, true)
 			}
-			util.Default.Resume()
 			sendKeyA()
+			util.Default.Resume()
 			continue
 		}
 
@@ -291,9 +276,6 @@ func (w *Watcher) showCommandMenuDisplay() {
 				util.Default.Resume()
 			}
 		}
-		fmt.Println("fffffffffffffffffffffffffffffffffff")
-
-		sendKeyA()
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"golang.org/x/term"
 
 	"make-sync/internal/pty"
+	"make-sync/internal/util"
 )
 
 // PTYSSHBridge represents a bridge between PTY and SSH session for interactive sessions
@@ -145,8 +146,8 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 
 	ctx, cancel := context.WithCancel(context.Background())
 	bridge.cancelFunc = cancel
-
-	fmt.Println("44444444444444444 : Started interactive shell session")
+	util.Default.ClearLine()
+	util.Default.Print("44444444444444444 : Started interactive shell session")
 	bridge.ProcessPTYReadInput(ctx, cancel)
 
 	stdinPipe, err := bridge.sshSession.StdinPipe()
@@ -159,7 +160,8 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 
 	bridge.sshSession.Setenv("TERM", "xterm-256color")
 
-	fmt.Println("3333333333 : Started interactive shell session")
+	util.Default.ClearLine()
+	util.Default.Print("3333333333 : Started interactive shell session")
 	if bridge.initialCommand != "" {
 		if err := bridge.sshSession.Start(bridge.initialCommand); err != nil {
 			return err
@@ -174,7 +176,9 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 	// is responsible for reading os.Stdin and forwarding bytes into the bridge's
 	// stdin writer. This avoids multiple readers on os.Stdin and centralizes
 	// shortcut handling.
-	fmt.Println("2982394 : Started interactive shell session")
+	util.Default.ClearLine()
+	util.Default.Print("2982394 : Started interactive shell session")
+	util.Default.ClearLine()
 	err = bridge.sshSession.Wait()
 	if err != nil {
 		if err == io.EOF {
@@ -187,11 +191,13 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 	// Notify registered exit listener (if any). Protect invocation with mutex
 	bridge.exitMu.Lock()
 	if bridge.exitListener != nil {
-		fmt.Println("PTYSSHBridge: invoking exit listener")
+		util.Default.Print("PTYSSHBridge: invoking exit listener")
+		util.Default.ClearLine()
 		bridge.exitListener()
 	}
 	bridge.exitMu.Unlock()
-	fmt.Println("ssh session wait exited with err:", err)
+	util.Default.Print("ssh session wait exited with err:", err)
+	util.Default.ClearLine()
 	return err
 }
 
@@ -201,6 +207,7 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 	// stdin reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 256)
+		util.Default.ClearLine()
 		for {
 			select {
 			case <-ctx.Done():
@@ -253,6 +260,7 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 	// stdout reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 4096)
+		util.Default.ClearLine()
 		for {
 			select {
 			case <-ctx.Done():
@@ -269,7 +277,9 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 					}
 				}
 				if err != nil {
-					fmt.Println("PTYSSHBridge stdout reader error:", err)
+					util.Default.ClearLine()
+					util.Default.Print("PTYSSHBridge stdout reader error:", err)
+					util.Default.ClearLine()
 					// bridge.ioOnce.Do(func() { close(bridge.ioCancel) })
 					return
 				}
@@ -296,7 +306,8 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 					}
 				}
 				if err != nil {
-					fmt.Println("PTYSSHBridge stderr reader error:", err)
+					util.Default.ClearLine()
+					util.Default.Print("PTYSSHBridge stderr reader error:", err)
 					// bridge.ioOnce.Do(func() { close(bridge.ioCancel) })
 					return
 				}

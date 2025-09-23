@@ -5,8 +5,6 @@ import (
 	"os"
 	"os/signal"
 
-	"make-sync/internal/util"
-
 	"golang.org/x/term"
 )
 
@@ -60,7 +58,7 @@ func AttachLocalTTY(rwc io.ReadWriteCloser) error {
 		// If the TUI is active and registered a PTY output channel, stream
 		// bytes into that channel so the TUI can render them. Otherwise fall
 		// back to copying to stdout.
-		if util.TUIActive && ptyOut != nil {
+		if ptyOut != nil {
 			buf := make([]byte, 4096)
 			for {
 				n, err := rwc.Read(buf)
