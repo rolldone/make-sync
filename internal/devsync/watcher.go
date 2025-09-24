@@ -40,12 +40,13 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 
 	// Initialize SSH client if auth is configured
 	var sshClient *sshclient.SSHClient
-	if cfg.Devsync.Auth.Username != "" && cfg.Devsync.Auth.PrivateKey != "" {
+	if cfg.Devsync.Auth.Username != "" && (cfg.Devsync.Auth.PrivateKey != "" || cfg.Devsync.Auth.Password != "") {
 		var err error
 		// Use persistent SSH client for better performance
 		sshClient, err = sshclient.NewPersistentSSHClient(
 			cfg.Devsync.Auth.Username,
 			cfg.Devsync.Auth.PrivateKey,
+			cfg.Devsync.Auth.Password,
 			cfg.Devsync.Auth.Host,
 			cfg.Devsync.Auth.Port,
 		)
@@ -380,6 +381,29 @@ func (w *Watcher) joinRemotePath(elem ...string) string {
 	return result
 }
 
+// joinRemotePathOS joins remote path components using a separator appropriate
+// for the target OS. For Windows it uses backslashes and preserves drive
+// letters; otherwise it falls back to POSIX-style forward slashes.
+func (w *Watcher) joinRemotePathOS(targetOS string, elem ...string) string {
+	if len(elem) == 0 {
+		return ""
+	}
+	if strings.Contains(strings.ToLower(targetOS), "win") {
+		// Windows-style join using backslashes
+		res := elem[0]
+		for i := 1; i < len(elem); i++ {
+			part := strings.Trim(elem[i], "\\/")
+			if !strings.HasSuffix(res, "\\") {
+				res += "\\"
+			}
+			res += part
+		}
+		return res
+	}
+	// default to POSIX join
+	return w.joinRemotePath(elem...)
+}
+
 // shellEscape escapes single quotes for safe inclusion in single-quoted shell strings
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
@@ -398,11 +422,24 @@ func (w *Watcher) startAgentMonitoring() error {
 	if remoteBase == "" {
 		return fmt.Errorf("remote base path is empty or not configured")
 	}
-	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
-	remoteAgentPath := w.joinRemotePath(remoteSyncTemp, "sync-agent")
+	// Use OS-aware joins for remote paths
+	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
+	// Use platform-appropriate remote executable name
+	remoteExecName := "sync-agent"
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		remoteExecName += ".exe"
+	}
+	remoteAgentPath := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, remoteExecName)
 
 	// Start agent watch command in background - run once and keep it running
-	watchCmd := fmt.Sprintf("cd %s && chmod +x %s && %s watch", remoteBase, remoteAgentPath, remoteAgentPath)
+	var watchCmd string
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		// Windows: change to base dir (so relative .sync_temp is found), preview config, then run the exe by absolute path
+		watchCmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && (type \".sync_temp\\config.json\" 2>nul || echo NO_REMOTE_CONFIG) && \"%s\" watch", remoteBase, remoteAgentPath)
+	} else {
+		// POSIX: preview config using absolute path and run agent by absolute path
+		watchCmd = fmt.Sprintf("(cat %s/.sync_temp/config.json || echo NO_REMOTE_CONFIG) && %s watch", remoteBase, remoteAgentPath)
+	}
 
 	// fmt.Printf("🚀 Starting agent with command: %s\n", watchCmd)
 
@@ -419,6 +456,21 @@ func (w *Watcher) startAgentMonitoring() error {
 			}
 
 			// fmt.Println("🔄 Starting agent watch command...")
+
+			// Execute the watch command - this should run continuously
+			// Before starting the long-running watch, run a quick identity check to verify the executable can run
+			var identityCmd string
+			if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+				identityCmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && \"%s\" identity", remoteBase, remoteAgentPath)
+			} else {
+				identityCmd = fmt.Sprintf("%s identity", remoteAgentPath)
+			}
+			if out, err := w.sshClient.RunCommandWithOutput(identityCmd); err != nil {
+				w.safePrintf("⚠️  Agent identity check failed: %v\n", err)
+				w.safePrintf("🔍 identity output: %s\n", strings.TrimSpace(out))
+			} else {
+				w.safePrintf("🔢 Agent identity (pre-watch): %s\n", strings.TrimSpace(out))
+			}
 
 			// Execute the watch command - this should run continuously
 			if err := w.runAgentWatchCommand(watchCmd); err != nil {
@@ -486,6 +538,29 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 				// Restore cursor before propagating error
 				w.showCursor()
 				w.safePrintf("⚠️  Agent output error: %v\n", err)
+
+				// Drain any remaining output from the output channel to capture last logs
+				var buf strings.Builder
+				for {
+					select {
+					case s, ok := <-outputChan:
+						if !ok {
+							break
+						}
+						buf.WriteString(s)
+					default:
+						// no more immediate output
+						break
+					}
+					// break outer if default executed
+					if buf.Len() == 0 {
+						break
+					}
+				}
+				if buf.Len() > 0 {
+					w.safePrintf("📨 Agent final output:\n%s\n", buf.String())
+				}
+
 				return err
 			}
 
@@ -641,13 +716,13 @@ func (w *Watcher) syncConfigToRemote() error {
 		return fmt.Errorf("failed to convert config to JSON: %v", err)
 	}
 
-	// compute remote path for .sync_temp/config.json
+	// compute remote path for .sync_temp/config.json (OS-aware)
 	remoteBase := w.config.Devsync.Auth.RemotePath
 	if remoteBase == "" {
 		remoteBase = "."
 	}
-	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
-	remoteConfigPath := w.joinRemotePath(remoteSyncTemp, "config.json")
+	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
+	remoteConfigPath := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, "config.json")
 
 	// Print remote path and dump config atomically. Add one blank line before the block
 	util.Default.Printf("📤 Syncing config to: %s\n", remoteConfigPath)
@@ -837,17 +912,30 @@ func (w *Watcher) deployAgentToRemote(agentPath string) error {
 	if remoteBase == "" {
 		remoteBase = "." // fallback to current directory
 	}
-	// Create .sync_temp directory on remote using full path (always use / for remote)
-	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
-	remoteCmd := fmt.Sprintf("mkdir -p %s", remoteSyncTemp)
-	if err := w.sshClient.RunCommand(remoteCmd); err != nil {
-		return fmt.Errorf("failed to create remote .sync_temp: %v", err)
+	// Create .sync_temp directory on remote using OS-aware join and commands
+	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		createCmd := fmt.Sprintf("cmd.exe /C if not exist \"%s\" mkdir \"%s\"", remoteSyncTemp, remoteSyncTemp)
+		w.safePrintf("DEBUG: create remote dir cmd: %s\n", createCmd)
+		if err := w.sshClient.RunCommand(createCmd); err != nil {
+			return fmt.Errorf("failed to create remote .sync_temp (windows): %v", err)
+		}
+	} else {
+		remoteCmd := fmt.Sprintf("mkdir -p %s", remoteSyncTemp)
+		if err := w.sshClient.RunCommand(remoteCmd); err != nil {
+			return fmt.Errorf("failed to create remote .sync_temp: %v", err)
+		}
 	}
 
 	w.safePrintf("📁 Created .sync_temp directory on remote server: %s\n", remoteSyncTemp)
 
 	// Upload agent binary to remote .sync_temp directory
-	remoteAgentPath := w.joinRemotePath(remoteSyncTemp, "sync-agent")
+	// Use a stable executable name on the remote side: "sync-agent" or "sync-agent.exe" on Windows
+	remoteExecName := "sync-agent"
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		remoteExecName += ".exe"
+	}
+	remoteAgentPath := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, remoteExecName)
 	w.safePrintf("📦 Deploying agent to remote path: %s\n", remoteAgentPath)
 	// Check if agent already exists and compare identity
 	if w.shouldSkipAgentUpload(absAgentPath, remoteAgentPath) {
@@ -862,17 +950,28 @@ func (w *Watcher) deployAgentToRemote(agentPath string) error {
 			return fmt.Errorf("failed to upload agent: %v", err)
 		}
 	}
-	// Make agent executable on remote
-	remoteCmd = fmt.Sprintf("chmod +x %s", remoteAgentPath)
-	if err := w.sshClient.RunCommand(remoteCmd); err != nil {
-		return fmt.Errorf("failed to make agent executable: %v", err)
-	}
+	// Make agent executable on remote (Linux only). Windows .exe doesn't need chmod.
+	var remoteCmd string
+	if !strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		remoteCmd = fmt.Sprintf("chmod +x %s", remoteAgentPath)
+		if err := w.sshClient.RunCommand(remoteCmd); err != nil {
+			return fmt.Errorf("failed to make agent executable: %v", err)
+		}
 
-	// Final verification - check agent permissions
-	if output, err := w.sshClient.RunCommandWithOutput(fmt.Sprintf("ls -la %s", remoteAgentPath)); err != nil {
-		w.safePrintf("⚠️  Could not verify agent permissions: %v\n", err)
+		// Final verification - check agent permissions
+		if output, err := w.sshClient.RunCommandWithOutput(fmt.Sprintf("ls -la %s", remoteAgentPath)); err != nil {
+			w.safePrintf("⚠️  Could not verify agent permissions: %v\n", err)
+		} else {
+			w.safePrintf("✅ Agent permissions verified:\n%s", output)
+		}
 	} else {
-		w.safePrintf("✅ Agent permissions verified:\n%s", output)
+		// On Windows, verify file exists
+		checkCmd := fmt.Sprintf("cmd.exe /C if exist \"%s\" (echo exists) else (echo not_exists)", remoteAgentPath)
+		if out, err := w.sshClient.RunCommandWithOutput(checkCmd); err != nil {
+			w.safePrintf("⚠️  Could not verify agent on Windows: %v\n", err)
+		} else {
+			w.safePrintf("✅ Agent verify on windows: %s\n", strings.TrimSpace(out))
+		}
 	}
 
 	return nil
@@ -883,7 +982,12 @@ func (w *Watcher) shouldSkipAgentUpload(localAgentPath, remoteAgentPath string) 
 	w.safePrintln("🔍 Checking if agent upload can be skipped...")
 
 	// Check if remote agent exists
-	checkCmd := fmt.Sprintf("test -f %s && echo 'exists' || echo 'not_exists'", remoteAgentPath)
+	var checkCmd string
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		checkCmd = fmt.Sprintf("cmd.exe /C if exist \"%s\" (echo exists) else (echo not_exists)", remoteAgentPath)
+	} else {
+		checkCmd = fmt.Sprintf("test -f %s && echo 'exists' || echo 'not_exists'", remoteAgentPath)
+	}
 	if output, err := w.sshClient.RunCommandWithOutput(checkCmd); err != nil {
 		w.safePrintf("⚠️  Could not check remote agent existence: %v\n", err)
 		return false // Don't skip if we can't check
@@ -905,12 +1009,22 @@ func (w *Watcher) shouldSkipAgentUpload(localAgentPath, remoteAgentPath string) 
 	if remoteBase == "" {
 		remoteBase = "." // fallback to current directory
 	}
-	// Create .sync_temp directory on remote using full path (always use / for remote)
-	remoteSyncTemp := w.joinRemotePath(remoteBase, ".sync_temp")
-	remoteAgentPath = w.joinRemotePath(remoteSyncTemp, "sync-agent")
+	// Create .sync_temp directory on remote using OS-aware join so Windows uses backslashes
+	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
+	remoteExecName := "sync-agent"
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		remoteExecName += ".exe"
+	}
+	remoteAgentPath = w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, remoteExecName)
 
 	// Get remote agent identity
-	remoteIdentityCmd := fmt.Sprintf("chmod +x %s && %s identity", remoteAgentPath, remoteAgentPath)
+	var remoteIdentityCmd string
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		// On Windows, just run the exe with the identity subcommand
+		remoteIdentityCmd = fmt.Sprintf("\"%s\" identity", remoteAgentPath)
+	} else {
+		remoteIdentityCmd = fmt.Sprintf("chmod +x %s && %s identity", remoteAgentPath, remoteAgentPath)
+	}
 
 	if output, err := w.sshClient.RunCommandWithOutput(remoteIdentityCmd); err != nil {
 		w.safePrintf("⚠️  Could not get remote agent identity: %v\n", err)
@@ -1269,12 +1383,30 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 		remotePath = rp
 	}
 
-	// Create remote directory if it doesn't exist (use path.Dir for POSIX paths)
-	remoteDir := path.Dir(remotePath)
-	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
-	if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
-		w.safePrintf("❌ Failed to create remote directory %s: %v\n", remoteDir, err)
-		return
+	// Create remote directory if it doesn't exist using OS-aware paths
+	// Determine remote directory based on target OS
+	var remoteDir string
+	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+		// On Windows, remotePath may contain backslashes; use LastIndexAny to find dir
+		idx := strings.LastIndexAny(remotePath, "\\/")
+		if idx == -1 {
+			remoteDir = "."
+		} else {
+			remoteDir = remotePath[:idx]
+		}
+		mkdirCmd := fmt.Sprintf("cmd.exe /C if not exist \"%s\" mkdir \"%s\"", remoteDir, remoteDir)
+		if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
+			w.safePrintf("❌ Failed to create remote directory %s: %v\n", remoteDir, err)
+			return
+		}
+	} else {
+		// POSIX path
+		remoteDir = path.Dir(remotePath)
+		mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
+		if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
+			w.safePrintf("❌ Failed to create remote directory %s: %v\n", remoteDir, err)
+			return
+		}
 	}
 
 	// Upload file using SCP

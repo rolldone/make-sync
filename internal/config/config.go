@@ -427,6 +427,7 @@ func RenderTemplateVariables(cfg *Config) error {
 		"host":         cfg.Host,
 		"port":         cfg.Port,
 		"privateKey":   cfg.PrivateKey,
+		"password":     cfg.Password,
 		"remotePath":   cfg.RemotePath,
 		"localPath":    cfg.LocalPath,
 		"project_name": cfg.ProjectName,
@@ -545,6 +546,12 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 		oldValue := renderedCfg.Devsync.Auth.PrivateKey
 		renderedCfg.Devsync.Auth.PrivateKey = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.PrivateKey)
 		printer.Printf("🔧 Rendered Devsync.Auth.PrivateKey: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.PrivateKey)
+		renderCount++
+	}
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.Password, "=") {
+		oldValue := renderedCfg.Devsync.Auth.PrivateKey
+		renderedCfg.Devsync.Auth.Password = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.Password)
+		printer.Printf("🔧 Rendered Devsync.Auth.PrivateKey: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.Password)
 		renderCount++
 	}
 	if strings.HasPrefix(renderedCfg.Devsync.Auth.Host, "=") {

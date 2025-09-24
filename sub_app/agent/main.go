@@ -42,11 +42,13 @@ func loadConfig() (*AgentConfig, error) {
 }
 
 func displayConfig() {
-	// Load configuration
+	// Load configuration. If not present, don't exit — fall back to polling mode
 	config, err := loadConfig()
 	if err != nil {
-		fmt.Printf("❌ Failed to load config: %v\n", err)
-		os.Exit(1)
+		fmt.Printf("⚠️  Failed to load config: %v\n", err)
+		fmt.Println("🔄 Falling back to polling for config in .sync_temp/config.json (agent will stay running)")
+		// Initialize empty config so later logic will poll and wait for config to appear
+		config = &AgentConfig{}
 	}
 
 	// Display configuration in JSON format
@@ -106,17 +108,13 @@ func startWatching() {
 		os.Exit(1)
 	}
 	fmt.Printf("📍 Current working directory: %s\n", cwd)
-	// Load configuration
+	// Load configuration. If missing, do not exit — fall back to polling for config
 	config, err := loadConfig()
 	if err != nil {
 		fmt.Printf("⚠️  Failed to load config: %v\n", err)
-		fmt.Println("🔄 Falling back to watching current directory")
-		// Fallback to current directory if config not found
-		// watchPaths := []string{"."}
-		// setupWatcher(watchPaths)
-		fmt.Println("❌ Exiting due to configuration error")
-		os.Exit(1)
-		return
+		fmt.Println("🔄 Falling back to watching current directory and polling for .sync_temp/config.json")
+		// Initialize an empty config so we continue and poll for configuration
+		config = &AgentConfig{}
 	}
 
 	// (redundant error check removed — `err` already handled after loadConfig)
@@ -163,7 +161,7 @@ func startWatching() {
 					fmt.Printf("🔍 Polling for config: %v\n", err)
 					continue
 				}
-				if len(cfg.Devsync.AgentWatchs) > 0 {
+				if cfg != nil && len(cfg.Devsync.AgentWatchs) > 0 {
 					// Resolve newly discovered watch paths relative to workingDir
 					newPaths := make([]string, len(cfg.Devsync.AgentWatchs))
 					for i, wp := range cfg.Devsync.AgentWatchs {

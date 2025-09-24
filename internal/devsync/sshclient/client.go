@@ -33,26 +33,49 @@ type SSHClient struct {
 }
 
 // NewSSHClient creates a new SSH client
-func NewSSHClient(username, privateKeyPath, host, port string) (*SSHClient, error) {
-	// Read private key
-	key, err := os.ReadFile(privateKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("unable to read private key: %v", err)
+// NewSSHClient creates a new SSH client. If password is provided it will be
+// used as the first auth method (password-first). If privateKeyPath is
+// provided, the key will be added as an additional auth method. At least one
+// auth method must be configured.
+func NewSSHClient(username, privateKeyPath, password, host, port string) (*SSHClient, error) {
+	var authMethods []ssh.AuthMethod
+
+	// Prefer password auth if provided
+	if password != "" {
+		authMethods = append(authMethods, ssh.Password(password))
 	}
 
-	// Parse private key
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse private key: %v", err)
+	// If a private key is provided, try to read and add it as an auth method.
+	if privateKeyPath != "" {
+		key, err := os.ReadFile(privateKeyPath)
+		if err != nil {
+			// If password auth is available, continue with a warning; otherwise fail
+			if len(authMethods) == 0 {
+				return nil, fmt.Errorf("unable to read private key: %v", err)
+			}
+		} else {
+			signer, err := ssh.ParsePrivateKey(key)
+			if err != nil {
+				if len(authMethods) == 0 {
+					return nil, fmt.Errorf("unable to parse private key: %v", err)
+				}
+			} else {
+				// append publickey auth after (or before) password depending on preference
+				authMethods = append(authMethods, ssh.PublicKeys(signer))
+			}
+		}
+	}
+
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no authentication method configured (provide password or privateKeyPath)")
 	}
 
 	// SSH client config
 	config := &ssh.ClientConfig{
-		User: username,
-		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
-		},
+		User:            username,
+		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // For development - should be improved for production
+		Timeout:         30 * time.Second,
 	}
 
 	return &SSHClient{
@@ -64,8 +87,8 @@ func NewSSHClient(username, privateKeyPath, host, port string) (*SSHClient, erro
 }
 
 // NewPersistentSSHClient creates a new SSH client with persistent connection
-func NewPersistentSSHClient(username, privateKeyPath, host, port string) (*SSHClient, error) {
-	client, err := NewSSHClient(username, privateKeyPath, host, port)
+func NewPersistentSSHClient(username, privateKeyPath, password, host, port string) (*SSHClient, error) {
+	client, err := NewSSHClient(username, privateKeyPath, password, host, port)
 	if err != nil {
 		return nil, err
 	}
@@ -94,10 +117,22 @@ func (c *SSHClient) Close() error {
 
 // UploadFile uploads a local file to remote server
 func (c *SSHClient) UploadFile(localPath, remotePath string) error {
+	// Detect if remotePath looks like a Windows absolute path (e.g. C:\...)
+	isWindowsRemote := false
+	if (len(remotePath) >= 3 && remotePath[1] == ':' && (remotePath[2] == '\\' || remotePath[2] == '/')) || strings.HasPrefix(remotePath, "\\\\") {
+		isWindowsRemote = true
+	}
 
-	// Defensive normalize remotePath: convert Windows backslashes to POSIX forward slashes
-	remotePath = strings.ReplaceAll(remotePath, "\\", "/")
-	remotePath = path.Clean(remotePath)
+	// Keep original remotePath for Windows; normalize for POSIX otherwise
+	var remotePathForScp string
+	if isWindowsRemote {
+		remotePathForScp = remotePath
+	} else {
+		// Defensive normalize remotePath: convert Windows backslashes to POSIX forward slashes
+		remotePath = strings.ReplaceAll(remotePath, "\\", "/")
+		remotePath = path.Clean(remotePath)
+		remotePathForScp = remotePath
+	}
 
 	// Open local file
 	localFile, err := os.Open(localPath)
@@ -119,13 +154,28 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	}
 	defer session.Close()
 
-	// Create remote directory if it doesn't exist (remote paths are POSIX)
-	remoteDir := path.Dir(remotePath)
-	// fmt.Println("remoteDir:", remoteDir)
-	// quote remoteDir to protect spaces/special chars
-	mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
-	if err := c.RunCommand(mkdirCmd); err != nil {
-		return fmt.Errorf("failed to create remote directory: %v", err)
+	// Create remote directory if it doesn't exist
+	var remoteDir string
+	if isWindowsRemote {
+		// find last slash or backslash
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		if idx == -1 {
+			remoteDir = "."
+		} else {
+			remoteDir = remotePathForScp[:idx]
+		}
+		mkdirCmd := fmt.Sprintf("cmd.exe /C if not exist \"%s\" mkdir \"%s\"", remoteDir, remoteDir)
+		if err := c.RunCommand(mkdirCmd); err != nil {
+			return fmt.Errorf("failed to create remote directory (windows): %v", err)
+		}
+	} else {
+		remoteDir = path.Dir(remotePathForScp)
+		// fmt.Println("remoteDir:", remoteDir)
+		// quote remoteDir to protect spaces/special chars
+		mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
+		if err := c.RunCommand(mkdirCmd); err != nil {
+			return fmt.Errorf("failed to create remote directory: %v", err)
+		}
 	}
 
 	// Use scp protocol properly: run scp -t on remote directory and drive protocol over stdin/stdout
@@ -148,12 +198,34 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	}
 
 	// Start scp in 'to' mode targeting the remote directory (not including filename)
-	// Use POSIX `path.Dir` for remote paths and quote the argument for the remote shell.
-	targetDir := path.Dir(remotePath)
-	cmd := fmt.Sprintf("scp -t %s", shellEscape(targetDir))
-	if err := session.Start(cmd); err != nil {
-		session.Close()
-		return fmt.Errorf("failed to start scp on remote: %v", err)
+	var targetDir string
+	if isWindowsRemote {
+		// compute targetDir using last index
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		if idx == -1 {
+			targetDir = "."
+		} else {
+			targetDir = remotePathForScp[:idx]
+		}
+		// quote with double-quotes for Windows paths
+		doubleQuote := func(s string) string {
+			return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
+		}
+		cmd := fmt.Sprintf("scp -t %s", doubleQuote(targetDir))
+		fmt.Fprintf(os.Stderr, "[sshclient] starting remote scp (windows) with cmd: %s\n", cmd)
+		if err := session.Start(cmd); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
+	} else {
+		// Use POSIX path quoting
+		targetDir := path.Dir(remotePathForScp)
+		cmd := fmt.Sprintf("scp -t %s", shellEscape(targetDir))
+		fmt.Fprintf(os.Stderr, "[sshclient] starting remote scp (posix) with cmd: %s\n", cmd)
+		if err := session.Start(cmd); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
 	}
 
 	// helper to read a single-byte ACK from remote with timeout to avoid blocking forever
@@ -195,7 +267,18 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	}
 
 	// send file header: C<mode> <size> <filename>\n
-	filename := path.Base(remotePath)
+	// filename should be the final component of the remote path
+	var filename string
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		if idx == -1 {
+			filename = remotePathForScp
+		} else {
+			filename = remotePathForScp[idx+1:]
+		}
+	} else {
+		filename = path.Base(remotePathForScp)
+	}
 
 	fmt.Fprintf(stdin, "C%04o %d %s\n", stat.Mode().Perm(), stat.Size(), filename)
 

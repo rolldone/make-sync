@@ -9,6 +9,7 @@ import (
 	"make-sync/internal/util"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -163,12 +164,14 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	sshClient, err := sshclient.NewPersistentSSHClient(
 		cfg.Devsync.Auth.Username,
 		privateKeyPath,
+		cfg.Devsync.Auth.Password,
 		cfg.Devsync.Auth.Host,
 		cfg.Devsync.Auth.Port,
 	)
 	if err != nil {
 		util.Default.Printf("❌ Failed to initialize SSH client: %v\n", err)
 		// continue to menu
+		os.Exit(1)
 		return err
 	}
 
@@ -176,6 +179,7 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	if err := sshClient.Connect(); err != nil {
 		util.Default.Printf("❌ Failed to connect SSH server: %v\n", err)
 		sshClient.Close()
+		os.Exit(1)
 		// continue to menu
 		return err
 	}
@@ -184,17 +188,41 @@ func basicNewSessionSSH(cfg *config.Config) error {
 
 	// Build the remote command that sets working directory and launches a shell
 	remotePath := cfg.Devsync.Auth.RemotePath
+	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
 	if remotePath == "" {
-		remotePath = "/tmp"
+		if strings.Contains(osTarget, "win") {
+			// use temp on remote Windows if not provided
+			remotePath = "%TEMP%"
+		} else {
+			remotePath = "/tmp"
+		}
 	}
-	remoteCommand := fmt.Sprintf("mkdir -p %s || true && cd %s && exec bash", remotePath, remotePath)
 
+	var remoteCommand string
+	if strings.Contains(osTarget, "win") {
+		// Build a robust cmd.exe command:
+		// Try to change directory first (handles existing directory and drive changes).
+		// If that fails, create the directory and cd into it. Avoid wrapping the whole
+		// command in an extra pair of double-quotes because that can prevent cmd from
+		// parsing inner quoted paths correctly and cause the session to land in the
+		// user's home directory instead.
+		// Example result:
+		// cmd.exe /K cd /d "C:\path\to\dir" 2>nul || (mkdir "C:\path\to\dir" && cd /d "C:\path\to\dir")
+		remoteCommand = fmt.Sprintf("cmd.exe /K cd /d \"%s\" 2>nul || (mkdir \"%s\" && cd /d \"%s\")", remotePath, remotePath, remotePath)
+		util.Default.Printf("DEBUG: remoteCommand=%s\n", remoteCommand)
+	} else {
+		// Unix-like: mkdir + cd + bash
+		remoteCommand = fmt.Sprintf("mkdir -p %s || true && cd %s && exec bash", remotePath, remotePath)
+	}
 	// Create PTY-SSH bridge with initial command so working dir is set
 	bridge, err := sshclient.NewPTYSSHBridgeWithCommand(sshClient, remoteCommand)
 	if err != nil {
 		util.Default.Printf("❌ Failed to create PTY-SSH bridge: %v\n", err)
+
+		os.Exit(1)
 		sshClient.Close()
 		// continue to menu
+
 		return err
 	}
 	// Start the interactive shell
@@ -235,7 +263,6 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	flushStdin()
 	sendKeyA()
 	time.Sleep(70 * time.Millisecond)
-
 	return nil
 }
 
