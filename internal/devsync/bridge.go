@@ -3,7 +3,7 @@ package devsync
 import (
 	"io"
 	"make-sync/internal/devsync/localclient"
-	"make-sync/internal/devsync/sshclient"
+	"make-sync/internal/sshclient"
 )
 
 // Bridge defines the minimal interface a PTY bridge must implement so

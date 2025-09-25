@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"make-sync/internal/config"
-	"make-sync/internal/devsync/sshclient"
+	"make-sync/internal/deployagent"
+	"make-sync/internal/events"
+	"make-sync/internal/sshclient"
 	"make-sync/internal/tui"
 	"make-sync/internal/util"
 	"os"
@@ -32,6 +34,7 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 		select {
 		case <-ctx.Done():
 			util.Default.Println("⏹ DevSync menu canceled")
+			events.GlobalBus.Publish(events.EventCleanupRequested) // Publish cleanup event instead of direct call
 			return "cancelled"
 		default:
 		}
@@ -71,7 +74,10 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 		result, err := tui.ShowMenuWithPrints(menuItems, "Select DevSync Mode")
 		if err != nil {
 			util.Default.Printf("❌ Menu selection cancelled: %v\n", err)
+			util.Default.Printf("🧹 Publishing cleanup event...\n")
 			util.Default.ClearLine()
+			events.GlobalBus.Publish(events.EventCleanupRequested) // Publish cleanup event instead of direct call
+			util.Default.Printf("✅ Cleanup event published\n")
 			return "cancelled"
 		}
 
@@ -124,9 +130,83 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 			// After watcher stops, loop back to the menu
 			continue
 		case 1: // safe_pull_sync
+			util.Default.Println("🔁 safe_pull_sync selected — building and deploying agent for remote indexing...")
+
+			// Determine target OS from config
+			targetOS := cfg.Devsync.OSTarget
+			if targetOS == "" {
+				targetOS = "linux" // Default to linux
+			}
+
+			// Get project root using same logic as watcher
+			watchPath := cfg.LocalPath
+			if watchPath == "" {
+				watchPath = "."
+			}
+			absWatchPath, err := filepath.Abs(watchPath)
+			if err != nil {
+				util.Default.Printf("⚠️  Failed to get absolute watch path: %v\n", err)
+				absWatchPath = watchPath
+			}
+			projectRoot := filepath.Dir(absWatchPath)
+
+			// Connect SSH first
+			sshClient, err := createSSHClient(cfg)
+			if err != nil {
+				util.Default.Printf("❌ Failed to connect SSH: %v\n", err)
+				return "error"
+			}
+			defer sshClient.Close()
+
+			// Create SSH adapter
+			sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
+
+			// Try to build agent first
+			buildOpts := deployagent.BuildOptions{
+				ProjectRoot: projectRoot,
+				TargetOS:    targetOS,
+				SSHClient:   sshAdapter, // For remote architecture detection
+				Config:      cfg,        // Pass config for unique agent naming
+			}
+
+			agentPath, err := deployagent.BuildAgentForTarget(buildOpts)
+			if err != nil {
+				util.Default.Printf("⚠️  Build failed for agent: %v\n", err)
+
+				// Try fallback using deployagent's fallback detection
+				fallbackPath := deployagent.FindFallbackAgent(projectRoot, targetOS)
+				if fallbackPath != "" {
+					util.Default.Printf("ℹ️  Using fallback agent binary: %s\n", fallbackPath)
+					agentPath = fallbackPath
+				} else {
+					util.Default.Printf("❌ No fallback agent found and build failed: %v\n", err)
+					return "error"
+				}
+			}
+
+			util.Default.Printf("✅ Agent ready: %s\n", agentPath)
+
+			// Use unified deployagent API to deploy agent and config, then run indexing
+			deployOpts := deployagent.UnifiedDeployOptions{
+				Config:         cfg,
+				ProjectRoot:    projectRoot,
+				SSHClient:      sshClient,
+				TargetOS:       targetOS,
+				BuildIfMissing: false, // Agent already built above
+				UploadAgent:    true,
+				UploadConfig:   true,
+			}
+
+			_, err = deployagent.DeployAgentAndConfig(deployOpts)
+			if err != nil {
+				util.Default.Printf("❌ Failed to deploy agent and config: %v\n", err)
+				return "error"
+			}
+
+			util.Default.Printf("✅ Agent and config deployed successfully\n")
 			return "safe_pull_sync"
 		case 2: // soft_push_sync
-			return "soft_push_sync"
+			return "safe_push_sync"
 		case 3: // force_single_sync
 			return "force_single_sync"
 		case 4: // remote_session
@@ -268,3 +348,26 @@ func basicNewSessionSSH(cfg *config.Config) error {
 
 // platform-specific implementations of flushStdin() and sendEnter()
 // are provided in separate files with build tags (termio_windows.go / termio_unix.go)
+
+// createSSHClient creates and connects an SSH client using values from cfg.Devsync.Auth
+func createSSHClient(cfg *config.Config) (*sshclient.SSHClient, error) {
+	auth := cfg.Devsync.Auth
+	username := auth.Username
+	privateKey := auth.PrivateKey
+	password := auth.Password
+	host := auth.Host
+	port := auth.Port
+	if port == "" {
+		port = "22"
+	}
+
+	client, err := sshclient.NewPersistentSSHClient(username, privateKey, password, host, port)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ssh client: %v", err)
+	}
+	if err := client.Connect(); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("failed to connect ssh client: %v", err)
+	}
+	return client, nil
+}

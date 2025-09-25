@@ -1,13 +1,14 @@
 package devsync
 
 import (
+	"context"
 	"os/exec"
 	"runtime"
 	"sync"
 	"time"
 
 	"make-sync/internal/config"
-	"make-sync/internal/devsync/sshclient"
+	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
 
 	"github.com/asaskevich/EventBus"
@@ -117,6 +118,14 @@ type Watcher struct {
 	// runtime control
 	running   bool
 	runningMu sync.Mutex
+
+	// Context for coordinated shutdown
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	shutdownMu sync.Mutex
+
+	// Agent process tracking
+	agentPID string // PID of remote agent process
 
 	configMu sync.RWMutex // protect reading/writing w.config or other config-derived state
 

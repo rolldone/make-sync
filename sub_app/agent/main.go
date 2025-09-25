@@ -1,15 +1,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/rjeczalik/notify"
+
+	"runtime"
+	"sync-agent/internal/indexer"
 )
 
 // AgentConfig represents the agent configuration
@@ -20,25 +27,78 @@ type AgentConfig struct {
 	} `json:"devsync"`
 }
 
-// loadConfig loads configuration from .sync_temp/config.json
+// Global context for coordinating graceful shutdown
+var (
+	mainCtx    context.Context
+	mainCancel context.CancelFunc
+	shutdownMu sync.Mutex
+)
+
+// loadConfig loads configuration from .sync_temp/config.json in current dir or executable dir
 func loadConfig() (*AgentConfig, error) {
-	// Look for config file in .sync_temp directory
-	configPath := ".sync_temp/config.json"
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("config file .sync_temp/config.json not found")
+	exePath, err := os.Executable()
+	if err == nil {
+		exeDir := filepath.Dir(exePath)
+		exeBase := filepath.Base(exeDir)
+		var configPaths []string
+		if exeBase == ".sync_temp" {
+			// If agent is in .sync_temp, look for config.json in same dir
+			configPaths = append(configPaths, filepath.Join(exeDir, "config.json"))
+		} else {
+			// Otherwise, look for .sync_temp/config.json in exeDir
+			configPaths = append(configPaths, filepath.Join(exeDir, ".sync_temp", "config.json"))
+		}
+		// Also try current working directory for legacy support
+		configPaths = append(configPaths, ".sync_temp/config.json")
+
+		for _, configPath := range configPaths {
+			fmt.Printf("🔍 Trying config: %s\n", configPath)
+			if _, err := os.Stat(configPath); err == nil {
+				data, err := os.ReadFile(configPath)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read config file: %v", err)
+				}
+				var config AgentConfig
+				if err := json.Unmarshal(data, &config); err != nil {
+					return nil, fmt.Errorf("failed to parse config file: %v", err)
+				}
+				fmt.Printf("✅ Loaded config from: %s\n", configPath)
+				return &config, nil
+			}
+		}
 	}
 
-	data, err := os.ReadFile(configPath)
+	return nil, fmt.Errorf("config file .sync_temp/config.json not found in .sync_temp, executable dir, or current dir")
+}
+
+// loadConfigAndChangeDir loads config and changes working directory if specified
+func loadConfigAndChangeDir() error {
+	// Load configuration - REQUIRED, no fallback
+	config, err := loadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %v", err)
+		return fmt.Errorf("config is required for indexing: %v", err)
 	}
 
-	var config AgentConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %v", err)
+	// Working directory is required from config
+	if config.Devsync.WorkingDir == "" {
+		return fmt.Errorf("working_dir must be specified in config for indexing")
 	}
 
-	return &config, nil
+	workingDir := config.Devsync.WorkingDir
+	fmt.Printf("🔧 Using working directory from config: %s\n", workingDir)
+	fmt.Printf("🔧 DEBUG: workingDir = '%s'\n", workingDir)
+
+	if err := os.Chdir(workingDir); err != nil {
+		return fmt.Errorf("failed to change to working directory '%s': %v", workingDir, err)
+	}
+
+	// Print actual working directory after chdir
+	cwd, err := os.Getwd()
+	if err == nil {
+		fmt.Printf("📍 Current working directory: %s\n", cwd)
+	}
+	fmt.Printf("✅ Successfully changed to working directory: %s\n", workingDir)
+	return nil
 }
 
 func displayConfig() {
@@ -75,6 +135,24 @@ func displayConfig() {
 }
 
 func main() {
+	// Setup context for coordinated shutdown
+	mainCtx, mainCancel = context.WithCancel(context.Background())
+	defer mainCancel()
+
+	// Setup signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		fmt.Printf("🔔 Received signal: %v, initiating shutdown...\n", sig)
+		gracefulShutdown()
+	}()
+
+	// On Windows, start parent watcher to auto-exit if parent dies
+	if runtime.GOOS == "windows" {
+		startParentWatcher()
+	}
+
 	// Check for command line arguments
 	if len(os.Args) > 1 {
 		command := os.Args[1]
@@ -91,6 +169,16 @@ func main() {
 		case "watch":
 			startWatching()
 			return
+		case "indexing":
+			// perform indexing now and write .sync_temp/indexing_files.db
+			// Load config and change working directory first, then perform indexing
+			if err := loadConfigAndChangeDir(); err != nil {
+				fmt.Printf("⚠️  Config setup failed: %v\n", err)
+				fmt.Println("❌ Cannot proceed with indexing without proper config. Exiting.")
+				os.Exit(1)
+			}
+			performIndexing()
+			return
 		}
 	}
 
@@ -100,15 +188,29 @@ func main() {
 	startWatching()
 }
 
+// gracefulShutdown initiates coordinated shutdown
+func gracefulShutdown() {
+	shutdownMu.Lock()
+	defer shutdownMu.Unlock()
+
+	fmt.Println("🔄 Initiating graceful shutdown...")
+	mainCancel() // Cancel main context to signal all goroutines
+
+	// Give goroutines a moment to clean up
+	time.Sleep(100 * time.Millisecond)
+
+	fmt.Println("✅ Agent shutdown complete")
+	os.Exit(0)
+}
+
 func startWatching() {
-	// Get current working directory for debugging
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Printf("⚠️  Failed to get current working directory: %v\n", err)
+	// Load config and change working directory
+	if err := loadConfigAndChangeDir(); err != nil {
+		fmt.Printf("⚠️  Config setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("📍 Current working directory: %s\n", cwd)
-	// Load configuration. If missing, do not exit — fall back to polling for config
+
+	// Load configuration again for watch paths (after chdir)
 	config, err := loadConfig()
 	if err != nil {
 		fmt.Printf("⚠️  Failed to load config: %v\n", err)
@@ -117,16 +219,11 @@ func startWatching() {
 		config = &AgentConfig{}
 	}
 
-	// (redundant error check removed — `err` already handled after loadConfig)
-	// Change to working directory if specified
-	workingDir := cwd
-	fmt.Printf("🔧 DEBUG: workingDir = '%s'\n", workingDir)
-	fmt.Printf("🔧 DEBUG: len(AgentWatchs) = %d\n", len(config.Devsync.AgentWatchs))
-	if err := os.Chdir(workingDir); err != nil {
-		fmt.Printf("⚠️  Failed to change to working directory: %v\n", err)
-		fmt.Println("🔄 Continuing with current directory")
-	} else {
-		fmt.Printf("✅ Successfully changed to working directory: %s\n", workingDir)
+	// Get current working directory after config loading
+	workingDir, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("⚠️  Failed to get current working directory: %v\n", err)
+		workingDir = ""
 	}
 
 	// Resolve watch paths relative to working directory
@@ -153,37 +250,99 @@ func startWatching() {
 		fmt.Println("⚠️  No agent_watchs configured — agent will remain running and poll for config changes")
 		// Keep agent running and poll .sync_temp/config.json until watch paths are provided
 		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
 			for {
-				time.Sleep(5 * time.Second)
-				cfg, err := loadConfig()
-				if err != nil {
-					// still no config, continue polling
-					fmt.Printf("🔍 Polling for config: %v\n", err)
-					continue
-				}
-				if cfg != nil && len(cfg.Devsync.AgentWatchs) > 0 {
-					// Resolve newly discovered watch paths relative to workingDir
-					newPaths := make([]string, len(cfg.Devsync.AgentWatchs))
-					for i, wp := range cfg.Devsync.AgentWatchs {
-						if workingDir != "" && !filepath.IsAbs(wp) {
-							newPaths[i] = filepath.Join(workingDir, wp)
-						} else {
-							newPaths[i] = wp
-						}
-					}
-					fmt.Printf("✅ Detected new watch paths: %v — starting watcher\n", newPaths)
-					setupWatcher(newPaths)
+				select {
+				case <-mainCtx.Done():
+					fmt.Println("🔄 Config polling stopped (context cancelled)")
 					return
+				case <-ticker.C:
+					cfg, err := loadConfig()
+					if err != nil {
+						// still no config, continue polling
+						fmt.Printf("🔍 Polling for config: %v\n", err)
+						continue
+					}
+					if cfg != nil && len(cfg.Devsync.AgentWatchs) > 0 {
+						// Resolve newly discovered watch paths relative to workingDir
+						newPaths := make([]string, len(cfg.Devsync.AgentWatchs))
+						for i, wp := range cfg.Devsync.AgentWatchs {
+							if workingDir != "" && !filepath.IsAbs(wp) {
+								newPaths[i] = filepath.Join(workingDir, wp)
+							} else {
+								newPaths[i] = wp
+							}
+						}
+						fmt.Printf("✅ Detected new watch paths: %v — starting watcher\n", newPaths)
+						setupWatcher(newPaths)
+						return
+					}
 				}
 			}
 		}()
 
-		// Block main goroutine so agent stays alive even when not watching
-		select {}
+		// Block main goroutine but watch for context cancellation
+		<-mainCtx.Done()
+		fmt.Println("⏹️  Agent shutting down (no watch paths configured)")
+		return
 	}
 
 	fmt.Printf("📋 Loaded config with %d watch paths\n", len(watchPaths))
 	setupWatcher(watchPaths)
+}
+
+func performIndexing() {
+	// Use current working dir as root for indexing
+	root, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("❌ Failed to get working dir: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("🔍 Building index for: %s\n", root)
+
+	// Decide where to place .sync_temp/indexing_files.db.
+	// If the agent executable itself is located inside a directory named ".sync_temp",
+	// prefer that directory (this supports running as `.sync_temp/sync-agent indexing`).
+	exePath, err := os.Executable()
+	exeDir := ""
+	if err == nil {
+		if ed, err2 := filepath.Abs(filepath.Dir(exePath)); err2 == nil {
+			exeDir = ed
+		}
+	}
+
+	// default .sync_temp inside cwd
+	absSyncTemp := filepath.Join(root, ".sync_temp")
+	// if exeDir ends with .sync_temp, prefer exeDir
+	if exeDir != "" && filepath.Base(exeDir) == ".sync_temp" {
+		absSyncTemp = exeDir
+		fmt.Printf("ℹ️  Detected agent executable in .sync_temp, using %s for DB storage\n", absSyncTemp)
+	} else {
+		fmt.Printf("ℹ️  Using %s for DB storage\n", absSyncTemp)
+	}
+
+	if err := os.MkdirAll(absSyncTemp, 0755); err != nil {
+		fmt.Printf("❌ Failed to create %s directory: %v\n", absSyncTemp, err)
+		os.Exit(1)
+	}
+
+	idx, err := indexer.BuildIndex(root)
+	if err != nil {
+		fmt.Printf("❌ Indexing failed: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := filepath.Join(absSyncTemp, "indexing_files.db")
+	if err := indexer.SaveIndexDB(dbPath, idx); err != nil {
+		fmt.Printf("❌ Failed to save index DB: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Print a brief summary
+	added, modified, removed := indexer.CompareIndices(nil, idx)
+	fmt.Printf("✅ Index saved: %s (entries=%d)\n", dbPath, len(idx))
+	fmt.Printf("Summary: added=%d modified=%d removed=%d\n", len(added), len(modified), len(removed))
 }
 
 func setupWatcher(watchPaths []string) {
@@ -227,53 +386,60 @@ func tryNotifyWatcher(watchPaths []string) bool {
 	go func() {
 		// Track which paths have been successfully registered
 		registered := make([]bool, len(watchPaths))
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 
 		for {
-			allRegistered := true
-
-			for i, p := range watchPaths {
-				if registered[i] {
-					continue // already registered
-				}
-
-				// Check path existence; if missing, we'll retry later but continue
-				if _, err := os.Stat(p); os.IsNotExist(err) {
-					fmt.Printf("⚠️  Watch path does not exist yet: %s\n", p)
-					allRegistered = false
-					continue
-				}
-
-				// Attempt to register this individual path
-				pattern := filepath.Join(p, "...")
-				fmt.Printf("📋 Registering watch: %s\n", pattern)
-				if err := notify.Watch(pattern, c, notify.All); err != nil {
-					// Log error and try again later for this path; do not stop other registrations
-					fmt.Printf("❌ Failed to register watch for %s: %v\n", p, err)
-					allRegistered = false
-					continue
-				}
-
-				// Mark as registered
-				fmt.Printf("✅ Registered watch for: %s\n", p)
-				registered[i] = true
-			}
-
-			// Check if everything is registered; if not, sleep then retry only unregistered ones
-			for _, v := range registered {
-				if !v {
-					allRegistered = false
-					break
-				}
-			}
-
-			if allRegistered {
-				fmt.Println("✅ All notify-based watches registered and active")
+			select {
+			case <-mainCtx.Done():
+				fmt.Println("🔄 Watch registration stopped (context cancelled)")
 				return
-			}
+			case <-ticker.C:
+				allRegistered := true
 
-			// Wait before next retry iteration for unregistered paths
-			fmt.Println("⏳ Some watches not ready yet, retrying in 5s...")
-			time.Sleep(5 * time.Second)
+				for i, p := range watchPaths {
+					if registered[i] {
+						continue // already registered
+					}
+
+					// Check path existence; if missing, we'll retry later but continue
+					if _, err := os.Stat(p); os.IsNotExist(err) {
+						fmt.Printf("⚠️  Watch path does not exist yet: %s\n", p)
+						allRegistered = false
+						continue
+					}
+
+					// Attempt to register this individual path
+					pattern := filepath.Join(p, "...")
+					fmt.Printf("📋 Registering watch: %s\n", pattern)
+					if err := notify.Watch(pattern, c, notify.All); err != nil {
+						// Log error and try again later for this path; do not stop other registrations
+						fmt.Printf("❌ Failed to register watch for %s: %v\n", p, err)
+						allRegistered = false
+						continue
+					}
+
+					// Mark as registered
+					fmt.Printf("✅ Registered watch for: %s\n", p)
+					registered[i] = true
+				}
+
+				// Check if everything is registered
+				for _, v := range registered {
+					if !v {
+						allRegistered = false
+						break
+					}
+				}
+
+				if allRegistered {
+					fmt.Println("✅ All notify-based watches registered and active")
+					return
+				}
+
+				// Wait before next retry iteration for unregistered paths
+				fmt.Println("⏳ Some watches not ready yet, retrying in 5s...")
+			}
 		}
 	}()
 
@@ -281,7 +447,13 @@ func tryNotifyWatcher(watchPaths []string) bool {
 	// Block here so the agent process stays alive (as previous behavior) —
 	// registration still runs asynchronously in background.
 	fmt.Println("⏳ Waiting for events (agent will keep running)...")
-	select {}
+	<-mainCtx.Done()
+
+	// Clean up notify watchers
+	notify.Stop(c)
+	close(c)
+	fmt.Println("✅ File watcher stopped gracefully")
+	return true
 }
 
 func handleFileEvent(event notify.EventInfo) {

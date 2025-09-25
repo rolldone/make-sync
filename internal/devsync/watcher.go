@@ -1,26 +1,26 @@
 package devsync
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"make-sync/internal/config"
-	"make-sync/internal/devsync/sshclient"
+	"make-sync/internal/deployagent"
+	"make-sync/internal/events"
+	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/asaskevich/EventBus"
-	"github.com/cespare/xxhash/v2"
 	"github.com/rjeczalik/notify"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -99,6 +99,9 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 	}
 
 	// Build and deploy agent if SSH client is available
+	// Create context for coordinated shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+
 	watcher := &Watcher{
 		ready:      make(chan struct{}),
 		config:     cfg,
@@ -122,7 +125,10 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 		ignoresMu:      sync.RWMutex{},
 		KeyboardEvents: make(chan string, 8),
 		TUIActive:      false,
+		ctx:            ctx,
+		cancelFunc:     cancel,
 	}
+
 	return watcher, nil
 }
 
@@ -151,6 +157,9 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 	if err := watcher.startAgentMonitoring(); err != nil {
 		util.Default.Printf("⚠️  Failed to start agent monitoring: %v\n", err)
 	}
+
+	// Setup persistent EventBus subscription for cleanup (survives Start/Stop cycles)
+	watcher.setupEventBusSubscriptions()
 
 	// start goroutines here as before (they'll wait on ready)
 	return watcher, err
@@ -424,21 +433,26 @@ func (w *Watcher) startAgentMonitoring() error {
 	}
 	// Use OS-aware joins for remote paths
 	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
-	// Use platform-appropriate remote executable name
-	remoteExecName := "sync-agent"
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		remoteExecName += ".exe"
+
+	// Get unique agent binary name from local config
+	localConfig, err := config.GetOrCreateLocalConfig()
+	if err != nil {
+		w.safePrintf("⚠️  Failed to load local config: %v\n", err)
+		return err // Can't proceed without agent name
 	}
+
+	targetOS := strings.ToLower(w.config.Devsync.OSTarget)
+	remoteExecName := localConfig.GetAgentBinaryName(targetOS)
 	remoteAgentPath := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, remoteExecName)
 
 	// Start agent watch command in background - run once and keep it running
 	var watchCmd string
 	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		// Windows: change to base dir (so relative .sync_temp is found), preview config, then run the exe by absolute path
-		watchCmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && (type \".sync_temp\\config.json\" 2>nul || echo NO_REMOTE_CONFIG) && \"%s\" watch", remoteBase, remoteAgentPath)
+		// Windows: capture PID and run agent
+		watchCmd = fmt.Sprintf(`cmd.exe /C "cd /d "%s" && (type ".sync_temp\config.json" 2>nul || echo NO_REMOTE_CONFIG) && echo AGENT_STARTING && "%s" watch"`, remoteBase, remoteAgentPath)
 	} else {
-		// POSIX: preview config using absolute path and run agent by absolute path
-		watchCmd = fmt.Sprintf("(cat %s/.sync_temp/config.json || echo NO_REMOTE_CONFIG) && %s watch", remoteBase, remoteAgentPath)
+		// POSIX: capture PID and run agent
+		watchCmd = fmt.Sprintf(`bash -c "(cat %s/.sync_temp/config.json || echo NO_REMOTE_CONFIG) && echo AGENT_STARTING && %s watch & echo AGENT_PID:$! && wait"`, remoteBase, remoteAgentPath)
 	}
 
 	// fmt.Printf("🚀 Starting agent with command: %s\n", watchCmd)
@@ -446,12 +460,27 @@ func (w *Watcher) startAgentMonitoring() error {
 	// Start the agent in a goroutine and keep it running
 	go func() {
 		for {
+			// Check if context cancelled
+			select {
+			case <-w.ctx.Done():
+				w.safePrintln("🔄 Agent monitoring stopped (shutdown requested)")
+				return
+			default:
+			}
+
 			if w.sshClient.GetSession() == nil {
 				w.safePrintln("⚠️  SSH session lost, attempting to restart...")
 				if err := w.sshClient.StartPersistentSession(); err != nil {
 					w.safePrintf("❌ Failed to restart SSH session: %v\n", err)
-					time.Sleep(5 * time.Second)
-					continue
+
+					// Use context-aware sleep
+					select {
+					case <-w.ctx.Done():
+						w.safePrintln("🔄 Agent monitoring stopped during reconnect wait")
+						return
+					case <-time.After(5 * time.Second):
+						continue
+					}
 				}
 			}
 
@@ -476,19 +505,40 @@ func (w *Watcher) startAgentMonitoring() error {
 			if err := w.runAgentWatchCommand(watchCmd); err != nil {
 				w.safePrintf("⚠️  Agent watch command failed: %v\n", err)
 
+				// If shutdown requested, exit gracefully
+				if strings.Contains(err.Error(), "shutdown requested") {
+					w.safePrintln("🔄 Agent monitoring stopped (shutdown requested)")
+					return
+				}
+
 				// If session failed, try to restart
 				if strings.Contains(err.Error(), "session") || strings.Contains(err.Error(), "broken pipe") {
 					w.safePrintln("🔌 SSH session broken, stopping current session...")
 					w.sshClient.StopAgentSession()
-					time.Sleep(3 * time.Second)
-					continue
+
+					// Use context-aware sleep
+					select {
+					case <-w.ctx.Done():
+						w.safePrintln("🔄 Agent monitoring stopped during session restart wait")
+						return
+					case <-time.After(3 * time.Second):
+						continue
+					}
 				}
 			}
 
 			// If we reach here, the command completed (which it shouldn't for a watch command)
 			// This means the agent stopped unexpectedly
 			w.safeStatusln("⚠️  Agent watch command completed unexpectedly, restarting in 5 seconds...")
-			time.Sleep(5 * time.Second)
+
+			// Use context-aware sleep
+			select {
+			case <-w.ctx.Done():
+				w.safePrintln("🔄 Agent monitoring stopped during restart wait")
+				return
+			case <-time.After(5 * time.Second):
+				// Continue to next iteration
+			}
 		}
 	}()
 
@@ -513,6 +563,12 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 	// Process output in real-time
 	for {
 		select {
+		case <-w.ctx.Done():
+			// Context cancelled - shutdown requested
+			w.showCursor()
+			w.safePrintln("🔄 Agent watch command stopped (shutdown requested)")
+			return fmt.Errorf("shutdown requested")
+
 		case output, ok := <-outputChan:
 			if !ok {
 				// Channel closed, agent command finished
@@ -541,20 +597,17 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 
 				// Drain any remaining output from the output channel to capture last logs
 				var buf strings.Builder
+			drainLoop:
 				for {
 					select {
 					case s, ok := <-outputChan:
 						if !ok {
-							break
+							break drainLoop
 						}
 						buf.WriteString(s)
 					default:
 						// no more immediate output
-						break
-					}
-					// break outer if default executed
-					if buf.Len() == 0 {
-						break
+						break drainLoop
 					}
 				}
 				if buf.Len() > 0 {
@@ -580,6 +633,20 @@ func (w *Watcher) processAgentOutput(output string) {
 	}
 
 	// fmt.Printf("📨 Agent output: %s\n", output)
+
+	// Check for agent PID information first
+	if strings.Contains(output, "AGENT_PID:") {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "AGENT_PID:") {
+				pid := strings.TrimPrefix(line, "AGENT_PID:")
+				w.agentPID = strings.TrimSpace(pid)
+				w.safePrintf("📍 Agent PID captured: %s\n", w.agentPID)
+				continue
+			}
+		}
+	}
 
 	// Parse structured output from agent
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -698,12 +765,69 @@ func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 // StopAgentMonitoring stops the continuous agent monitoring
 func (w *Watcher) StopAgentMonitoring() error {
 	if w.sshClient != nil {
+		// First, try to kill remote agent processes explicitly
+		w.safePrintln("🔄 Attempting to kill remote agent processes...")
+
+		// Get unique agent binary name from local config
+		localConfig, err := config.GetOrCreateLocalConfig()
+		if err != nil {
+			w.safePrintf("⚠️  Failed to load local config: %v\n", err)
+			return w.sshClient.StopAgentSession()
+		}
+
+		targetOS := strings.ToLower(w.config.Devsync.OSTarget)
+		agentBinaryName := localConfig.GetAgentBinaryName(targetOS)
+		w.safePrintf("🎯 Looking for agent process: %s\n", agentBinaryName)
+
+		var killCmd string
+
+		if strings.Contains(targetOS, "win") {
+			// Windows: Get PID first, then kill - using unique agent name
+			getPIDCmd := fmt.Sprintf(`for /f "tokens=2 delims=," %%i in ('tasklist /fi "imagename eq %s" /fo csv /nh') do @echo %%i`, agentBinaryName)
+			if pidOutput, err := w.sshClient.RunCommandWithOutput(getPIDCmd); err == nil {
+				// Remove quotes from PID output
+				pidOutput = strings.Trim(strings.TrimSpace(pidOutput), `"`)
+				if pidOutput != "" && pidOutput != `""` {
+					w.safePrintf("📍 Found agent PID: %s\n", pidOutput)
+					killCmd = fmt.Sprintf(`taskkill /F /PID %s 2>nul || echo "Agent PID %s not found"`, pidOutput, pidOutput)
+				} else {
+					w.safePrintf("⚠️  No %s processes found\n", agentBinaryName)
+					killCmd = fmt.Sprintf(`echo "No %s processes found"`, agentBinaryName)
+				}
+			} else {
+				// Fallback to process name kill
+				killCmd = fmt.Sprintf(`taskkill /F /IM %s 2>nul || echo "No %s processes found"`, agentBinaryName, agentBinaryName)
+			}
+		} else {
+			// Unix/Linux: Get PID first, then kill - using unique agent name
+			getPIDCmd := fmt.Sprintf(`pgrep -f "%s" | head -1`, agentBinaryName)
+			if pidOutput, err := w.sshClient.RunCommandWithOutput(getPIDCmd); err == nil {
+				pidOutput = strings.TrimSpace(pidOutput)
+				if pidOutput != "" {
+					w.safePrintf("📍 Found agent PID: %s\n", pidOutput)
+					killCmd = fmt.Sprintf(`kill -TERM %s 2>/dev/null || echo "Agent PID %s not found"`, pidOutput, pidOutput)
+				} else {
+					w.safePrintf("⚠️  No %s processes found\n", agentBinaryName)
+					killCmd = fmt.Sprintf(`echo "No %s processes found"`, agentBinaryName)
+				}
+			} else {
+				// Fallback to process name kill
+				killCmd = fmt.Sprintf(`pkill -f "%s" || echo "No %s processes found"`, agentBinaryName, agentBinaryName)
+			}
+		}
+
+		// Run kill command (ignore errors since process might already be dead)
+		if err := w.sshClient.RunCommand(killCmd); err != nil {
+			w.safePrintf("⚠️  Kill command failed (this might be normal): %v\n", err)
+		} else {
+			w.safePrintln("✅ Remote agent kill command sent")
+		}
+
+		// Then close SSH agent session
 		return w.sshClient.StopAgentSession()
 	}
 	return nil
-}
-
-// syncConfigToRemote syncs the current configuration to remote .sync_temp/config.json
+} // syncConfigToRemote syncs the current configuration to remote .sync_temp/config.json
 func (w *Watcher) syncConfigToRemote() error {
 	if w.sshClient == nil {
 		return nil
@@ -777,323 +901,27 @@ func (w *Watcher) buildAndDeployAgent() error {
 		return nil
 	}
 
-	w.safePrintln("🔨 Building sync agent for target OS...")
-
-	// Determine target OS from config
-	targetOS := w.config.Devsync.OSTarget
-	if targetOS == "" {
-		targetOS = "linux" // Default to linux
-	}
-
-	// Build agent for target platform
-	agentPath, err := w.buildAgentForTarget(targetOS)
-	if err != nil {
-		w.safePrintf("⚠️  Build failed for agent: %v\n", err)
-
-		// As fallback, check if a pre-built binary exists in project root
-		projectRoot := filepath.Dir(w.watchPath)
-		fallbackName := fmt.Sprintf("sync-agent-%s", targetOS)
-		if targetOS == "windows" {
-			fallbackName += ".exe"
-		}
-		fallbackPath := filepath.Join(projectRoot, fallbackName)
-		if _, statErr := os.Stat(fallbackPath); statErr == nil {
-			w.safePrintf("ℹ️  Found existing agent binary: %s - will use it as fallback\n", fallbackPath)
-			// Use the fallback binary name (relative) to deploy
-			agentPath = fallbackName
-		} else {
-			return fmt.Errorf("no fallback agent found at %s and build failed: %v", fallbackPath, err)
-		}
-	}
-
-	w.safePrintf("📦 Agent built successfully: %s\n", agentPath)
-
-	// Deploy agent to remote server
-	if err := w.deployAgentToRemote(agentPath); err != nil {
-		return fmt.Errorf("failed to deploy agent: %v", err)
-	}
-
-	w.safePrintln("✅ Agent deployed successfully to remote server")
-	return nil
-}
-
-// buildAgentForTarget builds the agent executable for the specified target OS
-func (w *Watcher) buildAgentForTarget(targetOS string) (string, error) {
-	// Get the project root directory (parent of current working directory)
+	// Get project root
 	projectRoot := filepath.Dir(w.watchPath)
-	agentSourceDir := filepath.Join(projectRoot, "sub_app", "agent")
-	agentBinaryName := fmt.Sprintf("sync-agent-%s", targetOS)
 
-	// Determine GOOS based on target OS
-	var goos string
-	switch targetOS {
-	case "linux":
-		goos = "linux"
-	case "windows":
-		goos = "windows"
-		agentBinaryName += ".exe"
-	case "darwin":
-		goos = "darwin"
-	default:
-		goos = "linux"
+	// Prepare unified deployment options
+	deployOpts := deployagent.UnifiedDeployOptions{
+		ProjectRoot:    projectRoot,
+		TargetOS:       w.config.Devsync.OSTarget,
+		Config:         w.config,
+		SSHClient:      w.sshClient,
+		BuildIfMissing: true,
+		UploadAgent:    true,
+		UploadConfig:   true,
 	}
 
-	// Build directly using the go tool to avoid OS-specific shell quoting and
-	// path issues (previously used a shell one-liner which broke on Windows).
-	outputPath := filepath.Join(projectRoot, agentBinaryName)
-
-	w.safePrintf("🔨 Building agent in %s (GOOS=%s) -> %s\n", agentSourceDir, goos, outputPath)
-
-	// Prepare build command
-	cmd := exec.Command("go", "build", "-o", outputPath, ".")
-	cmd.Dir = agentSourceDir
-
-	// Start from existing env but sanitize any GOOS/GOARCH/GOARM entries so we
-	// can set explicit values for cross-compilation.
-	env := []string{}
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "GOOS=") || strings.HasPrefix(e, "GOARCH=") || strings.HasPrefix(e, "GOARM=") {
-			continue
-		}
-		env = append(env, e)
-	}
-
-	// Always set GOOS
-	env = append(env, "GOOS="+goos)
-
-	// If we have an SSH client, try to detect remote architecture and set GOARCH accordingly
-	if w.sshClient != nil {
-		if output, err := w.sshClient.RunCommandWithOutput("uname -m"); err == nil {
-			arch := strings.TrimSpace(output)
-			// Map uname -m to GOARCH/GOARM values
-			switch arch {
-			case "x86_64", "amd64":
-				env = append(env, "GOARCH=amd64")
-			case "aarch64", "arm64":
-				env = append(env, "GOARCH=arm64")
-			case "armv7l", "armv7":
-				env = append(env, "GOARCH=arm")
-				env = append(env, "GOARM=7")
-			case "armv6l", "armv6":
-				env = append(env, "GOARCH=arm")
-				env = append(env, "GOARM=6")
-			default:
-				// fallback: do not set GOARCH and let Go use defaults
-			}
-		} else {
-			w.safePrintf("⚠️  Could not detect remote arch: %v\n", err)
-		}
-	}
-
-	cmd.Env = env
-
-	out, err := cmd.CombinedOutput()
+	// Use unified deployment API
+	remoteAgentPath, err := deployagent.DeployAgentAndConfig(deployOpts)
 	if err != nil {
-		w.safePrintf("❌ Build failed: %v\n", err)
-		w.safePrintf("Output: %s\n", string(out))
-		return "", fmt.Errorf("build failed: %v\nOutput: %s", err, string(out))
+		return fmt.Errorf("failed to deploy agent and config: %v", err)
 	}
 
-	if len(out) > 0 {
-		w.safePrintf("✅ Build output: %s\n", string(out))
-	}
-
-	return agentBinaryName, nil
-}
-
-// deployAgentToRemote deploys the agent binary to the remote server
-func (w *Watcher) deployAgentToRemote(agentPath string) error {
-	// Get absolute path for the agent binary
-	projectRoot := filepath.Dir(w.watchPath)
-	absAgentPath := filepath.Join(projectRoot, agentPath)
-
-	// Get the remote base path from config
-	remoteBase := w.config.Devsync.Auth.RemotePath
-	if remoteBase == "" {
-		remoteBase = "." // fallback to current directory
-	}
-	// Create .sync_temp directory on remote using OS-aware join and commands
-	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		createCmd := fmt.Sprintf("cmd.exe /C if not exist \"%s\" mkdir \"%s\"", remoteSyncTemp, remoteSyncTemp)
-		w.safePrintf("DEBUG: create remote dir cmd: %s\n", createCmd)
-		if err := w.sshClient.RunCommand(createCmd); err != nil {
-			return fmt.Errorf("failed to create remote .sync_temp (windows): %v", err)
-		}
-	} else {
-		remoteCmd := fmt.Sprintf("mkdir -p %s", remoteSyncTemp)
-		if err := w.sshClient.RunCommand(remoteCmd); err != nil {
-			return fmt.Errorf("failed to create remote .sync_temp: %v", err)
-		}
-	}
-
-	w.safePrintf("📁 Created .sync_temp directory on remote server: %s\n", remoteSyncTemp)
-
-	// Upload agent binary to remote .sync_temp directory
-	// Use a stable executable name on the remote side: "sync-agent" or "sync-agent.exe" on Windows
-	remoteExecName := "sync-agent"
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		remoteExecName += ".exe"
-	}
-	remoteAgentPath := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, remoteExecName)
-	w.safePrintf("📦 Deploying agent to remote path: %s\n", remoteAgentPath)
-	// Check if agent already exists and compare identity
-	if w.shouldSkipAgentUpload(absAgentPath, remoteAgentPath) {
-		w.safePrintln("⏭️  Agent already up-to-date, skipping upload")
-		// return nil
-	} else {
-		w.safePrintln("📦 Uploading new agent to remote server...")
-		// fmt.Println("absolute agent path:", absAgentPath)
-		// fmt.Println("remote agent path:", remoteAgentPath)
-		if err := w.sshClient.SyncFile(absAgentPath, remoteAgentPath); err != nil {
-			w.safePrintf("err: %v\n", err)
-			return fmt.Errorf("failed to upload agent: %v", err)
-		}
-	}
-	// Make agent executable on remote (Linux only). Windows .exe doesn't need chmod.
-	var remoteCmd string
-	if !strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		remoteCmd = fmt.Sprintf("chmod +x %s", remoteAgentPath)
-		if err := w.sshClient.RunCommand(remoteCmd); err != nil {
-			return fmt.Errorf("failed to make agent executable: %v", err)
-		}
-
-		// Final verification - check agent permissions
-		if output, err := w.sshClient.RunCommandWithOutput(fmt.Sprintf("ls -la %s", remoteAgentPath)); err != nil {
-			w.safePrintf("⚠️  Could not verify agent permissions: %v\n", err)
-		} else {
-			w.safePrintf("✅ Agent permissions verified:\n%s", output)
-		}
-	} else {
-		// On Windows, verify file exists
-		checkCmd := fmt.Sprintf("cmd.exe /C if exist \"%s\" (echo exists) else (echo not_exists)", remoteAgentPath)
-		if out, err := w.sshClient.RunCommandWithOutput(checkCmd); err != nil {
-			w.safePrintf("⚠️  Could not verify agent on Windows: %v\n", err)
-		} else {
-			w.safePrintf("✅ Agent verify on windows: %s\n", strings.TrimSpace(out))
-		}
-	}
-
-	return nil
-}
-
-// shouldSkipAgentUpload checks if agent upload should be skipped by comparing identities
-func (w *Watcher) shouldSkipAgentUpload(localAgentPath, remoteAgentPath string) bool {
-	w.safePrintln("🔍 Checking if agent upload can be skipped...")
-
-	// Check if remote agent exists
-	var checkCmd string
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		checkCmd = fmt.Sprintf("cmd.exe /C if exist \"%s\" (echo exists) else (echo not_exists)", remoteAgentPath)
-	} else {
-		checkCmd = fmt.Sprintf("test -f %s && echo 'exists' || echo 'not_exists'", remoteAgentPath)
-	}
-	if output, err := w.sshClient.RunCommandWithOutput(checkCmd); err != nil {
-		w.safePrintf("⚠️  Could not check remote agent existence: %v\n", err)
-		return false // Don't skip if we can't check
-	} else if strings.TrimSpace(output) != "exists" {
-		w.safePrintln("📦 Remote agent doesn't exist, upload required")
-		return false // Agent doesn't exist, need to upload
-	}
-
-	w.safePrintln("📦 Remote agent exists, checking identity...")
-
-	// Get local agent identity
-	localIdentity, err := w.getLocalAgentIdentity(localAgentPath)
-	if err != nil {
-		w.safePrintf("⚠️  Could not get local agent identity: %v\n", err)
-		return false // Don't skip if we can't get local identity
-	}
-
-	remoteBase := w.config.Devsync.Auth.RemotePath
-	if remoteBase == "" {
-		remoteBase = "." // fallback to current directory
-	}
-	// Create .sync_temp directory on remote using OS-aware join so Windows uses backslashes
-	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
-	remoteExecName := "sync-agent"
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		remoteExecName += ".exe"
-	}
-	remoteAgentPath = w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, remoteExecName)
-
-	// Get remote agent identity
-	var remoteIdentityCmd string
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		// On Windows, just run the exe with the identity subcommand
-		remoteIdentityCmd = fmt.Sprintf("\"%s\" identity", remoteAgentPath)
-	} else {
-		remoteIdentityCmd = fmt.Sprintf("chmod +x %s && %s identity", remoteAgentPath, remoteAgentPath)
-	}
-
-	if output, err := w.sshClient.RunCommandWithOutput(remoteIdentityCmd); err != nil {
-		w.safePrintf("⚠️  Could not get remote agent identity: %v\n", err)
-		return false // Don't skip if we can't get remote identity
-	} else {
-		remoteIdentity := strings.TrimSpace(output)
-
-		w.safePrintf("🔢 Local agent identity:  %s\n", localIdentity)
-		w.safePrintf("🔢 Remote agent identity: %s\n", remoteIdentity)
-
-		if localIdentity == remoteIdentity {
-			// fmt.Println("✅ Agent identities match, skipping upload")
-			return true // Skip upload
-		} else {
-			w.safePrintln("🔄 Agent identities differ, upload required")
-			return false // Need to upload
-		}
-	}
-}
-
-// getLocalAgentIdentity gets the identity hash of the local agent binary
-func (w *Watcher) getLocalAgentIdentity(agentPath string) (string, error) {
-	// Compute hash of the local agent binary directly (xxhash, same as agent)
-	h, err := calculateFileHash(agentPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to calculate local agent hash: %v", err)
-	}
-	return h, nil
-}
-
-// calculateFileHash computes xxhash of a local file (matches agent implementation)
-func calculateFileHash(filePath string) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := xxhash.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
-}
-
-// executeLocalCommand executes a command locally
-func (w *Watcher) executeLocalCommand(cmd string) error {
-	w.safePrintf("🔧 Executing: %s\n", cmd)
-
-	// Use platform-appropriate shell: on Windows use cmd /C, otherwise bash -c
-	var command *exec.Cmd
-	if runtime.GOOS == "windows" {
-		command = exec.Command("cmd", "/C", cmd)
-	} else {
-		command = exec.Command("bash", "-c", cmd)
-	}
-	command.Dir = "." // Execute in current directory
-
-	output, err := command.CombinedOutput()
-	if err != nil {
-		w.safePrintf("❌ Command failed: %v\n", err)
-		w.safePrintf("Output: %s\n", string(output))
-		return err
-	}
-
-	if len(output) > 0 {
-		w.safePrintf("✅ Command output: %s\n", string(output))
-	}
-
+	w.safePrintf("✅ Agent and config deployed successfully at: %s\n", remoteAgentPath)
 	return nil
 }
 
@@ -1150,6 +978,32 @@ func (w *Watcher) handleSessionCompletionEvents() {
 		if !w.hasActiveSession() {
 			util.Default.PrintBlock("\033[2J\033[1;1H", false)
 			w.displayMainMenu()
+		}
+	})
+}
+
+// handleCleanupEvents handles cleanup events via GlobalBus
+func (w *Watcher) handleCleanupEvents() {
+	// Subscribe to cleanup events using GlobalBus
+	events.GlobalBus.Subscribe(events.EventCleanupRequested, func() {
+		util.Default.Printf("🧹 Received cleanup event, stopping agents...\n")
+		if err := w.StopAgentMonitoring(); err != nil {
+			util.Default.Printf("⚠️  Error during cleanup: %v\n", err)
+		} else {
+			util.Default.Printf("✅ Agent cleanup completed\n")
+		}
+	})
+}
+
+// setupEventBusSubscriptions sets up persistent EventBus subscriptions
+func (w *Watcher) setupEventBusSubscriptions() {
+	// Subscribe to cleanup events - this survives Start/Stop cycles
+	events.GlobalBus.Subscribe(events.EventCleanupRequested, func() {
+		util.Default.Printf("🧹 Received cleanup event, stopping agents...\n")
+		if err := w.StopAgentMonitoring(); err != nil {
+			util.Default.Printf("⚠️  Error during cleanup: %v\n", err)
+		} else {
+			util.Default.Printf("✅ Agent cleanup completed\n")
 		}
 	})
 }
@@ -1366,41 +1220,52 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 
 	localPath := event.Path
 
-	// Compute remote path using POSIX join (ensure forward slashes)
+	targetOS := strings.ToLower(w.config.Devsync.OSTarget)
 	remoteBase := w.config.Devsync.Auth.RemotePath
 	if remoteBase == "" {
 		remoteBase = "."
 	}
-	var remotePath string
+
+	// Derive relative path
+	var relPart string
 	if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, localPath); rerr == nil {
-		remotePath = w.joinRemotePath(remoteBase, filepath.ToSlash(rel))
+		relPart = filepath.ToSlash(rel)
 	} else {
 		rp, merr := util.LocalToRemote(w.config.Devsync.Auth.LocalPath, remoteBase, localPath)
 		if merr != nil {
 			w.safePrintf("⚠️  Could not map local path to remote for sync: %v\n", merr)
 			return
 		}
-		remotePath = rp
+		// rp includes remoteBase already; treat full path
+		relPart = strings.TrimPrefix(rp, remoteBase)
 	}
 
-	// Create remote directory if it doesn't exist using OS-aware paths
-	// Determine remote directory based on target OS
+	// Build remote path OS-aware
+	var remotePath string
+	if strings.Contains(targetOS, "win") {
+		// Ensure remoteBase uses backslashes
+		remotePath = w.joinRemotePathOS(targetOS, remoteBase, relPart)
+		// Normalize any forward slashes that slipped through
+		remotePath = strings.ReplaceAll(remotePath, "/", "\\")
+	} else {
+		remotePath = w.joinRemotePath(remoteBase, relPart)
+	}
+
+	// Determine remote directory
 	var remoteDir string
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		// On Windows, remotePath may contain backslashes; use LastIndexAny to find dir
+	if strings.Contains(targetOS, "win") {
 		idx := strings.LastIndexAny(remotePath, "\\/")
 		if idx == -1 {
 			remoteDir = "."
 		} else {
 			remoteDir = remotePath[:idx]
 		}
+		// Let UploadFile also attempt dir creation; do a lightweight mkdir best-effort (ignore failure)
 		mkdirCmd := fmt.Sprintf("cmd.exe /C if not exist \"%s\" mkdir \"%s\"", remoteDir, remoteDir)
 		if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
-			w.safePrintf("❌ Failed to create remote directory %s: %v\n", remoteDir, err)
-			return
+			w.safePrintf("⚠️  Windows mkdir pre-step failed (continuing, UploadFile will retry): %v\n", err)
 		}
 	} else {
-		// POSIX path
 		remoteDir = path.Dir(remotePath)
 		mkdirCmd := fmt.Sprintf("mkdir -p '%s'", remoteDir)
 		if err := w.sshClient.RunCommand(mkdirCmd); err != nil {
@@ -1409,7 +1274,8 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 		}
 	}
 
-	// Upload file using SCP
+	w.safePrintf("🔄 Sync (OS=%s) local='%s' → remote='%s' dir='%s'\n", targetOS, localPath, remotePath, remoteDir)
+
 	if err := w.sshClient.UploadFile(localPath, remotePath); err != nil {
 		w.safePrintf("❌ Failed to sync file %s to %s: %v\n", localPath, remotePath, err)
 		return
@@ -1417,7 +1283,6 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 
 	w.safeStatus("✅ File synced: %s → %s\n", localPath, remotePath)
 
-	// Update file cache metadata if available
 	if w.fileCache != nil {
 		if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
 			w.safePrintf("⚠️  Failed to update cache metadata for %s: %v\n", localPath, err)
@@ -1777,4 +1642,54 @@ func (w *Watcher) HandleShowStatsCommand() {
 // HandleDeployAgentCommand handles the deploy agent command
 func (w *Watcher) HandleDeployAgentCommand() {
 	w.commands.HandleDeployAgentCommand()
+}
+
+// gracefulShutdown initiates coordinated shutdown of the watcher
+func (w *Watcher) gracefulShutdown() {
+	w.shutdownMu.Lock()
+	defer w.shutdownMu.Unlock()
+
+	w.safePrintln("🔄 Initiating graceful shutdown...")
+
+	// Cancel context to signal all goroutines
+	if w.cancelFunc != nil {
+		w.cancelFunc()
+	}
+
+	// Stop agent monitoring
+	if err := w.StopAgentMonitoring(); err != nil {
+		w.safePrintf("⚠️  Error stopping agent monitoring: %v\n", err)
+	}
+
+	// Stop file watching
+	w.StopNotify()
+
+	// Give goroutines a moment to clean up
+	time.Sleep(500 * time.Millisecond)
+
+	// Close SSH connections
+	if w.sshClient != nil {
+		if err := w.sshClient.Close(); err != nil {
+			w.safePrintf("⚠️  Error closing SSH client: %v\n", err)
+		}
+	}
+
+	// Close file cache
+	if w.fileCache != nil {
+		if err := w.fileCache.Close(); err != nil {
+			w.safePrintf("⚠️  Error closing file cache: %v\n", err)
+		}
+	}
+
+	w.safePrintln("✅ Watcher shutdown complete")
+
+	// Publish shutdown complete event
+	events.GlobalBus.Publish(events.EventWatcherStopped, "graceful")
+
+	// Signal done channel
+	select {
+	case w.done <- true:
+	default:
+		// Channel already has value or is closed
+	}
 }

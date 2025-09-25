@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	"make-sync/internal/events"
 	"make-sync/internal/util"
 
 	"golang.org/x/term"
@@ -42,10 +43,23 @@ func (w *Watcher) handleKeyboardInput() {
 				w.StopNotify()
 				return
 			}
-			// Ctrl+C (0x03) - exit immediately
+			// Ctrl+C (0x03) - initiate graceful shutdown via EventBus
 			if b0 == 0x03 {
-				term.Restore(int(os.Stdin.Fd()), w.firstOld)
-				os.Exit(0)
+				w.safePrintf("🔔 Keyboard received Ctrl+C, initiating shutdown...\n")
+
+				// Restore terminal state before shutdown
+				if w.firstOld != nil {
+					term.Restore(int(os.Stdin.Fd()), w.firstOld)
+				}
+
+				// Publish cleanup event first to allow agents to be terminated
+				events.GlobalBus.Publish(events.EventCleanupRequested)
+
+				// Publish shutdown event to EventBus for parent coordination
+				events.GlobalBus.Publish(events.EventShutdownRequested, "keyboard_ctrl_c")
+
+				// Call graceful shutdown
+				w.gracefulShutdown()
 				return
 			}
 

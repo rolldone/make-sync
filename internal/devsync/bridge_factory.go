@@ -3,7 +3,7 @@ package devsync
 import (
 	"fmt"
 	"make-sync/internal/devsync/localclient"
-	"make-sync/internal/devsync/sshclient"
+	"make-sync/internal/sshclient"
 )
 
 // CreateSSHBridgeWithCommand constructs an SSH-backed Bridge using an existing

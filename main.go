@@ -4,13 +4,11 @@ import (
 	"context"
 	"log"
 	"os"
-	"os/signal"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"make-sync/cmd"
+	"make-sync/internal/events"
 	"make-sync/internal/util"
 
 	"golang.org/x/term"
@@ -35,14 +33,25 @@ func main() {
 	// Context used to issue graceful cancellation to command tree.
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Setup signal handler for graceful + forced shutdown. Buffer 2 to catch quick double Ctrl+C.
-	sigs := make(chan os.Signal, 2)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-
 	var wg sync.WaitGroup
 	done := make(chan struct{})
+	shutdown := make(chan struct{})
 
-	// Run the CLI in a goroutine so we can listen for signals concurrently
+	// Listen for shutdown events from components via EventBus
+	events.GlobalBus.Subscribe(events.EventShutdownRequested, func(reason string) {
+		log.Printf("shutdown requested from component: %s\n", reason)
+		cancel() // signal all routines via context
+		close(shutdown)
+	})
+
+	// Listen for cleanup events from components via EventBus
+	events.GlobalBus.Subscribe(events.EventCleanupRequested, func() {
+		log.Printf("cleanup requested from component\n")
+		// Perform direct agent cleanup here without watcher dependency
+		// This will be handled by main.go level cleanup logic
+	})
+
+	// Run the CLI in a goroutine
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -50,36 +59,21 @@ func main() {
 		close(done)
 	}()
 
-	var first int32 // 0 = not received, 1 = received first Ctrl+C
-
 waitLoop:
 	for {
 		select {
-		case sig := <-sigs:
-			if sig == os.Interrupt || sig == syscall.SIGTERM {
-				if atomic.CompareAndSwapInt32(&first, 0, 1) {
-					log.Println("interrupt received (Ctrl+C). Attempting graceful shutdown... (press Ctrl+C again to force)")
-					cancel() // signal all routines via context
-					// wait for goroutine to finish, but force exit after timeout
-					select {
-					case <-done:
-						log.Println("goroutine exited cleanly")
-						break waitLoop
-					case sig2 := <-sigs:
-						// second signal while waiting => force
-						log.Printf("second signal (%v) received -> force exit\n", sig2)
-						forceExit(130) // 130 = terminated by Ctrl+C convention
-					case <-time.After(5 * time.Second):
-						log.Println("timeout waiting for goroutine, forcing exit")
-						forceExit(1)
-					}
-				} else {
-					log.Println("second Ctrl+C -> immediate force exit")
-					forceExit(130)
-				}
+		case <-shutdown:
+			// Component requested shutdown via EventBus
+			select {
+			case <-done:
+				log.Println("goroutine exited cleanly after component shutdown")
+				break waitLoop
+			case <-time.After(5 * time.Second):
+				log.Println("timeout waiting for goroutine after component shutdown, forcing exit")
+				forceExit(1)
 			}
 		case <-done:
-			// finished normally before any signal
+			// finished normally before any shutdown request
 			log.Println("goroutine finished; exiting.")
 			util.Default.ClearLine()
 			break waitLoop

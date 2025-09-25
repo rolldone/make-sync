@@ -41,6 +41,7 @@ type SyncCollection struct {
 
 type Devsync struct {
 	OSTarget       string            `yaml:"os_target"`
+	AgentName      string            `yaml:"agent_name,omitempty"` // Unique identifier for agent process
 	Auth           Auth              `yaml:"auth"`
 	Ignores        []string          `yaml:"ignores"`
 	AgentWatchs    []string          `yaml:"agent_watchs"`

@@ -59,6 +59,12 @@ var rootCmd = &cobra.Command{
 			}
 			fmt.Println("✅ Configuration is valid and rendered!")
 
+			// Ensure local config exists with agent name (will be created automatically when needed)
+			_, err = config.GetOrCreateLocalConfig()
+			if err != nil {
+				fmt.Printf("⚠️  Failed to initialize local config: %v\n", err)
+			}
+
 			// Main menu loop - return to menu after SSH sessions
 			for {
 				select {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"make-sync/internal/events"
 	"make-sync/internal/util"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -127,6 +128,12 @@ func (m *menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "esc", "q":
+			m.choice = "cancelled"
+			return m, tea.Quit
+		case "ctrl+c":
+			// Handle Ctrl+C by publishing cleanup event
+			fmt.Printf("🔔 TUI: Detected Ctrl+C, publishing cleanup event...\n")
+			events.GlobalBus.Publish(events.EventCleanupRequested)
 			m.choice = "cancelled"
 			return m, tea.Quit
 		case "up", "k":
