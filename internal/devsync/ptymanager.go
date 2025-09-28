@@ -2,6 +2,7 @@ package devsync
 
 import (
 	"fmt"
+	"log"
 	"make-sync/internal/util"
 	"strconv"
 	"strings"
@@ -120,14 +121,14 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	m.routerStop = make(chan struct{})
 	// register exit listener so that when the bridge exits we stop router and
 	// close the pending channel to unblock Focus.
-	if m.bridgeActive != nil {
-		m.bridgeActive.SetOnExitListener(func() {
-			// close pending and router in a goroutine to avoid blocking bridge
-			util.Default.Print("PTYManager: Bridge exit listener called, closing slot", slot)
-			util.Default.ClearLine()
-			m.CloseSlot(slot)
-		})
-	}
+	m.bridgeActive.SetOnExitListener(func() {
+		// close pending and router in a goroutine to avoid blocking bridge
+		log.Println("SetOnExitListener: exit listener called")
+		util.Default.Print("PTYManager: Bridge exit listener called, closing slot", slot)
+		util.Default.ClearLine()
+		m.CloseSlot(slot)
+	})
+
 	m.wgGroup.Add(1)
 	go func() {
 		defer func() {
@@ -246,16 +247,19 @@ func (m *PTYManager) ResumeSlot(slot int) error {
 // CloseSlot closes and removes the session in slot (remote bridge closed).
 func (m *PTYManager) CloseSlot(slot int) error {
 
+	log.Println("PTYManager: CloseSlot called for slot", slot)
 	// cleanup
 	close(m.routerStop)
-
+	log.Println("PTYManager: routerStop channel closed")
 	close(m.Pendingchan)
+	log.Println("PTYManager: Pendingchan channel closed")
 
 	// util.Default.ClearScreen()
 	// time.Sleep(400 * time.Millisecond)
 	util.Default.Resume()
 	util.Default.PrintBlock("", true)
 	util.Default.PrintBlock("🔌 Remote PTY session closed. Press Enter to return menu...", true)
+	log.Println("PTYManager: Remote PTY session closed. Press Enter to return menu...")
 
 	m.mu.Lock()
 	s, ok := m.sessions[slot]
@@ -263,13 +267,28 @@ func (m *PTYManager) CloseSlot(slot int) error {
 		delete(m.sessions, slot)
 	}
 	m.mu.Unlock()
+	log.Println("PTYManager: Session removed from map for slot", slot)
 	if !ok || s == nil {
+		log.Println("PTYManager: No session found for slot", slot)
 		return nil
 	}
-
+	log.Println("PTYManager: Found session for slot", slot)
 	if s.Bridge != nil {
 		_ = s.Bridge.Close()
+		log.Println("PTYManager: Bridge closed for slot", slot)
 	}
+
+	// Consume one line from stdin so that the Enter key the user may have
+	// pressed to close the session does not get delivered to the local shell
+	// (which would cause the local shell to execute the previous command).
+	// Use a short, blocking read here; terminal should be in normal (cooked)
+	// mode because Resume() was called above.
+
+	// Local Pty hang using bufio, i dont know why
+	// reader := bufio.NewReader(os.Stdin)
+	// _, _ = reader.ReadString('\n')
+
+	log.Println("PTYManager: Consumed one line from stdin")
 
 	return nil
 }

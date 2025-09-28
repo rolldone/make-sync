@@ -241,16 +241,54 @@ func (w *Watcher) showCommandMenuDisplay() {
 			isWindowsTarget := strings.Contains(targetOS, "windows")
 			var initialCmd string
 			if isWindowsTarget {
-				// Use cmd.exe on remote Windows targets instead of PowerShell
-				// escCmd := func(s string) string {
-				// 	s = strings.ReplaceAll(s, "%", "%%")
-				// 	s = strings.ReplaceAll(s, "^", "^^")
-				// 	return s
-				// }
-				// cmdPart := escCmd(result)
-				// // body := fmt.Sprintf("if not exist \"%s\" mkdir \"%s\" & cd /d \"%s\" & %s", remotePath, remotePath, remotePath, cmdPart)
-				// escapeInner := func(s string) string { return strings.ReplaceAll(s, `"`, `\\"`) }
-				initialCmd = ""
+				// Normalize remotePath for Windows: convert '/c/Users' -> 'C:\Users' and
+				// replace forward slashes with backslashes so cmd.exe accepts it.
+				winPath := remotePath
+				if strings.HasPrefix(winPath, "/") && len(winPath) > 2 && winPath[2] == '/' {
+					// pattern like /c/Users -> drive letter at pos 1
+					d := strings.ToUpper(string(winPath[1]))
+					rest := winPath[2:]
+					rest = strings.ReplaceAll(rest, "/", "\\\\")
+					winPath = d + ":" + rest
+				} else {
+					winPath = strings.ReplaceAll(winPath, "/", "\\\\")
+				}
+
+				// Use cmd.exe on remote Windows targets. If the selected result came
+				// from the user's config (cfg.Devsync.Script.Remote.Commands), do NOT
+				// apply any automatic mapping or escaping — respect the exact command
+				// provided by the configuration. Only apply mapping for dynamic or
+				// fallback menu entries.
+				inConfig := false
+				if cfg != nil && cfg.Devsync.Script.Remote.Commands != nil {
+					for _, c := range cfg.Devsync.Script.Remote.Commands {
+						if c == result {
+							inConfig = true
+							break
+						}
+					}
+				}
+				// Escape percent signs and carets so the command survives cmd parsing.
+				escCmd := func(s string) string {
+					s = strings.ReplaceAll(s, "%", "%%")
+					s = strings.ReplaceAll(s, "^", "^^")
+					return s
+				}
+				// Only apply escaping for non-config items; do not rewrite or map
+				// commands like `pwd`/`ls` to Windows equivalents — respect user
+				// config and dynamic entries verbatim except for escaping percent
+				// and caret characters which would be consumed by cmd.exe parsing.
+				cmdPart := result
+				if !inConfig {
+					cmdPart = escCmd(result)
+				}
+				// Run the user's command; assume the directory already exists and
+				// just change directory into it before running the command.
+				// body := fmt.Sprintf("cd /d \"%s\" & %s", winPath, cmdPart)
+				body := fmt.Sprintf("cd /d \"%s\" & %s", winPath, cmdPart)
+				// Do not add extra outer quoting or backslash-escaped quotes here;
+				// pass the body (which already contains quoted paths) directly to cmd.exe
+				initialCmd = fmt.Sprintf("cmd.exe /K %s", body)
 			} else {
 				initialCmd = fmt.Sprintf("mkdir -p %s || true && cd %s && bash -c %s ; exec bash",
 					shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
@@ -258,6 +296,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 			isExist := false
 			if !w.ptyMgr.HasSlot(*slot) {
 				util.Default.Println("➕ Creating new slot", *slot, "...")
+				// Debug: print before opening remote slot to inspect values seen at runtime
+				util.Default.Printf("DEBUG: targetOS=%q remotePath=%q initialCmd=%q\n", targetOS, remotePath, initialCmd)
 				if err := w.ptyMgr.OpenRemoteSlot(*slot, initialCmd); err != nil {
 					util.Default.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", *slot, err)
 					continue
@@ -302,15 +342,27 @@ func (w *Watcher) enterShellNonCommand() {
 	isWindowsTarget := strings.Contains(targetOS, "windows")
 	var initialCmd string
 	if isWindowsTarget {
+		// Normalize remotePath for Windows and build cmd.exe body
+		winPath := remotePath
+		if strings.HasPrefix(winPath, "/") && len(winPath) > 2 && winPath[2] == '/' {
+			d := strings.ToUpper(string(winPath[1]))
+			rest := winPath[2:]
+			rest = strings.ReplaceAll(rest, "/", "\\\\")
+			winPath = d + ":" + rest
+		} else {
+			winPath = strings.ReplaceAll(winPath, "/", "\\\\")
+		}
 		// Start an interactive cmd.exe shell in the desired directory
-		body := fmt.Sprintf("if not exist \"%s\" mkdir \"%s\" & cd /d \"%s\" & cmd.exe", remotePath, remotePath, remotePath)
-		escapeInner := func(s string) string { return strings.ReplaceAll(s, `"`, `\\"`) }
-		initialCmd = fmt.Sprintf("cmd.exe /K \"%s\"", escapeInner(body))
+		body := fmt.Sprintf("cd /d \"%s\"", winPath)
+		// Pass body directly to cmd.exe (body contains quoted paths)
+		initialCmd = fmt.Sprintf("cmd.exe /K %s", body)
 	} else {
 		initialCmd = fmt.Sprintf("mkdir -p %s || true && cd %s && bash -l", shellEscape(remotePath), shellEscape(remotePath))
 	}
 	if !w.ptyMgr.HasSlot(slot) {
 		util.Default.Println("➕ Creating new remote slot", slot, "...")
+		// Debug: print values before opening remote slot (slot 2)
+		util.Default.Printf("DEBUG: enterShellNonCommand targetOS=%q remotePath=%q initialCmd=%q\n", targetOS, remotePath, initialCmd)
 		if err := w.ptyMgr.OpenRemoteSlot(slot, initialCmd); err != nil {
 			util.Default.Printf("⚠️  Failed to open remote slot %d: %v - returning to menu\n", slot, err)
 			util.Default.Resume()

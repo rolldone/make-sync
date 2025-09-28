@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
-
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/term"
+	"time"
 
 	"make-sync/internal/pty"
 	"make-sync/internal/util"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/term"
 )
 
 // PTYSSHBridge represents a bridge between PTY and SSH session for interactive sessions
@@ -23,6 +25,7 @@ type PTYSSHBridge struct {
 	ioOnce sync.Once
 
 	initialCommand string
+	postCommand    string
 
 	StdinMatcher   func([]byte) bool
 	StdinCallback  func([]byte)
@@ -108,6 +111,16 @@ func NewPTYSSHBridgeWithCommand(sshClient *SSHClient, initialCommand string) (*P
 	}, nil
 }
 
+// NewPTYSSHBridgeWithCommandAndPost creates a bridge with both initial shell command and post command
+func NewPTYSSHBridgeWithCommandAndPost(sshClient *SSHClient, initialCommand string, postCommand string) (*PTYSSHBridge, error) {
+	bridge, err := NewPTYSSHBridgeWithCommand(sshClient, initialCommand)
+	if err != nil {
+		return nil, err
+	}
+	bridge.postCommand = postCommand
+	return bridge, nil
+}
+
 // StartInteractiveShell starts an interactive shell session
 func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) error {
 
@@ -150,6 +163,31 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 	util.Default.Print("44444444444444444 : Started interactive shell session")
 	bridge.ProcessPTYReadInput(ctx, cancel)
 
+	// Start a small resize watcher that polls the terminal size and applies
+	// WindowChange on the remote session when it changes. This is a simple
+	// fallback for environments that don't send SIGWINCH or when the TUI
+	// framework doesn't propagate resize events.
+	go func(ctx context.Context) {
+		prevW, prevH := rows, cols
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+				if bridge.sshSession == nil {
+					continue
+				}
+				if w, h, err := getTerminalSizeFallback(); err == nil {
+					if w != prevW || h != prevH {
+						_ = bridge.sshSession.WindowChange(h, w)
+						util.Default.Printf("DEBUG: Resize watcher WindowChange applied height=%d width=%d\n", h, w)
+						prevW, prevH = w, h
+					}
+				}
+			}
+		}
+	}(ctx)
+
 	stdinPipe, err := bridge.sshSession.StdinPipe()
 	if err != nil {
 		return err
@@ -162,13 +200,88 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 
 	util.Default.ClearLine()
 	util.Default.Print("3333333333 : Started interactive shell session")
-	if bridge.initialCommand != "" {
-		if err := bridge.sshSession.Start(bridge.initialCommand); err != nil {
-			return err
+	// Smart detection: if initialCommand contains both shell + user command,
+	// split them to avoid double execution. Look for patterns like:
+	// "cmd.exe /K cd /d \"path\" & ping google" -> shell="cmd.exe /K cd /d \"path\"", cmd="ping google"
+	ic := strings.TrimSpace(bridge.initialCommand)
+	var shellCmd, userCmd string
+
+	if strings.Contains(ic, "cmd.exe /K") && strings.Contains(ic, " & ") {
+		// Windows pattern: "cmd.exe /K cd /d \"path\" & command"
+		parts := strings.Split(ic, " & ")
+		if len(parts) >= 2 {
+			shellCmd = strings.TrimSpace(parts[0])                      // "cmd.exe /K cd /d \"path\""
+			userCmd = strings.TrimSpace(strings.Join(parts[1:], " & ")) // "command"
+			util.Default.Printf("DEBUG: Detected Windows shell+cmd: shell=%q cmd=%q\n", shellCmd, userCmd)
+		} else {
+			shellCmd = ic
+		}
+	} else if strings.Contains(ic, "bash -c") && strings.Contains(ic, " ; exec bash") {
+		// Unix pattern: "mkdir -p /path && cd /path && bash -c 'command' ; exec bash"
+		if idx := strings.Index(ic, "bash -c "); idx != -1 {
+			beforeBash := ic[:idx] + "bash -l" // "mkdir -p /path && cd /path && bash -l"
+			shellCmd = beforeBash
+			// Extract command from bash -c '...'
+			remaining := ic[idx+8:] // after "bash -c "
+			if idx2 := strings.Index(remaining, " ; exec bash"); idx2 != -1 {
+				cmdPart := remaining[:idx2]
+				cmdPart = strings.Trim(cmdPart, "'\"") // remove quotes
+				userCmd = strings.TrimSpace(cmdPart)
+				util.Default.Printf("DEBUG: Detected Unix shell+cmd: shell=%q cmd=%q\n", shellCmd, userCmd)
+			}
+		}
+		if shellCmd == "" {
+			shellCmd = ic
 		}
 	} else {
-		if err := bridge.sshSession.Shell(); err != nil {
+		shellCmd = ic
+	}
+
+	// If we have both shell and user command, use two-step approach
+	if userCmd != "" {
+		// Two-step: start shell, then send user command
+		util.Default.Printf("DEBUG: Two-step execution: starting shell=%q\n", shellCmd)
+		if err := bridge.sshSession.Start(shellCmd); err != nil {
 			return err
+		}
+		if bridge.stdinPipe != nil {
+			go func(cmd string, w io.WriteCloser) {
+				// longer delay for shell to fully initialize
+				time.Sleep(300 * time.Millisecond)
+				// util.Default.ClearLine()
+				// util.Default.Printf("DEBUG: Sending user command=%q\n", cmd)
+				// util.Default.ClearLine()
+				_, _ = w.Write([]byte(cmd + "\r\n"))
+			}(userCmd, bridge.stdinPipe)
+		}
+	} else {
+		// Single command: determine if it's a shell starter or regular command
+		startsShell := false
+		if ic != "" {
+			low := strings.ToLower(ic)
+			if strings.HasPrefix(low, "cmd.exe") || strings.Contains(low, "/k") || strings.Contains(low, "-noexit") || strings.Contains(low, "-c") {
+				startsShell = true
+			}
+		}
+
+		if ic != "" && startsShell {
+			// Start shell directly
+			util.Default.Printf("DEBUG: Starting shell directly: %q\n", ic)
+			if err := bridge.sshSession.Start(bridge.initialCommand); err != nil {
+				return err
+			}
+		} else {
+			// Legacy mode: start shell and write command to stdin
+			util.Default.Printf("DEBUG: Legacy mode: Shell() + stdin write: %q\n", ic)
+			if err := bridge.sshSession.Shell(); err != nil {
+				return err
+			}
+			if bridge.initialCommand != "" && bridge.stdinPipe != nil {
+				go func(cmd string, w io.WriteCloser) {
+					time.Sleep(150 * time.Millisecond)
+					_, _ = w.Write([]byte(cmd + "\r\n"))
+				}(bridge.initialCommand, bridge.stdinPipe)
+			}
 		}
 	}
 
@@ -228,7 +341,7 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 						copy(data, buf[:n])
 						il(data)
 					}
-
+					isHit := false
 					// Scan for ESC + digit (Alt+1..Alt+9 and Alt+0)
 					if ih != nil {
 						for i := 0; i < n-1; i++ {
@@ -237,10 +350,14 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 								if (c >= '1' && c <= '9') || c == '0' {
 									digit := string([]byte{c})
 									ih("alt+" + digit)
+									isHit = true
 									i++
 								}
 							}
 						}
+					}
+					if isHit {
+						continue
 					}
 					w := bridge.GetStdinWriter()
 					if w != nil {

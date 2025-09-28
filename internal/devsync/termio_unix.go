@@ -1,5 +1,5 @@
-//go:build !windows
-// +build !windows
+//go:build !windows && !darwin
+// +build !windows,!darwin
 
 package devsync
 
@@ -9,14 +9,34 @@ import (
 	"time"
 	"unsafe"
 
-	"golang.org/x/sys/unix"
+	// "golang.org/x/sys/unix" (not used on all platforms)
 	"golang.org/x/term"
 )
 
 func flushStdin() {
-	fd := int(os.Stdin.Fd())
-	// best-effort flush of input queue
-	_ = unix.IoctlSetInt(fd, unix.TCFLSH, unix.TCIFLUSH)
+	// Try to drain any pending bytes by opening /dev/tty in non-blocking mode
+	// and reading whatever is immediately available. This avoids using
+	// platform-specific ioctl constants like FIONREAD/TCFLSH which may not
+	// exist on all Unix variants.
+	if f, err := os.OpenFile("/dev/tty", os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+		defer f.Close()
+		buf := make([]byte, 4096)
+		for {
+			n, err := f.Read(buf)
+			if n > 0 {
+				// discard
+			}
+			if err != nil {
+				break
+			}
+			// if we read less than buffer, likely drained
+			if n < len(buf) {
+				break
+			}
+		}
+		return
+	}
+	// fallback: if /dev/tty couldn't be opened non-blocking, give up silently
 }
 
 func sendEnter() {

@@ -15,6 +15,18 @@ import (
 )
 
 func main() {
+
+	// Buka file untuk menulis log (append, create kalau belum ada)
+	f, err := os.OpenFile(".sync_temp/app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("gagal buka file log: %v", err)
+	}
+	defer f.Close()
+
+	// Arahkan standard logger ke file
+	log.SetOutput(f)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // contoh: timestamp
+
 	// Capture original terminal state (if stdin is a TTY) so we can restore on forced exit.
 	var origState *term.State
 	if fi, _ := os.Stdin.Stat(); (fi.Mode() & os.ModeCharDevice) != 0 {
