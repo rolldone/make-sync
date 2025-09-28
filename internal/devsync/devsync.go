@@ -308,33 +308,28 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	}
 	// Start the interactive shell
 	util.Default.Println("🔗 Starting interactive SSH session with PTY bridge...")
-	// Install a small debug callback so we can verify the matcher runs
-	cb := func(_ []byte) {
-		// Print a visible debug marker to stderr
-		util.Default.Printf("DEBUG CALLBACK: Ctrl+G pressed (direct session)\n")
-		// Write a marker file with timestamp
-		fname := "/tmp/make-sync-direct-callback.log"
-		if f, err := os.OpenFile(fname, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-			defer f.Close()
-			f.WriteString(time.Now().Format(time.RFC3339) + " callback fired\n")
-		}
-	}
 
 	bridge.SetOnExitListener(func() {
 		// close(routerStop)
+		log.Println("🔗 SSH session exited, closing bridge...")
 	})
 
 	bridge.SetOnInputHitCodeListener(func(code string) {
 		log.Printf("DEBUG: Input hit code: 0x%02x\n", code)
-		util.Default.Printf("DEBUG: Input hit code: 0x%02x\n", code)
 	})
 
 	bridge.SetOnInputListener(func(data []byte) {
 		// Uncomment to debug all input data
 		// util.Default.Printf("DEBUG: Input data: %q\n", data)
+
 	})
 
-	if err := bridge.StartInteractiveShell(cb); err != nil {
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		bridge.GetStdinWriter().Write([]byte("\033[2J\033[1;1H")) // Clear screen then send newline
+	}()
+
+	if err := bridge.StartInteractiveShell(); err != nil {
 		util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
 	}
 

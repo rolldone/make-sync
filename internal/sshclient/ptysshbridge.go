@@ -123,7 +123,7 @@ func NewPTYSSHBridgeWithCommandAndPost(sshClient *SSHClient, initialCommand stri
 }
 
 // StartInteractiveShell starts an interactive shell session
-func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) error {
+func (bridge *PTYSSHBridge) StartInteractiveShell() error {
 
 	// Best-effort: set stdin into raw mode for interactive sessions and keep
 	// the restore function so Pause/Resume/Close can restore it.
@@ -160,8 +160,7 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 
 	ctx, cancel := context.WithCancel(context.Background())
 	bridge.cancelFunc = cancel
-	util.Default.ClearLine()
-	util.Default.Print("44444444444444444 : Started interactive shell session")
+	log.Println("StartInteractiveShell : Started interactive shell session")
 	bridge.ProcessPTYReadInput(ctx, cancel)
 
 	// Start a small resize watcher that polls the terminal size and applies
@@ -380,6 +379,8 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 	go func(ctx context.Context) {
 		buf := make([]byte, 4096)
 		util.Default.ClearLine()
+		// Set pending output delay to allow terminal to initialize
+		time.Sleep(2 * time.Second)
 		for {
 			select {
 			case <-ctx.Done():
@@ -413,6 +414,8 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 	// stderr reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 4096)
+		// Set pending output delay to allow terminal to initialize
+		time.Sleep(2 * time.Second)
 		for {
 			select {
 			case <-ctx.Done():
@@ -447,21 +450,11 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 
 // Pause stops stdin/output
 func (bridge *PTYSSHBridge) Pause() error {
-	// if bridge.stopStdinCh != nil {
-	//  close(bridge.stopStdinCh)
-	//  bridge.stopStdinCh = nil
-	// }
 
 	bridge.outputMu.Lock()
 	bridge.outputDisabled = true
 	bridge.outputMu.Unlock()
 	bridge.cancelFunc()
-
-	// oldStaet, err := term.GetState(int(os.Stdin.Fd()))
-	// if err != nil {
-	//  return fmt.Errorf("failed to snapshot terminal state: %v", err)
-	// }
-	// bridge.oldState = oldStaet
 
 	term.Restore(int(os.Stdin.Fd()), bridge.oldState)
 
@@ -472,14 +465,10 @@ func (bridge *PTYSSHBridge) Pause() error {
 
 // Resume restarts stdin/output
 func (bridge *PTYSSHBridge) Resume() error {
+
 	bridge.outputMu.Lock()
 	bridge.outputDisabled = false
 	bridge.outputMu.Unlock()
-
-	// err := term.Restore(int(os.Stdin.Fd()), bridge.oldState)
-	// if err != nil {
-	//  return fmt.Errorf("failed to set raw mode: %v", err)
-	// }
 
 	oldstate, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
@@ -492,24 +481,11 @@ func (bridge *PTYSSHBridge) Resume() error {
 
 	bridge.ProcessPTYReadInput(ctx, cancel)
 
-	if bridge.stdinPipe != nil {
-		// bridge.stopStdinCh = make(chan struct{})
-		// go bridge.stdinLoop()
-	}
 	return nil
 }
 
 // Close closes bridge
 func (bridge *PTYSSHBridge) Close() error {
-	// bridge.ioOnce.Do(func() {
-	//  close(bridge.ioCancel)
-	// })
-
-	// bridge.oldState = nil
-
-	// if bridge.stopStdinCh != nil {
-	//  close(bridge.stopStdinCh)
-	// }
 	bridge.outputDisabled = true
 	log.Println("PTYSSHBridge : Close called, output disabled")
 

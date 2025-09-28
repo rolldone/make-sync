@@ -195,7 +195,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 				util.Default.ClearLine()
 			case "start":
 				go func() {
-					if err := m.bridgeActive.StartInteractiveShell(nil); err != nil {
+					if err := m.bridgeActive.StartInteractiveShell(); err != nil {
 						util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
 						// os.Exit(1)
 					}

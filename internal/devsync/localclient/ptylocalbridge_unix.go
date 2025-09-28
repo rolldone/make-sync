@@ -21,10 +21,7 @@ import (
 // not require a callback argument for startup; the callback is applied via
 // SetStdinCallback prior to StartInteractiveShell being invoked. For backward
 // compatibility with other call-sites we accept the cb param and set it.
-func (b *PTYLocalBridge) StartInteractiveShell(cb func([]byte)) error {
-	if cb != nil {
-		b.SetStdinCallback(cb)
-	}
+func (b *PTYLocalBridge) StartInteractiveShell() error {
 	// default to launching an interactive shell with no initial command
 	return b.startLocalWithCommand(b.initialCommand)
 }

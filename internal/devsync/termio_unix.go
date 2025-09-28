@@ -4,6 +4,7 @@
 package devsync
 
 import (
+	"log"
 	"os"
 	"syscall"
 	"time"
@@ -58,19 +59,19 @@ func sendEnter() {
 // sendKeyA injects a lowercase 'a' into the TTY input buffer (best-effort)
 func sendKeyA() {
 	go func() {
-		// time.Sleep(50 * time.Millisecond)
-		// fd := int(os.Stdin.Fd())
-		// c := byte('a')
-		// // try to inject 'a' into the tty input buffer (TIOCSTI)
-		// _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.TIOCSTI), uintptr(unsafe.Pointer(&c)))
-		// if errno != 0 {
-		// 	// fallback: try writing to /dev/tty
-		// 	if f, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
-		// 		_, _ = f.Write([]byte{'a'})
-		// 		f.Close()
-		// 	}
-		// }
-		// fmt.Println("Injected 'a' into TTY input buffer")
+		time.Sleep(50 * time.Millisecond)
+		fd := int(os.Stdin.Fd())
+		c := byte('a')
+		// try to inject 'a' into the tty input buffer (TIOCSTI)
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.TIOCSTI), uintptr(unsafe.Pointer(&c)))
+		if errno != 0 {
+			// fallback: try writing to /dev/tty
+			if f, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
+				_, _ = f.Write([]byte{'a'})
+				f.Close()
+			}
+		}
+		log.Println("Injected 'a' into TTY input buffer")
 	}()
 }
 

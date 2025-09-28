@@ -22,10 +22,7 @@ import (
 // StartInteractiveShell starts an interactive shell using ConPTY. The callback
 // parameter is provided for API compatibility; the bridge uses SetStdinCallback
 // for stdin handling.
-func (b *PTYLocalBridge) StartInteractiveShell(cb func([]byte)) error {
-	if cb != nil {
-		b.SetStdinCallback(cb)
-	}
+func (b *PTYLocalBridge) StartInteractiveShell() error {
 	return b.StartInteractiveShellWithCommand(b.initialCommand)
 }
 

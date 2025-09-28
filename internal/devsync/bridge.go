@@ -13,7 +13,7 @@ type Bridge interface {
 	// StartInteractiveShell starts the interactive session. Implementations
 	// may accept an initial command via constructor/factory; the manager
 	// passes stdin callbacks via the SetStdinCallback family.
-	StartInteractiveShell(cb func([]byte)) error
+	StartInteractiveShell() error
 
 	Pause() error
 	Resume() error

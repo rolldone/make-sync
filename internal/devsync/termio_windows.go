@@ -36,17 +36,17 @@ func sendEnter() {
 
 // sendKeyA simulates pressing the 'a' key (lowercase) via Win32 keybd_event (best-effort)
 func sendKeyA() {
-	// user32 := syscall.NewLazyDLL("user32.dll")
-	// keybd := user32.NewProc("keybd_event")
-	// const KEYEVENTF_KEYUP = 0x0002
-	// // Virtual-Key code for 'A' is 0x41
-	// const VK_A = 0x41
+	user32 := syscall.NewLazyDLL("user32.dll")
+	keybd := user32.NewProc("keybd_event")
+	const KEYEVENTF_KEYUP = 0x0002
+	// Virtual-Key code for 'A' is 0x41
+	const VK_A = 0x41
 
-	// // press 'A'
-	// _, _, _ = keybd.Call(uintptr(VK_A), uintptr(0), uintptr(0), uintptr(0))
-	// time.Sleep(10 * time.Millisecond)
-	// // release 'A'
-	// _, _, _ = keybd.Call(uintptr(VK_A), uintptr(0), uintptr(KEYEVENTF_KEYUP), uintptr(0))
+	// press 'A'
+	_, _, _ = keybd.Call(uintptr(VK_A), uintptr(0), uintptr(0), uintptr(0))
+	time.Sleep(10 * time.Millisecond)
+	// release 'A'
+	_, _, _ = keybd.Call(uintptr(VK_A), uintptr(0), uintptr(KEYEVENTF_KEYUP), uintptr(0))
 }
 
 // sendCtrlArrowDown simulates Ctrl+ArrowDown (best-effort).
