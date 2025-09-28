@@ -334,6 +334,13 @@ func performIndexing() {
 		os.Exit(1)
 	}
 	dbPath := filepath.Join(absSyncTemp, "indexing_files.db")
+	// Remove existing DB to avoid schema mismatches from older agent versions
+	if _, serr := os.Stat(dbPath); serr == nil {
+		fmt.Printf("🧹 Removing existing index DB to avoid schema mismatches: %s\n", dbPath)
+		if rerr := os.Remove(dbPath); rerr != nil {
+			fmt.Printf("⚠️  Failed to remove old DB (will still attempt to write): %v\n", rerr)
+		}
+	}
 	if err := indexer.SaveIndexDB(dbPath, idx); err != nil {
 		fmt.Printf("❌ Failed to save index DB: %v\n", err)
 		os.Exit(1)

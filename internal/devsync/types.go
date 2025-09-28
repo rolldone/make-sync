@@ -127,6 +127,16 @@ type Watcher struct {
 	// Agent process tracking
 	agentPID string // PID of remote agent process
 
+	// If true, agent stop was requested by the user (e.g. via Ctrl+R) and the
+	// monitoring goroutine should not attempt to auto-restart the agent.
+	agentUserStop   bool
+	agentUserStopMu sync.Mutex
+
+	// Track whether the agent monitoring goroutine is currently running to avoid
+	// starting multiple monitor goroutines when re-entering the watcher UI.
+	agentMonitoringRunning   bool
+	agentMonitoringRunningMu sync.Mutex
+
 	configMu sync.RWMutex // protect reading/writing w.config or other config-derived state
 
 	// protects access to extendedIgnores and ignoreFileModTime

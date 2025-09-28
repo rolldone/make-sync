@@ -63,6 +63,10 @@ type PTYSSHBridge struct {
 	reconnecting   bool
 	ReconnectLimit time.Duration // max time to attempt reconnect
 	ReconnectBase  time.Duration // base backoff
+
+	// exiting indicates the bridge is in the process of normal exit/close
+	exiting   bool
+	exitingMu sync.Mutex
 }
 
 // NewPTYSSHBridge creates a new PTY-SSH bridge for interactive sessions
@@ -308,6 +312,20 @@ func (bridge *PTYSSHBridge) StartInteractiveShell() error {
 		}
 	}
 
+	// Before notifying exit listener, cancel reader goroutines and disable output
+	// so they won't trigger reconnect logic on normal session exit.
+	if bridge.cancelFunc != nil {
+		bridge.cancelFunc()
+	}
+	bridge.outputMu.Lock()
+	bridge.outputDisabled = true
+	bridge.outputMu.Unlock()
+
+	// mark exiting so reconnect logic knows this was an intentional close
+	bridge.exitingMu.Lock()
+	bridge.exiting = true
+	bridge.exitingMu.Unlock()
+
 	// Notify registered exit listener (if any). Protect invocation with mutex
 	util.Default.Print("PTYSSHBridge: invoking exit listener")
 	util.Default.ClearLine()
@@ -409,6 +427,10 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 					util.Default.ClearLine()
 					util.Default.Print("PTYSSHBridge stdout reader error:", err)
 					util.Default.ClearLine()
+					// If EOF (clean/expected exit), do not attempt reconnect.
+					if err == io.EOF {
+						return
+					}
 					// Trigger reconnect handling (best-effort)
 					go bridge.handleDisconnect(err)
 					return
@@ -444,7 +466,14 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 				if err != nil {
 					util.Default.ClearLine()
 					util.Default.Print("PTYSSHBridge stderr reader error:", err)
+					// If EOF (clean/expected exit), do not attempt reconnect.
+					if err == io.EOF {
+						return
+					}
 					// bridge.ioOnce.Do(func() { close(bridge.ioCancel) })
+					// For non-EOF errors we don't trigger disconnect here because
+					// stderr errors are less actionable; primary reconnect is
+					// handled by stdout reader. Still, return to exit goroutine.
 					return
 				}
 			}
@@ -494,6 +523,10 @@ func (bridge *PTYSSHBridge) Resume() error {
 func (bridge *PTYSSHBridge) Close() error {
 	bridge.outputDisabled = true
 	log.Println("PTYSSHBridge : Close called, output disabled")
+
+	bridge.exitingMu.Lock()
+	bridge.exiting = true
+	bridge.exitingMu.Unlock()
 
 	log.Println("PTYSSHBridge : SetOnExitListener exit listener called")
 	if bridge.localTTY != nil {
@@ -620,6 +653,18 @@ func (b *PTYSSHBridge) handleDisconnect(err error) {
 		b.reconnecting = false
 		b.reconnectMu.Unlock()
 	}()
+
+	// If we are intentionally exiting/closing, skip reconnect attempts.
+	b.exitingMu.Lock()
+	isExiting := b.exiting
+	b.exitingMu.Unlock()
+	if isExiting {
+		util.Default.Print("Connection lost during intentional exit; not reconnecting")
+		b.reconnectMu.Lock()
+		b.reconnecting = false
+		b.reconnectMu.Unlock()
+		return
+	}
 
 	util.Default.Print("Connection lost, attempting reconnect...")
 

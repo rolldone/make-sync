@@ -182,7 +182,17 @@ func (w *Watcher) Start() error {
 		return nil // already running
 	}
 	w.running = true
+	// Clear any previous user-requested agent stop so monitoring can restart
+	w.agentUserStopMu.Lock()
+	w.agentUserStop = false
+	w.agentUserStopMu.Unlock()
 	w.runningMu.Unlock()
+
+	// Ensure agent monitoring is started when entering watcher; startAgentMonitoring is
+	// idempotent-ish but we guard against multiple starts in its implementation.
+	go func() {
+		_ = w.startAgentMonitoring()
+	}()
 	// ensure we reset running flag when Start returns
 	defer func() {
 		w.runningMu.Lock()
@@ -425,6 +435,15 @@ func (w *Watcher) startAgentMonitoring() error {
 		return fmt.Errorf("persistent SSH client not available")
 	}
 
+	// Prevent multiple monitoring goroutines from being started concurrently.
+	w.agentMonitoringRunningMu.Lock()
+	if w.agentMonitoringRunning {
+		w.agentMonitoringRunningMu.Unlock()
+		return nil
+	}
+	w.agentMonitoringRunning = true
+	w.agentMonitoringRunningMu.Unlock()
+
 	w.safePrintln("👀 Starting continuous agent monitoring...")
 
 	// Get the remote agent path
@@ -460,6 +479,13 @@ func (w *Watcher) startAgentMonitoring() error {
 
 	// Start the agent in a goroutine and keep it running
 	go func() {
+		// ensure we clear the running flag when this goroutine exits
+		defer func() {
+			w.agentMonitoringRunningMu.Lock()
+			w.agentMonitoringRunning = false
+			w.agentMonitoringRunningMu.Unlock()
+		}()
+
 		for {
 			// Check if context cancelled
 			select {
@@ -512,6 +538,15 @@ func (w *Watcher) startAgentMonitoring() error {
 				// If shutdown requested, exit gracefully
 				if strings.Contains(err.Error(), "shutdown requested") {
 					w.safePrintln("🔄 Agent monitoring stopped (shutdown requested)")
+					return
+				}
+
+				// If user explicitly requested stop (e.g. Ctrl+R), do not auto-restart
+				w.agentUserStopMu.Lock()
+				userStopped := w.agentUserStop
+				w.agentUserStopMu.Unlock()
+				if userStopped {
+					w.safePrintln("🔁 Agent stop was requested by user - not restarting")
 					return
 				}
 

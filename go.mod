@@ -14,6 +14,7 @@ require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/manifoldco/promptui v0.9.0
 	github.com/rjeczalik/notify v0.9.3
+	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/spf13/cobra v1.8.0
 	golang.org/x/crypto v0.42.0
 	golang.org/x/term v0.35.0
@@ -59,5 +60,5 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	golang.org/x/sys v0.36.0 // indirect
+	golang.org/x/sys v0.36.0
 )

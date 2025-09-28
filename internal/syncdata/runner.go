@@ -3,15 +3,90 @@ package syncdata
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"database/sql"
 	"make-sync/internal/config"
 	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
+
+	"github.com/cespare/xxhash/v2"
+	_ "github.com/glebarez/sqlite"
 )
+
+// collectPreprocessedIgnores walks root and collects .sync_ignore lines, preprocesses
+// simple patterns (adds **/ variant) and returns a deduplicated list.
+func collectPreprocessedIgnores(root string) ([]string, error) {
+	found := map[string]struct{}{}
+	// default ignores
+	defaults := []string{".sync_temp", "make-sync.yaml", ".sync_ignore", ".sync_collections"}
+	for _, d := range defaults {
+		found[d] = struct{}{}
+	}
+
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.EqualFold(d.Name(), ".sync_ignore") {
+			data, rerr := os.ReadFile(p)
+			if rerr != nil {
+				return nil
+			}
+			lines := strings.Split(string(data), "\n")
+			for _, ln := range lines {
+				l := strings.TrimSpace(ln)
+				if l == "" || strings.HasPrefix(l, "#") {
+					continue
+				}
+				neg := false
+				if strings.HasPrefix(l, "!") {
+					neg = true
+					l = strings.TrimPrefix(l, "!")
+				}
+				// normalize to forward slashes
+				l = filepath.ToSlash(l)
+				if strings.Contains(l, "/") || strings.Contains(l, "**") {
+					if neg {
+						found["!"+l] = struct{}{}
+					} else {
+						found[l] = struct{}{}
+					}
+					continue
+				}
+				// add both forms
+				if neg {
+					found["!"+l] = struct{}{}
+					found["!**/"+l] = struct{}{}
+				} else {
+					found[l] = struct{}{}
+					found["**/"+l] = struct{}{}
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// convert map to slice deterministic order
+	out := make([]string, 0, len(found))
+	for k := range found {
+		out = append(out, k)
+	}
+	// sort for deterministic output
+	sort.Strings(out)
+	return out, nil
+}
 
 // RemoteAgentConfig represents the configuration sent to remote agent
 // This mirrors the struct from internal/devsync/types.go
@@ -39,6 +114,20 @@ func generateRemoteConfig(cfg *config.Config) *RemoteAgentConfig {
 func uploadConfigToRemote(client *sshclient.SSHClient, cfg *config.Config, remoteSyncTemp, osTarget string) error {
 	// Generate remote config
 	remoteConfig := generateRemoteConfig(cfg)
+
+	// Collect preprocessed ignores from project root and populate remoteConfig.Devsync.Ignores
+	root := cfg.LocalPath
+	if root == "" {
+		wd, err := os.Getwd()
+		if err == nil {
+			root = wd
+		}
+	}
+	if root != "" {
+		if ignores, err := collectPreprocessedIgnores(root); err == nil {
+			remoteConfig.Devsync.Ignores = ignores
+		}
+	}
 
 	// Convert to JSON
 	configJSON, err := json.MarshalIndent(remoteConfig, "", "  ")
@@ -163,12 +252,6 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 	}
 
 	util.Default.Printf("🔧 DEBUG: Uploading %s to %s\n", localBinaryPath, remoteAgentPath)
-	util.Default.Printf("🔧 DEBUG: File size check...\n")
-
-	// Check file size first
-	if stat, err := os.Stat(localBinaryPath); err == nil {
-		util.Default.Printf("🔧 DEBUG: Local binary size: %d bytes\n", stat.Size())
-	}
 
 	// Use SyncFile with absolute path
 	if err := client.SyncFile(localBinaryPath, remoteAgentPath); err != nil {
@@ -188,9 +271,6 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 	return nil
 }
 
-// RemoteRunAgentIndexing runs the agent with the 'indexing' command on the remote.
-// remoteDir must be the directory where the agent binary is located (absolute path).
-// Returns output (stdout/stderr combined) or error.
 func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string) (string, error) {
 	isWin := strings.Contains(strings.ToLower(osTarget), "win")
 
@@ -210,9 +290,7 @@ func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget str
 		if strings.HasSuffix(winRemoteDir, ".sync_temp") {
 			agentPath = winRemoteDir + "\\" + binaryName
 			cdDir = winRemoteDir[:len(winRemoteDir)-len(".sync_temp")]
-			if strings.HasSuffix(cdDir, "\\") {
-				cdDir = cdDir[:len(cdDir)-1]
-			}
+			cdDir = strings.TrimSuffix(cdDir, "\\")
 			if cdDir == "" {
 				cdDir = winRemoteDir
 			} // fallback
@@ -290,10 +368,13 @@ func shellQuote(s string) string {
 // RunAgentIndexingFlow encapsulates the full remote indexing orchestration:
 // - locate local agent binary from provided candidates
 // - connect SSH using cfg
-// - upload agent into remote .sync_temp
+// - optionally upload agent into remote .sync_temp (controlled by skipUpload)
 // - run remote indexing command
 // - download remote indexing_files.db into a local temp file
 // Returns the local path of the downloaded DB, the remote output, or an error.
+// If skipUpload is true, the function will not upload the agent or config and
+// assumes they are already present on the remote (useful when caller already
+// deployed the agent).
 func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string) (string, string, error) {
 	// find local binary
 	var localBinary string
@@ -358,4 +439,445 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string) (string,
 	}
 	util.Default.Printf("✅ Remote indexing finished. Remote outaput:\n%s\n", out)
 	return "", out, nil
+}
+
+// DownloadIndexDB downloads the remote .sync_temp/indexing_files.db into the
+// provided local destination directory (localDestFolder). If localDestFolder is
+// empty, it will default to cfg.LocalPath or current working directory's .sync_temp.
+// Returns the local file path or an error.
+func DownloadIndexDB(cfg *config.Config, localDestFolder string) (string, error) {
+	// determine remote base path
+	remotePath := cfg.Devsync.Auth.RemotePath
+	if remotePath == "" {
+		remotePath = cfg.RemotePath
+	}
+	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	var remoteSyncTemp string
+	if remotePath == "" {
+		if strings.Contains(osTarget, "win") {
+			remoteSyncTemp = "%TEMP%"
+		} else {
+			remoteSyncTemp = "/tmp/.sync_temp"
+		}
+	} else {
+		if strings.Contains(osTarget, "win") {
+			remoteSyncTemp = filepath.ToSlash(filepath.Join(remotePath, ".sync_temp"))
+		} else {
+			remoteSyncTemp = filepath.Join(remotePath, ".sync_temp")
+		}
+	}
+
+	// remote file path
+	var remoteFile string
+	if strings.Contains(osTarget, "win") {
+		remoteFile = strings.ReplaceAll(remoteSyncTemp, "/", "\\") + "\\indexing_files.db"
+	} else {
+		remoteFile = filepath.Join(remoteSyncTemp, "indexing_files.db")
+	}
+
+	// decide local destination folder
+	dest := localDestFolder
+	if dest == "" {
+		if cfg.LocalPath != "" {
+			dest = cfg.LocalPath
+		} else {
+			dest = "."
+		}
+	}
+	localSyncTemp := filepath.Join(dest, ".sync_temp")
+	if err := os.MkdirAll(localSyncTemp, 0755); err != nil {
+		return "", fmt.Errorf("failed to create local .sync_temp: %v", err)
+	}
+	localFile := filepath.Join(localSyncTemp, "indexing_files.db")
+
+	// Connect SSH
+	sshCli, err := ConnectSSH(cfg)
+	if err != nil {
+		return "", fmt.Errorf("ssh connect failed: %v", err)
+	}
+	defer sshCli.Close()
+
+	util.Default.Printf("⬇️  Downloading remote index DB from %s to %s\n", remoteFile, localFile)
+	if err := sshCli.DownloadFile(localFile, remoteFile); err != nil {
+		return "", fmt.Errorf("failed to download index DB: %v", err)
+	}
+
+	util.Default.Printf("✅ Downloaded index DB to %s\n", localFile)
+	return localFile, nil
+}
+
+// CompareAndDownloadByHash downloads the remote index DB, builds a local index from
+// localRoot (if empty, derived from cfg.LocalPath or current working dir), compares
+// by relative path and hash, and downloads files whose hash differ or when remote
+// hash is empty. Returns list of local downloaded file paths.
+func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, error) {
+	// decide local root
+	root := localRoot
+	if root == "" {
+		if cfg.LocalPath != "" {
+			root = cfg.LocalPath
+		} else if cfg.Devsync.Auth.LocalPath != "" {
+			root = cfg.Devsync.Auth.LocalPath
+		} else {
+			wd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("failed to determine working dir: %v", err)
+			}
+			root = wd
+		}
+	}
+	// ensure absolute
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute root: %v", err)
+	}
+
+	// Download remote DB into local .sync_temp
+	localDBPath, err := DownloadIndexDB(cfg, absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download remote DB: %v", err)
+	}
+
+	// Load remote index DB via sqlite
+	remoteByRel := map[string]struct {
+		Path  string
+		Rel   string
+		Size  int64
+		Mod   int64
+		Hash  string
+		IsDir bool
+	}{}
+
+	db, err := sql.Open("sqlite", localDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open remote DB: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT path, rel, size, mod_time, hash, is_dir FROM files`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query remote DB: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var pathStr, relStr, hashStr string
+		var sizeInt, modNano int64
+		var isDirInt int
+		if err := rows.Scan(&pathStr, &relStr, &sizeInt, &modNano, &hashStr, &isDirInt); err != nil {
+			continue
+		}
+		key := filepath.ToSlash(relStr)
+		if key == "" {
+			// fallback: derive rel from path by keeping base name
+			key = filepath.ToSlash(relStr)
+		}
+		remoteByRel[key] = struct {
+			Path  string
+			Rel   string
+			Size  int64
+			Mod   int64
+			Hash  string
+			IsDir bool
+		}{Path: pathStr, Rel: relStr, Size: sizeInt, Mod: modNano, Hash: hashStr, IsDir: isDirInt != 0}
+	}
+
+	// Remote-first: iterate entries from remote DB and decide per-entry
+	// whether to download into absRoot. This honors the remote index and
+	// avoids scanning every local file.
+
+	// Create IgnoreCache rooted at absRoot
+	ic := NewIgnoreCache(absRoot)
+
+	// Connect SSH once and reuse for downloads
+	sshCli, err := ConnectSSH(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("ssh connect failed: %v", err)
+	}
+	defer sshCli.Close()
+
+	// deterministically iterate remote entries by sorted rel
+	rels := make([]string, 0, len(remoteByRel))
+	for r := range remoteByRel {
+		rels = append(rels, r)
+	}
+	sort.Strings(rels)
+
+	downloaded := []string{}
+	examined := 0
+	skippedIgnored := 0
+	skippedUpToDate := 0
+	downloadErrors := 0
+
+	for _, rel := range rels {
+		rm := remoteByRel[rel]
+		examined++
+		if rm.IsDir {
+			continue
+		}
+
+		relNorm := filepath.ToSlash(rel)
+		localPath := filepath.Join(absRoot, filepath.FromSlash(relNorm))
+
+		// Always skip anything under a remote .sync_temp directory — we don't
+		// want to pull agent artifacts and the remote .sync_temp into local tree.
+		if relNorm == ".sync_temp" || strings.HasPrefix(relNorm, ".sync_temp/") || strings.Contains(relNorm, "/.sync_temp/") {
+			skippedIgnored++
+			continue
+		}
+
+		// Respect local .sync_ignore — if user ignores it locally, do not download
+		if ic.Match(localPath, false) {
+			skippedIgnored++
+			continue
+		}
+
+		// Check local file
+		info, statErr := os.Stat(localPath)
+		if statErr != nil {
+			// file missing -> download
+			util.Default.Printf("⬇️  Downloading %s -> %s\n", buildRemotePath(cfg, relNorm), localPath)
+			if err := sshCli.DownloadFile(localPath, buildRemotePath(cfg, relNorm)); err != nil {
+				util.Default.Printf("❌ Failed to download %s: %v\n", buildRemotePath(cfg, relNorm), err)
+				downloadErrors++
+				continue
+			}
+			downloaded = append(downloaded, localPath)
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+
+		// compute local hash
+		localHash := ""
+		f, err := os.Open(localPath)
+		if err == nil {
+			h := xxhash.New()
+			if _, err := io.Copy(h, f); err == nil {
+				localHash = fmt.Sprintf("%x", h.Sum(nil))
+			}
+			f.Close()
+		}
+
+		if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
+			util.Default.Printf("⬇️  Downloading %s -> %s\n", buildRemotePath(cfg, relNorm), localPath)
+			if err := sshCli.DownloadFile(localPath, buildRemotePath(cfg, relNorm)); err != nil {
+				util.Default.Printf("❌ Failed to download %s: %v\n", buildRemotePath(cfg, relNorm), err)
+				downloadErrors++
+				continue
+			}
+			downloaded = append(downloaded, localPath)
+			continue
+		}
+
+		skippedUpToDate++
+	}
+
+	util.Default.Printf("🔁 Remote index entries examined: %d, downloaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, errors: %d\n",
+		examined, len(downloaded), skippedIgnored, skippedUpToDate, downloadErrors)
+
+	return downloaded, nil
+}
+
+// buildRemotePath constructs an absolute remote path for a given rel using cfg
+func buildRemotePath(cfg *config.Config, rel string) string {
+	remoteBase := cfg.Devsync.Auth.RemotePath
+	if remoteBase == "" {
+		remoteBase = cfg.RemotePath
+	}
+	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	if strings.Contains(osTarget, "win") {
+		// prefer backslashes on windows remote
+		p := filepath.ToSlash(filepath.Join(remoteBase, rel))
+		return strings.ReplaceAll(p, "/", "\\")
+	}
+	return filepath.ToSlash(filepath.Join(remoteBase, rel))
+}
+
+// CompareAndUploadByHash performs a local-first safe-push:
+// - downloads remote index DB into local .sync_temp
+// - walks local tree and for each file compares to remote entry by rel/hash
+// - uploads files that are new or whose hash differs (or remote hash is empty)
+// - after each comparison, records the rel into .sync_temp/checked_files.json
+// Returns list of uploaded local paths.
+func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, error) {
+	// determine local root
+	root := localRoot
+	if root == "" {
+		if cfg.LocalPath != "" {
+			root = cfg.LocalPath
+		} else if cfg.Devsync.Auth.LocalPath != "" {
+			root = cfg.Devsync.Auth.LocalPath
+		} else {
+			wd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("failed to determine working dir: %v", err)
+			}
+			root = wd
+		}
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute root: %v", err)
+	}
+
+	// Download remote DB into local .sync_temp
+	localDBPath, err := DownloadIndexDB(cfg, absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download remote DB: %v", err)
+	}
+
+	// Load remote index DB
+	remoteByRel := map[string]struct {
+		Path  string
+		Rel   string
+		Size  int64
+		Mod   int64
+		Hash  string
+		IsDir bool
+	}{}
+
+	db, err := sql.Open("sqlite", localDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open remote DB: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT path, rel, size, mod_time, hash, is_dir FROM files`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query remote DB: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var pathStr, relStr, hashStr string
+		var sizeInt, modNano int64
+		var isDirInt int
+		if err := rows.Scan(&pathStr, &relStr, &sizeInt, &modNano, &hashStr, &isDirInt); err != nil {
+			continue
+		}
+		key := filepath.ToSlash(relStr)
+		remoteByRel[key] = struct {
+			Path  string
+			Rel   string
+			Size  int64
+			Mod   int64
+			Hash  string
+			IsDir bool
+		}{Path: pathStr, Rel: relStr, Size: sizeInt, Mod: modNano, Hash: hashStr, IsDir: isDirInt != 0}
+	}
+
+	// Create IgnoreCache
+	ic := NewIgnoreCache(absRoot)
+
+	// Connect SSH for uploads
+	sshCli, err := ConnectSSH(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("ssh connect failed: %v", err)
+	}
+	defer sshCli.Close()
+
+	// Prepare checked file path
+	syncTemp := filepath.Join(absRoot, ".sync_temp")
+	if err := os.MkdirAll(syncTemp, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create local .sync_temp: %v", err)
+	}
+	checkedFile := filepath.Join(syncTemp, "checked_files.json")
+	checked := make([]string, 0)
+
+	uploaded := make([]string, 0)
+	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
+
+	// Walk local files (local-first)
+	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		// skip root directory itself
+		if p == absRoot {
+			return nil
+		}
+
+		// compute rel path
+		rel, rerr := filepath.Rel(absRoot, p)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+
+		// Always skip .sync_temp
+		if rel == ".sync_temp" || strings.HasPrefix(rel, ".sync_temp/") || strings.Contains(rel, "/.sync_temp/") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// respect ignore cache
+		if ic.Match(p, false) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			skippedIgnored++
+			return nil
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		examined++
+
+		// compute local hash
+		localHash := ""
+		f, ferr := os.Open(p)
+		if ferr == nil {
+			h := xxhash.New()
+			if _, err := io.Copy(h, f); err == nil {
+				localHash = fmt.Sprintf("%x", h.Sum(nil))
+			}
+			f.Close()
+		}
+
+		// decide upload
+		rm, exists := remoteByRel[rel]
+		needUpload := false
+		if !exists {
+			needUpload = true
+		} else if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
+			needUpload = true
+		}
+
+		if needUpload {
+			util.Default.Printf("⬆️  Uploading %s -> %s\n", p, buildRemotePath(cfg, rel))
+			if err := sshCli.SyncFile(p, buildRemotePath(cfg, rel)); err != nil {
+				util.Default.Printf("❌ Failed to upload %s: %v\n", p, err)
+				uploadErrors++
+			} else {
+				uploaded = append(uploaded, p)
+			}
+		} else {
+			skippedUpToDate++
+		}
+
+		// mark as checked locally and persist checked list
+		checked = append(checked, rel)
+		// write tmp and rename for atomicity
+		tmp := checkedFile + ".tmp"
+		if data, jerr := json.MarshalIndent(checked, "", "  "); jerr == nil {
+			_ = os.WriteFile(tmp, data, 0644)
+			_ = os.Rename(tmp, checkedFile)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return uploaded, fmt.Errorf("walk error: %v", err)
+	}
+
+	util.Default.Printf("🔁 Local files examined: %d, uploaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, upload errors: %d\n",
+		examined, len(uploaded), skippedIgnored, skippedUpToDate, uploadErrors)
+
+	return uploaded, nil
 }

@@ -24,6 +24,8 @@ type FileMeta struct {
 	Path string `json:"path"`
 	// Rel is the path relative to the indexed root (if available)
 	Rel string `json:"rel,omitempty"`
+	// Checked indicates whether this entry was checked during a comparison
+	Checked int `json:"checked,omitempty"`
 }
 
 // IndexMap maps relative path -> FileMeta
@@ -33,6 +35,9 @@ type IndexMap map[string]FileMeta
 // Note: .sync_ignore support is not implemented in this first iteration.
 func BuildIndex(root string) (IndexMap, error) {
 	idx := IndexMap{}
+
+	// create ignore cache
+	ic := NewSimpleIgnoreCache(root)
 
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -50,6 +55,13 @@ func BuildIndex(root string) (IndexMap, error) {
 
 		info, err := d.Info()
 		if err != nil {
+			return nil
+		}
+		// skip ignored entries
+		if ic.Match(p, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		// compute absolute path
@@ -159,21 +171,21 @@ func CompareIndices(oldIdx, newIdx IndexMap) (added, modified, removed []string)
 }
 
 // SaveIndexDB saves the index into a sqlite database at dbPath.
-// Schema: files(path TEXT PRIMARY KEY, rel TEXT, size INTEGER, mod_time INTEGER, hash TEXT, is_dir INTEGER)
+// Schema: files(path TEXT PRIMARY KEY, rel TEXT, size INTEGER, mod_time INTEGER, hash TEXT, is_dir INTEGER, checked INTEGER)
 func SaveIndexDB(dbPath string, idx IndexMap) error {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS files (
 		path TEXT PRIMARY KEY,
 		rel TEXT,
 		size INTEGER,
 		mod_time INTEGER,
 		hash TEXT,
-		is_dir INTEGER
+		is_dir INTEGER,
+		checked INTEGER DEFAULT 0
 	)`); err != nil {
 		return err
 	}
@@ -187,7 +199,7 @@ func SaveIndexDB(dbPath string, idx IndexMap) error {
 		return err
 	}
 
-	stmt, err := tx.Prepare(`INSERT INTO files(path, rel, size, mod_time, hash, is_dir) VALUES(?,?,?,?,?,?)`)
+	stmt, err := tx.Prepare(`INSERT INTO files(path, rel, size, mod_time, hash, is_dir, checked) VALUES(?,?,?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -195,7 +207,7 @@ func SaveIndexDB(dbPath string, idx IndexMap) error {
 	defer stmt.Close()
 
 	for _, m := range idx {
-		if _, err := stmt.Exec(m.Path, m.Rel, m.Size, m.ModTime.UnixNano(), m.Hash, boolToInt(m.IsDir)); err != nil {
+		if _, err := stmt.Exec(m.Path, m.Rel, m.Size, m.ModTime.UnixNano(), m.Hash, boolToInt(m.IsDir), m.Checked); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -212,10 +224,37 @@ func LoadIndexDB(dbPath string) (IndexMap, error) {
 		return nil, err
 	}
 	defer db.Close()
-
-	rows, err := db.Query(`SELECT path, rel, size, mod_time, hash, is_dir FROM files`)
+	// Try the newer schema first (with checked column)
+	rows, err := db.Query(`SELECT path, rel, size, mod_time, hash, is_dir, checked FROM files`)
 	if err != nil {
-		return nil, err
+		// Fallback to older schema without checked
+		rows2, err2 := db.Query(`SELECT path, rel, size, mod_time, hash, is_dir FROM files`)
+		if err2 != nil {
+			return nil, err // return original error
+		}
+		defer rows2.Close()
+		for rows2.Next() {
+			var path, rel, hash string
+			var size int64
+			var modNano int64
+			var isDirInt int
+			if err := rows2.Scan(&path, &rel, &size, &modNano, &hash, &isDirInt); err != nil {
+				return nil, err
+			}
+			idx[path] = FileMeta{
+				Path:    path,
+				Rel:     rel,
+				Size:    size,
+				ModTime: time.Unix(0, modNano),
+				Hash:    hash,
+				IsDir:   intToBool(isDirInt),
+				Checked: 0,
+			}
+		}
+		if err := rows2.Err(); err != nil {
+			return nil, err
+		}
+		return idx, nil
 	}
 	defer rows.Close()
 
@@ -224,7 +263,8 @@ func LoadIndexDB(dbPath string) (IndexMap, error) {
 		var size int64
 		var modNano int64
 		var isDirInt int
-		if err := rows.Scan(&path, &rel, &size, &modNano, &hash, &isDirInt); err != nil {
+		var checkedInt int
+		if err := rows.Scan(&path, &rel, &size, &modNano, &hash, &isDirInt, &checkedInt); err != nil {
 			return nil, err
 		}
 		idx[path] = FileMeta{
@@ -234,6 +274,7 @@ func LoadIndexDB(dbPath string) (IndexMap, error) {
 			ModTime: time.Unix(0, modNano),
 			Hash:    hash,
 			IsDir:   intToBool(isDirInt),
+			Checked: checkedInt,
 		}
 	}
 	if err := rows.Err(); err != nil {

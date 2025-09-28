@@ -40,6 +40,23 @@ func (w *Watcher) handleKeyboardInput() {
 			b0 := buffer[0]
 			// Ctrl+R (0x12) - trigger notify reload
 			if b0 == 0x12 {
+				// Stop both the remote agent monitoring and the local file watcher.
+				// StopAgentMonitoring may perform network/SSH work, so run it in the
+				// background to avoid blocking the keyboard input loop.
+				util.Default.ClearLine()
+				w.safePrintln("🔁 Keyboard received Ctrl+R — stopping agent and file watcher...")
+				// mark user-requested stop so monitoring loop won't auto-restart
+				w.agentUserStopMu.Lock()
+				w.agentUserStop = true
+				w.agentUserStopMu.Unlock()
+				go func() {
+					if err := w.StopAgentMonitoring(); err != nil {
+						w.safePrintf("⚠️  Error stopping agent monitoring: %v\n", err)
+						return
+					}
+					w.safePrintln("✅ Agent monitoring stopped")
+				}()
+				// Stop file notify synchronously so the watcher returns promptly.
 				w.StopNotify()
 				return
 			}

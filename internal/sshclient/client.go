@@ -383,12 +383,34 @@ func (c *SSHClient) DownloadFile(localPath, remotePath string) error {
 	}
 
 	// Start scp in 'from' mode to fetch the file
-	// Ensure remotePath is POSIX and quote it for the remote shell
-	remotePath = strings.ReplaceAll(remotePath, "\\", "/")
-	remotePath = path.Clean(remotePath)
-	if err := session.Start(fmt.Sprintf("scp -f %s", shellEscape(remotePath))); err != nil {
-		session.Close()
-		return fmt.Errorf("failed to start scp on remote: %v", err)
+	// Detect Windows-style remotes (e.g. C:\path\to\file) and use a
+	// Windows-friendly quoting strategy. For POSIX remotes use single-quote
+	// shell escaping.
+	isWindowsRemote := false
+	if (len(remotePath) >= 3 && remotePath[1] == ':' && (remotePath[2] == '\\' || remotePath[2] == '/')) || strings.HasPrefix(remotePath, "\\\\") {
+		isWindowsRemote = true
+	}
+
+	if isWindowsRemote {
+		// For Windows remote, convert backslashes to forward slashes for scp
+		// and wrap with double quotes so cmd.exe or similar handles spaces
+		// correctly.
+		remotePathForScp := strings.ReplaceAll(remotePath, "\\", "/")
+		// escape any double quotes inside path
+		doubleQuote := func(s string) string { return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\"" }
+		cmd := fmt.Sprintf("scp -f %s", doubleQuote(remotePathForScp))
+		if err := session.Start(cmd); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
+	} else {
+		// POSIX remote: ensure forward slashes and safe single-quote escaping
+		remotePath = strings.ReplaceAll(remotePath, "\\", "/")
+		remotePath = path.Clean(remotePath)
+		if err := session.Start(fmt.Sprintf("scp -f %s", shellEscape(remotePath))); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
 	}
 
 	// helper to write a single null byte to request/ack
