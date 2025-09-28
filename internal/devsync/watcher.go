@@ -506,7 +506,8 @@ func (w *Watcher) startAgentMonitoring() error {
 
 			// Execute the watch command - this should run continuously
 			if err := w.runAgentWatchCommand(watchCmd); err != nil {
-				w.safePrintf("⚠️  Agent watch command failed: %v\n", err)
+				// show as status so user sees immediate reconnect info
+				w.safeStatusln("⚠️  Agent watch command failed: %v", err)
 
 				// If shutdown requested, exit gracefully
 				if strings.Contains(err.Error(), "shutdown requested") {
@@ -516,7 +517,7 @@ func (w *Watcher) startAgentMonitoring() error {
 
 				// If session failed, try to restart
 				if strings.Contains(err.Error(), "session") || strings.Contains(err.Error(), "broken pipe") {
-					w.safePrintln("🔌 SSH session broken, stopping current session...")
+					w.safeStatusln("🔌 SSH session broken, stopping current session...")
 					w.sshClient.StopAgentSession()
 
 					// Use context-aware sleep
@@ -565,9 +566,17 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		outputChan, errorChan, err = w.sshClient.RunCommandWithStream(watchCmd, false)
 		if err == nil {
+			// indicate success briefly and clear status
+			w.safeStatusln("✅ Agent watch command started")
+			go func() {
+				time.Sleep(800 * time.Millisecond)
+				w.safeStatusln("")
+			}()
 			break
 		}
-		w.safePrintf("⚠️  Agent watch command failed to start (attempt %d/%d): %v\n", attempt+1, maxRetries, err)
+
+		// show retry status in a single status line
+		w.safeStatusln("🔌 Reconnecting (attempt %d/%d) — next in %s: %v", attempt+1, maxRetries, backoff, err)
 
 		// Try reconnecting SSH client if possible
 		if w.sshClient != nil {
@@ -579,7 +588,7 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 			case <-time.After(backoff):
 			}
 			if cerr := w.sshClient.Connect(); cerr != nil {
-				w.safePrintf("⚠️  SSH client reconnect failed: %v\n", cerr)
+				w.safeStatusln("⚠️  SSH client reconnect failed: %v", cerr)
 			} else {
 				// Try to start persistent session if configured
 				_ = w.sshClient.StartPersistentSession()
