@@ -770,6 +770,7 @@ func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 func (w *Watcher) StopAgentMonitoring() error {
 	if w.sshClient != nil {
 		// First, try to kill remote agent processes explicitly
+		util.Default.ClearLine()
 		w.safePrintln("🔄 Attempting to kill remote agent processes...")
 
 		// Get unique agent binary name from local config
@@ -868,12 +869,16 @@ func (w *Watcher) syncConfigToRemote() error {
 
 // safePrintf prints using a mutex to avoid interleaving with other goroutines
 func (w *Watcher) safePrintf(format string, a ...interface{}) {
+	util.Default.ClearLine()
 	util.Default.Printf(format, a...)
+	util.Default.ClearLine()
 }
 
 // safePrintln prints a line using a mutex to avoid interleaving with other goroutines
 func (w *Watcher) safePrintln(a ...interface{}) {
+	util.Default.ClearLine()
 	util.Default.Println(a...)
+	util.Default.ClearLine()
 }
 
 // safeStatus writes a single-line status at the start of the line (clears remainder)
@@ -990,11 +995,14 @@ func (w *Watcher) handleSessionCompletionEvents() {
 func (w *Watcher) handleCleanupEvents() {
 	// Subscribe to cleanup events using GlobalBus
 	events.GlobalBus.Subscribe(events.EventCleanupRequested, func() {
+		util.Default.ClearLine()
 		util.Default.Printf("🧹 Received cleanup event, stopping agents...\n")
+		util.Default.ClearLine()
 		if err := w.StopAgentMonitoring(); err != nil {
 			util.Default.Printf("⚠️  Error during cleanup: %v\n", err)
 		} else {
 			util.Default.Printf("✅ Agent cleanup completed\n")
+			util.Default.ClearLine()
 		}
 	})
 }
@@ -1005,11 +1013,13 @@ func (w *Watcher) setupEventBusSubscriptions() {
 	events.GlobalBus.Subscribe(events.EventCleanupRequested, func() {
 		util.Default.ClearLine()
 		util.Default.Printf("🧹 Received cleanup event, stopping agents...\n")
+		util.Default.ClearLine()
 		if err := w.StopAgentMonitoring(); err != nil {
 			util.Default.Printf("⚠️  Error during cleanup: %v\n", err)
 		} else {
 			util.Default.Printf("✅ Agent cleanup completed\n")
 		}
+		util.Default.ClearLine()
 	})
 }
 
