@@ -3,6 +3,7 @@ package devsync
 import (
 	"context"
 	"fmt"
+	"log"
 	"make-sync/internal/config"
 	"make-sync/internal/deployagent"
 	"make-sync/internal/events"
@@ -289,7 +290,7 @@ func basicNewSessionSSH(cfg *config.Config) error {
 		// Example result:
 		// cmd.exe /K cd /d "C:\path\to\dir" 2>nul || (mkdir "C:\path\to\dir" && cd /d "C:\path\to\dir")
 		remoteCommand = fmt.Sprintf("cmd.exe /K cd /d \"%s\" 2>nul || (mkdir \"%s\" && cd /d \"%s\")", remotePath, remotePath, remotePath)
-		util.Default.Printf("DEBUG: remoteCommand=%s\n", remoteCommand)
+		log.Printf("DEBUG: remoteCommand=%s\n", remoteCommand)
 	} else {
 		// Unix-like: mkdir + cd + bash
 		remoteCommand = fmt.Sprintf("mkdir -p %s || true && cd %s && exec bash", remotePath, remotePath)
@@ -324,6 +325,7 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	})
 
 	bridge.SetOnInputHitCodeListener(func(code string) {
+		log.Printf("DEBUG: Input hit code: 0x%02x\n", code)
 		util.Default.Printf("DEBUG: Input hit code: 0x%02x\n", code)
 	})
 

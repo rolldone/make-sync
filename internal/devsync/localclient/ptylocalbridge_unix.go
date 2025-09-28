@@ -7,12 +7,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 
 	"golang.org/x/term"
 
 	"make-sync/internal/pty"
+	"make-sync/internal/util"
 )
 
 // StartInteractiveShell implements the Bridge interface. The local bridge does
@@ -61,17 +63,9 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 	// with a copy of the bytes read.
 
 	err = cmd.Wait()
-	b.ioOnce.Do(func() { close(b.ioCancel) })
 	// invoke exit listener if set
-	b.exitMu.Lock()
-	if b.exitListener != nil {
-		go func(cb func()) {
-			defer func() { _ = recover() }()
-			cb()
-		}(b.exitListener)
-		b.exitListener = nil
-	}
-	b.exitMu.Unlock()
+	b.exitListener()
+	log.Println("Local command exited:", command, "err:", err)
 	return err
 }
 
@@ -144,7 +138,8 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("Unix stdout reader: context done, exiting")
+				util.Default.ClearLine()
+				util.Default.Println("Unix stdout reader: context done, exiting")
 				return
 			default:
 				n, err := b.localPTY.Read(buf)
@@ -157,7 +152,9 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 					}
 				}
 				if err != nil {
-					b.ioOnce.Do(func() { close(b.ioCancel) })
+					// b.ioOnce.Do(func() { close(b.ioCancel) })
+					util.Default.Println("Unix stdout reader: pty read error:", err)
+					log.Println("Unix stdout reader: pty read error:", err)
 					return
 				}
 			}
@@ -198,7 +195,7 @@ func (b *PTYLocalBridge) Resume() error {
 }
 
 func (b *PTYLocalBridge) Close() error {
-	b.ioOnce.Do(func() { close(b.ioCancel) })
+	// b.ioOnce.Do(func() { close(b.ioCancel) })
 
 	if b.localPTY != nil {
 		_ = b.localPTY.Close()

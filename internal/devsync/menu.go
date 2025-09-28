@@ -2,6 +2,7 @@ package devsync
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strings"
@@ -80,6 +81,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 		}
 
 		if w.ptyMgr != nil && w.ptyMgr.HasSlot(*slot) {
+			log.Println("DEBUG: Reusing existing slot", *slot)
 			if err := w.ptyMgr.Focus(*slot, true, callback); err != nil {
 				w.safePrintf("❌ Failed to focus slot %d: %v\n", *slot, err)
 			}
@@ -199,12 +201,12 @@ func (w *Watcher) showCommandMenuDisplay() {
 						continue
 					}
 				} else {
-					util.Default.Println("🔄 Reusing existing slot", *slot, "...")
 					isExist = true
 				}
 
 				util.Default.Suspend()
 				util.Default.PrintBlock(fmt.Sprintf("🔗 Attaching to slot %d ...", *slot), true)
+				log.Println("DEBUG: attaching to local slot", *slot, "isExist=", isExist)
 				if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
 					util.Default.Printf("⚠️  Failed to focus local slot %d: %v\n", *slot, err)
 					util.Default.Resume()
@@ -297,17 +299,17 @@ func (w *Watcher) showCommandMenuDisplay() {
 			if !w.ptyMgr.HasSlot(*slot) {
 				util.Default.Println("➕ Creating new slot", *slot, "...")
 				// Debug: print before opening remote slot to inspect values seen at runtime
-				util.Default.Printf("DEBUG: targetOS=%q remotePath=%q initialCmd=%q\n", targetOS, remotePath, initialCmd)
+				log.Printf("DEBUG: targetOS=%q remotePath=%q initialCmd=%q\n", targetOS, remotePath, initialCmd)
 				if err := w.ptyMgr.OpenRemoteSlot(*slot, initialCmd); err != nil {
 					util.Default.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", *slot, err)
 					continue
 				}
 			} else {
-				fmt.Println("🔄 Reusing existing slot", *slot, "...")
 				isExist = true
 			}
 
 			util.Default.Suspend()
+			log.Println("DEBUG: attaching to slot", *slot, "isExist=", isExist)
 			util.Default.PrintBlock(fmt.Sprintf("🔗 Attaching to slot %d ...", *slot), true)
 			if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
 				util.Default.Printf("⚠️  Failed to focus slot %d: %v\n", *slot, err)
@@ -371,7 +373,7 @@ func (w *Watcher) enterShellNonCommand() {
 	} else {
 		isExist = true
 	}
-	fmt.Println("🔄 Reusing existing slot", slot, "...")
+	fmt.Println("🔄 Reusing existing slot for non command ", slot, "...")
 	util.Default.Suspend()
 	util.Default.PrintBlock(fmt.Sprintf("🔗 Attaching to slot %d ...", slot), true)
 	if err := w.ptyMgr.Focus(slot, isExist, func(slotNew int) {

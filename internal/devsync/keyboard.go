@@ -45,6 +45,7 @@ func (w *Watcher) handleKeyboardInput() {
 			}
 			// Ctrl+C (0x03) - initiate graceful shutdown via EventBus
 			if b0 == 0x03 {
+				util.Default.ClearLine()
 				w.safePrintf("🔔 Keyboard received Ctrl+C, initiating shutdown...\n")
 
 				// Restore terminal state before shutdown

@@ -127,6 +127,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 		util.Default.Print("PTYManager: Bridge exit listener called, closing slot", slot)
 		util.Default.ClearLine()
 		m.CloseSlot(slot)
+		log.Println("SetOnExitListener: slot", slot, "closed by exit listener")
 	})
 
 	m.wgGroup.Add(1)
@@ -177,9 +178,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	go func() {
 		defer func() {
 			m.wgGroup.Done()
-			util.Default.ClearLine()
-			util.Default.Println("DEBUG: message loop goroutine exiting")
-			util.Default.ClearLine()
+			log.Println("DEBUG: message loop goroutine exiting")
 		}()
 		for msg := range m.Pendingchan {
 			switch msg {
@@ -193,7 +192,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 					// os.Exit(1)
 				}
 				util.Default.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
-				// util.Default.ClearLine()
+				util.Default.ClearLine()
 			case "start":
 				go func() {
 					if err := m.bridgeActive.StartInteractiveShell(nil); err != nil {
@@ -207,8 +206,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	m.wgGroup.Wait()
 	// No per-bridge stdin matchers/callbacks to restore; keyboard shortcuts
 	// are handled by the Watcher/PTYManager input router.
-	util.Default.ClearLine()
-	util.Default.Println("DEBUG: Focus exiting normally")
+	log.Println("DEBUG: Focus exiting normally")
 	return nil
 }
 
@@ -248,11 +246,6 @@ func (m *PTYManager) ResumeSlot(slot int) error {
 func (m *PTYManager) CloseSlot(slot int) error {
 
 	log.Println("PTYManager: CloseSlot called for slot", slot)
-	// cleanup
-	close(m.routerStop)
-	log.Println("PTYManager: routerStop channel closed")
-	close(m.Pendingchan)
-	log.Println("PTYManager: Pendingchan channel closed")
 
 	// util.Default.ClearScreen()
 	// time.Sleep(400 * time.Millisecond)
@@ -263,8 +256,10 @@ func (m *PTYManager) CloseSlot(slot int) error {
 
 	m.mu.Lock()
 	s, ok := m.sessions[slot]
+	log.Println("PTYManager: Retrieved session from map for slot", slot, "ok=", ok)
 	if ok {
 		delete(m.sessions, slot)
+		log.Println("PTYManager: Deleted session from map for slot", slot)
 	}
 	m.mu.Unlock()
 	log.Println("PTYManager: Session removed from map for slot", slot)
@@ -273,10 +268,19 @@ func (m *PTYManager) CloseSlot(slot int) error {
 		return nil
 	}
 	log.Println("PTYManager: Found session for slot", slot)
-	if s.Bridge != nil {
-		_ = s.Bridge.Close()
-		log.Println("PTYManager: Bridge closed for slot", slot)
+	err := s.Bridge.Close()
+	if err != nil {
+		log.Println("PTYManager: Error closing bridge for slot", slot, ":", err)
 	}
+	log.Println("PTYManager: Bridge closed for slot", slot)
+
+	// cleanup
+	close(m.routerStop)
+	log.Println("PTYManager: routerStop channel closed")
+	close(m.Pendingchan)
+	log.Println("PTYManager: Pendingchan channel closed")
+
+	log.Println("PTYManager: Waiting for goroutines to finish")
 
 	// Consume one line from stdin so that the Enter key the user may have
 	// pressed to close the session does not get delivered to the local shell
@@ -287,8 +291,6 @@ func (m *PTYManager) CloseSlot(slot int) error {
 	// Local Pty hang using bufio, i dont know why
 	// reader := bufio.NewReader(os.Stdin)
 	// _, _ = reader.ReadString('\n')
-
-	log.Println("PTYManager: Consumed one line from stdin")
 
 	return nil
 }

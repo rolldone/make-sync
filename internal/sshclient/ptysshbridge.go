@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -180,7 +181,7 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 				if w, h, err := getTerminalSizeFallback(); err == nil {
 					if w != prevW || h != prevH {
 						_ = bridge.sshSession.WindowChange(h, w)
-						util.Default.Printf("DEBUG: Resize watcher WindowChange applied height=%d width=%d\n", h, w)
+						log.Printf("DEBUG: Resize watcher WindowChange applied height=%d width=%d\n", h, w)
 						prevW, prevH = w, h
 					}
 				}
@@ -198,8 +199,8 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 
 	bridge.sshSession.Setenv("TERM", "xterm-256color")
 
-	util.Default.ClearLine()
-	util.Default.Print("3333333333 : Started interactive shell session")
+	log.Println("DEBUG: Starting interactive shell with initialCommand:", bridge.initialCommand)
+
 	// Smart detection: if initialCommand contains both shell + user command,
 	// split them to avoid double execution. Look for patterns like:
 	// "cmd.exe /K cd /d \"path\" & ping google" -> shell="cmd.exe /K cd /d \"path\"", cmd="ping google"
@@ -212,7 +213,7 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 		if len(parts) >= 2 {
 			shellCmd = strings.TrimSpace(parts[0])                      // "cmd.exe /K cd /d \"path\""
 			userCmd = strings.TrimSpace(strings.Join(parts[1:], " & ")) // "command"
-			util.Default.Printf("DEBUG: Detected Windows shell+cmd: shell=%q cmd=%q\n", shellCmd, userCmd)
+			log.Printf("DEBUG: Detected Windows shell+cmd: shell=%q cmd=%q\n", shellCmd, userCmd)
 		} else {
 			shellCmd = ic
 		}
@@ -227,7 +228,7 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 				cmdPart := remaining[:idx2]
 				cmdPart = strings.Trim(cmdPart, "'\"") // remove quotes
 				userCmd = strings.TrimSpace(cmdPart)
-				util.Default.Printf("DEBUG: Detected Unix shell+cmd: shell=%q cmd=%q\n", shellCmd, userCmd)
+				log.Printf("DEBUG: Detected Unix shell+cmd: shell=%q cmd=%q\n", shellCmd, userCmd)
 			}
 		}
 		if shellCmd == "" {
@@ -240,7 +241,7 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 	// If we have both shell and user command, use two-step approach
 	if userCmd != "" {
 		// Two-step: start shell, then send user command
-		util.Default.Printf("DEBUG: Two-step execution: starting shell=%q\n", shellCmd)
+		log.Printf("DEBUG: Two-step execution: starting shell=%q\n", shellCmd)
 		if err := bridge.sshSession.Start(shellCmd); err != nil {
 			return err
 		}
@@ -297,21 +298,18 @@ func (bridge *PTYSSHBridge) StartInteractiveShell(callbackExit func([]byte)) err
 		if err == io.EOF {
 			// normal exit
 		} else {
-			fmt.Println("ssh session wait error:", err)
+			util.Default.ClearLine()
+			util.Default.Print("ssh session wait exited with err:", err)
+			util.Default.ClearLine()
 		}
 	}
 
 	// Notify registered exit listener (if any). Protect invocation with mutex
-	bridge.exitMu.Lock()
-	if bridge.exitListener != nil {
-		util.Default.Print("PTYSSHBridge: invoking exit listener")
-		util.Default.ClearLine()
-		bridge.exitListener()
-	}
-	bridge.exitMu.Unlock()
-	util.Default.Print("ssh session wait exited with err:", err)
+	util.Default.Print("PTYSSHBridge: invoking exit listener")
 	util.Default.ClearLine()
-	return err
+	bridge.exitListener()
+	log.Println("PTYSSHBridge : SetOnExitListener exit listener done")
+	return nil
 }
 
 func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel context.CancelFunc) error {
@@ -325,8 +323,12 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 			select {
 			case <-ctx.Done():
 				// fmt.Println("PTYSSHBridge stdin reader: context done, exiting")
+				log.Println("PTYSSHBridge stdin reader: context done, exiting")
 				return
 			default:
+				if bridge.outputDisabled {
+					return
+				}
 				n, rerr := os.Stdin.Read(buf)
 				if n > 0 {
 
@@ -382,8 +384,12 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 			select {
 			case <-ctx.Done():
 				// fmt.Println("PTYSSHBridge stdout reader: context done, exiting")
+				log.Println("PTYSSHBridge stdout reader: context done, exiting")
 				return
 			default:
+				if bridge.outputDisabled {
+					return
+				}
 				n, err := stdoutPipe.Read(buf)
 				if n > 0 {
 					bridge.outputMu.Lock()
@@ -411,8 +417,12 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 			select {
 			case <-ctx.Done():
 				// fmt.Println("PTYSSHBridge stderr reader: context done, exiting")
+				log.Println("PTYSSHBridge stderr reader: context done, exiting")
 				return
 			default:
+				if bridge.outputDisabled {
+					return
+				}
 				n, err := stderrPipe.Read(buf)
 				if n > 0 {
 					bridge.outputMu.Lock()
@@ -500,21 +510,37 @@ func (bridge *PTYSSHBridge) Close() error {
 	// if bridge.stopStdinCh != nil {
 	//  close(bridge.stopStdinCh)
 	// }
+	bridge.outputDisabled = true
+	log.Println("PTYSSHBridge : Close called, output disabled")
+
+	log.Println("PTYSSHBridge : SetOnExitListener exit listener called")
 	if bridge.localTTY != nil {
 		bridge.localTTY.Close()
+		log.Println("PTYSSHBridge : localTTY closed")
 	}
+
 	if bridge.sshSession != nil {
 		bridge.sshSession.Close()
+		log.Println("PTYSSHBridge : sshSession closed")
 	}
 	if bridge.localPTY != nil {
 		_ = bridge.localPTY.Close()
+		log.Println("PTYSSHBridge : localPTY closed")
 		bridge.localPTY = nil
 	}
 
 	bridge.cancelFunc()
-	bridge.SetOnExitListener(nil)
-	bridge.SetOnInputHitCodeListener(nil)
-	bridge.SetOnInputListener(nil)
+	log.Println("PTYSSHBridge : context cancelled")
+
+	// We dont need to clear these, PTYManager will discard the bridge reference
+	// bridge.SetOnExitListener(nil)
+	log.Println("PTYSSHBridge : Exit listener cleared")
+	// bridge.SetOnInputHitCodeListener(nil)
+	log.Println("PTYSSHBridge : InputHitCodeListener cleared")
+	/// bridge.SetOnInputListener(nil)
+	log.Println("PTYSSHBridge : InputListener cleared")
+	log.Println("PTYSSHBridge : Bridge closed")
+
 	return nil
 }
 

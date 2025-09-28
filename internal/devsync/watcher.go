@@ -203,6 +203,7 @@ func (w *Watcher) Start() error {
 	}
 
 	w.safePrintf("🔍 Starting file watcher on: %s\n", absWatchPath)
+	util.Default.ClearLine()
 	w.safePrintf("📋 Watch permissions - Add: %v, Change: %v, Unlink: %v, UnlinkFolder: %v\n",
 		w.config.Devsync.TriggerPerm.Add,
 		w.config.Devsync.TriggerPerm.Change,
@@ -498,7 +499,9 @@ func (w *Watcher) startAgentMonitoring() error {
 				w.safePrintf("⚠️  Agent identity check failed: %v\n", err)
 				w.safePrintf("🔍 identity output: %s\n", strings.TrimSpace(out))
 			} else {
+				util.Default.ClearLine()
 				w.safePrintf("🔢 Agent identity (pre-watch): %s\n", strings.TrimSpace(out))
+				util.Default.ClearLine()
 			}
 
 			// Execute the watch command - this should run continuously
@@ -642,6 +645,7 @@ func (w *Watcher) processAgentOutput(output string) {
 			if strings.HasPrefix(line, "AGENT_PID:") {
 				pid := strings.TrimPrefix(line, "AGENT_PID:")
 				w.agentPID = strings.TrimSpace(pid)
+				util.Default.ClearLine()
 				w.safePrintf("📍 Agent PID captured: %s\n", w.agentPID)
 				continue
 			}
@@ -999,6 +1003,7 @@ func (w *Watcher) handleCleanupEvents() {
 func (w *Watcher) setupEventBusSubscriptions() {
 	// Subscribe to cleanup events - this survives Start/Stop cycles
 	events.GlobalBus.Subscribe(events.EventCleanupRequested, func() {
+		util.Default.ClearLine()
 		util.Default.Printf("🧹 Received cleanup event, stopping agents...\n")
 		if err := w.StopAgentMonitoring(); err != nil {
 			util.Default.Printf("⚠️  Error during cleanup: %v\n", err)
