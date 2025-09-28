@@ -554,7 +554,45 @@ func (w *Watcher) runAgentWatchCommand(watchCmd string) error {
 	w.safeStatusln("🚀 Running agent watch command: %s", watchCmd)
 
 	// Use streaming output for continuous monitoring
-	outputChan, errorChan, err := w.sshClient.RunCommandWithStream(watchCmd, false)
+	var outputChan <-chan string
+	var errorChan <-chan error
+	var err error
+
+	// Retry wrapper: if starting the remote watch command fails (e.g., SSH/TCP),
+	// attempt to reconnect the SSH client and retry with exponential backoff.
+	maxRetries := 6
+	backoff := 1 * time.Second
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		outputChan, errorChan, err = w.sshClient.RunCommandWithStream(watchCmd, false)
+		if err == nil {
+			break
+		}
+		w.safePrintf("⚠️  Agent watch command failed to start (attempt %d/%d): %v\n", attempt+1, maxRetries, err)
+
+		// Try reconnecting SSH client if possible
+		if w.sshClient != nil {
+			_ = w.sshClient.Close()
+			// small sleep before reconnect
+			select {
+			case <-w.ctx.Done():
+				return fmt.Errorf("shutdown requested")
+			case <-time.After(backoff):
+			}
+			if cerr := w.sshClient.Connect(); cerr != nil {
+				w.safePrintf("⚠️  SSH client reconnect failed: %v\n", cerr)
+			} else {
+				// Try to start persistent session if configured
+				_ = w.sshClient.StartPersistentSession()
+			}
+		}
+
+		// Exponential backoff
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("failed to start agent watch command: %v", err)
 	}

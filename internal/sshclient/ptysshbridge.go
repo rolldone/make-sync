@@ -58,6 +58,11 @@ type PTYSSHBridge struct {
 	oldState   *term.State
 	stdoutPipe io.Reader
 	stderrPipe io.Reader
+	// reconnect state
+	reconnectMu    sync.Mutex
+	reconnecting   bool
+	ReconnectLimit time.Duration // max time to attempt reconnect
+	ReconnectBase  time.Duration // base backoff
 }
 
 // NewPTYSSHBridge creates a new PTY-SSH bridge for interactive sessions
@@ -404,7 +409,8 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 					util.Default.ClearLine()
 					util.Default.Print("PTYSSHBridge stdout reader error:", err)
 					util.Default.ClearLine()
-					// bridge.ioOnce.Do(func() { close(bridge.ioCancel) })
+					// Trigger reconnect handling (best-effort)
+					go bridge.handleDisconnect(err)
 					return
 				}
 			}
@@ -594,4 +600,77 @@ func (b *PTYSSHBridge) GetStdinObserver() func([]byte) {
 	o := b.StdinObserver
 	b.mu.RUnlock()
 	return o
+}
+
+// handleDisconnect attempts to reconnect the SSH session with exponential backoff.
+// It will Pause the bridge, try reconnecting up to ReconnectLimit, and on success
+// restart the interactive shell. If reconnect fails within the limit, it closes
+// the bridge.
+func (b *PTYSSHBridge) handleDisconnect(err error) {
+	b.reconnectMu.Lock()
+	if b.reconnecting {
+		b.reconnectMu.Unlock()
+		return
+	}
+	b.reconnecting = true
+	b.reconnectMu.Unlock()
+
+	defer func() {
+		b.reconnectMu.Lock()
+		b.reconnecting = false
+		b.reconnectMu.Unlock()
+	}()
+
+	util.Default.Print("Connection lost, attempting reconnect...")
+
+	// pause IO and restore terminal
+	_ = b.Pause()
+
+	base := b.ReconnectBase
+	if base == 0 {
+		base = 1 * time.Second
+	}
+	limit := b.ReconnectLimit
+	if limit == 0 {
+		limit = 2 * time.Minute
+	}
+
+	deadline := time.Now().Add(limit)
+	backoff := base
+
+	for time.Now().Before(deadline) {
+		util.Default.Print("Attempting reconnect...")
+		if b.sshClient != nil {
+			if cerr := b.sshClient.Connect(); cerr == nil {
+				sess, serr := b.sshClient.CreatePTYSession()
+				if serr == nil {
+					// Close any previous session reference
+					if b.sshSession != nil {
+						_ = b.sshSession.Close()
+					}
+					b.sshSession = sess
+					// try to restart interactive shell in background
+					go func() {
+						if err := b.StartInteractiveShell(); err != nil {
+							util.Default.Print("reconnected but failed to restart shell:", err)
+						}
+					}()
+					util.Default.Print("Reconnected")
+					return
+				}
+				util.Default.Print("create session failed:", serr)
+			} else {
+				util.Default.Print("reconnect client failed:", cerr)
+			}
+		}
+
+		time.Sleep(backoff)
+		backoff *= 2
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
+
+	util.Default.Print("Failed to reconnect within limit, closing bridge")
+	_ = b.Close()
 }
