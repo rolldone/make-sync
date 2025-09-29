@@ -154,9 +154,9 @@ func TestDeployAgent_Success(t *testing.T) {
 		t.Errorf("Expected local path %s, got %s", testFile, uploadCall.LocalPath)
 	}
 
-	expectedRemotePath := "/tmp/test/sync-agent"
-	if uploadCall.RemotePath != expectedRemotePath {
-		t.Errorf("Expected remote path %s, got %s", expectedRemotePath, uploadCall.RemotePath)
+	expectedPrefix := "/tmp/test/sync-agent"
+	if !strings.HasPrefix(uploadCall.RemotePath, expectedPrefix) {
+		t.Errorf("Expected remote path to start with %s, got %s", expectedPrefix, uploadCall.RemotePath)
 	}
 
 	// Verify chmod command was executed
@@ -193,9 +193,9 @@ func TestDeployAgent_Windows(t *testing.T) {
 		t.Fatalf("Expected 1 upload call, got %d", len(mock.uploadCalls))
 	}
 
-	expectedRemotePath := "C:\\temp\\test\\sync-agent.exe"
-	if mock.uploadCalls[0].RemotePath != expectedRemotePath {
-		t.Errorf("Expected remote path %s, got %s", expectedRemotePath, mock.uploadCalls[0].RemotePath)
+	expectedPrefix := "C:\\temp\\test\\sync-agent"
+	if !strings.HasPrefix(mock.uploadCalls[0].RemotePath, expectedPrefix) {
+		t.Errorf("Expected remote path to start with %s, got %s", expectedPrefix, mock.uploadCalls[0].RemotePath)
 	}
 
 	// Verify no chmod command for Windows

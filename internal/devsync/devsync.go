@@ -366,7 +366,23 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 			util.Default.Printf("✅ Safe push completed. Remote output:\n%s\n", out)
 			return "safe_push_sync"
 		case 3: // force_single_sync
-			return "force_single_sync"
+			// Delegate interactive single-sync menu to syncdata package so devsync
+			// stays small. Determine local root preference similar to other flows.
+			localRoot := cfg.LocalPath
+			if localRoot == "" {
+				localRoot = cfg.Devsync.Auth.LocalPath
+			}
+			if localRoot == "" {
+				// fallback to current working dir
+				if wd, err := os.Getwd(); err == nil {
+					localRoot = wd
+				} else {
+					localRoot = "."
+				}
+			}
+			syncdata.ForceSingleSyncMenu(cfg, localRoot)
+			// after single sync returns, continue to show devsync menu
+			continue
 		case 4: // remote_session
 			err := basicNewSessionSSH(cfg)
 			if err != nil {

@@ -881,3 +881,379 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 
 	return uploaded, nil
 }
+
+// CompareAndDownloadByHashWithFilter behaves like CompareAndDownloadByHash but
+// only operates on remote entries whose rel matches any of the provided prefixes.
+// If prefixes is empty, it behaves like the full CompareAndDownloadByHash.
+func CompareAndDownloadByHashWithFilter(cfg *config.Config, localRoot string, prefixes []string) ([]string, error) {
+	// if prefixes empty, call existing
+	if len(prefixes) == 0 {
+		return CompareAndDownloadByHash(cfg, localRoot)
+	}
+	// reuse existing function but filter remote entries during download
+	// determine local root (same as other function)
+	root := localRoot
+	if root == "" {
+		if cfg.LocalPath != "" {
+			root = cfg.LocalPath
+		} else if cfg.Devsync.Auth.LocalPath != "" {
+			root = cfg.Devsync.Auth.LocalPath
+		} else {
+			wd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("failed to determine working dir: %v", err)
+			}
+			root = wd
+		}
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute root: %v", err)
+	}
+
+	localDBPath, err := DownloadIndexDB(cfg, absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download remote DB: %v", err)
+	}
+
+	// Load remote DB
+	remoteByRel := map[string]struct {
+		Path  string
+		Rel   string
+		Size  int64
+		Mod   int64
+		Hash  string
+		IsDir bool
+	}{}
+
+	db, err := sql.Open("sqlite", localDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open remote DB: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT path, rel, size, mod_time, hash, is_dir FROM files`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query remote DB: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var pathStr, relStr, hashStr string
+		var sizeInt, modNano int64
+		var isDirInt int
+		if err := rows.Scan(&pathStr, &relStr, &sizeInt, &modNano, &hashStr, &isDirInt); err != nil {
+			continue
+		}
+		key := filepath.ToSlash(relStr)
+		// check if key matches any prefix
+		matched := false
+		for _, p := range prefixes {
+			pp := strings.TrimPrefix(p, "/")
+			if pp == "" {
+				matched = true
+				break
+			}
+			if strings.HasPrefix(key, pp) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			remoteByRel[key] = struct {
+				Path  string
+				Rel   string
+				Size  int64
+				Mod   int64
+				Hash  string
+				IsDir bool
+			}{Path: pathStr, Rel: relStr, Size: sizeInt, Mod: modNano, Hash: hashStr, IsDir: isDirInt != 0}
+		}
+	}
+
+	// Create IgnoreCache rooted at absRoot
+	ic := NewIgnoreCache(absRoot)
+
+	// Connect SSH once and reuse for downloads
+	sshCli, err := ConnectSSH(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("ssh connect failed: %v", err)
+	}
+	defer sshCli.Close()
+
+	// deterministically iterate remote entries by sorted rel
+	rels := make([]string, 0, len(remoteByRel))
+	for r := range remoteByRel {
+		rels = append(rels, r)
+	}
+	sort.Strings(rels)
+
+	downloaded := []string{}
+	examined := 0
+	skippedIgnored := 0
+	skippedUpToDate := 0
+	downloadErrors := 0
+
+	for _, rel := range rels {
+		rm := remoteByRel[rel]
+		examined++
+		if rm.IsDir {
+			continue
+		}
+
+		relNorm := filepath.ToSlash(rel)
+		localPath := filepath.Join(absRoot, filepath.FromSlash(relNorm))
+
+		if relNorm == ".sync_temp" || strings.HasPrefix(relNorm, ".sync_temp/") || strings.Contains(relNorm, "/.sync_temp/") {
+			skippedIgnored++
+			continue
+		}
+
+		if ic.Match(localPath, false) {
+			skippedIgnored++
+			continue
+		}
+
+		info, statErr := os.Stat(localPath)
+		if statErr != nil {
+			util.Default.Printf("⬇️  Downloading %s -> %s\n", buildRemotePath(cfg, relNorm), localPath)
+			if err := sshCli.DownloadFile(localPath, buildRemotePath(cfg, relNorm)); err != nil {
+				util.Default.Printf("❌ Failed to download %s: %v\n", buildRemotePath(cfg, relNorm), err)
+				downloadErrors++
+				continue
+			}
+			downloaded = append(downloaded, localPath)
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+
+		// compute local hash
+		localHash := ""
+		f, err := os.Open(localPath)
+		if err == nil {
+			h := xxhash.New()
+			if _, err := io.Copy(h, f); err == nil {
+				localHash = fmt.Sprintf("%x", h.Sum(nil))
+			}
+			f.Close()
+		}
+
+		if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
+			util.Default.Printf("⬇️  Downloading %s -> %s\n", buildRemotePath(cfg, relNorm), localPath)
+			if err := sshCli.DownloadFile(localPath, buildRemotePath(cfg, relNorm)); err != nil {
+				util.Default.Printf("❌ Failed to download %s: %v\n", buildRemotePath(cfg, relNorm), err)
+				downloadErrors++
+				continue
+			}
+			downloaded = append(downloaded, localPath)
+			continue
+		}
+
+		skippedUpToDate++
+	}
+
+	util.Default.Printf("🔁 Remote index entries examined: %d, downloaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, errors: %d\n",
+		examined, len(downloaded), skippedIgnored, skippedUpToDate, downloadErrors)
+
+	return downloaded, nil
+}
+
+// CompareAndUploadByHashWithFilter behaves like CompareAndUploadByHash but only
+// operates on local paths whose rel starts with any of the provided prefixes.
+// If prefixes is empty, it behaves like full CompareAndUploadByHash.
+func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, prefixes []string) ([]string, error) {
+	if len(prefixes) == 0 {
+		return CompareAndUploadByHash(cfg, localRoot)
+	}
+	// reuse CompareAndUploadByHash logic but skip entries whose rel doesn't match prefixes
+	root := localRoot
+	if root == "" {
+		if cfg.LocalPath != "" {
+			root = cfg.LocalPath
+		} else if cfg.Devsync.Auth.LocalPath != "" {
+			root = cfg.Devsync.Auth.LocalPath
+		} else {
+			wd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("failed to determine working dir: %v", err)
+			}
+			root = wd
+		}
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve absolute root: %v", err)
+	}
+
+	// Download remote DB into local .sync_temp
+	localDBPath, err := DownloadIndexDB(cfg, absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download remote DB: %v", err)
+	}
+
+	// Load remote index DB
+	remoteByRel := map[string]struct {
+		Path  string
+		Rel   string
+		Size  int64
+		Mod   int64
+		Hash  string
+		IsDir bool
+	}{}
+
+	db, err := sql.Open("sqlite", localDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open remote DB: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT path, rel, size, mod_time, hash, is_dir FROM files`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query remote DB: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var pathStr, relStr, hashStr string
+		var sizeInt, modNano int64
+		var isDirInt int
+		if err := rows.Scan(&pathStr, &relStr, &sizeInt, &modNano, &hashStr, &isDirInt); err != nil {
+			continue
+		}
+		key := filepath.ToSlash(relStr)
+		remoteByRel[key] = struct {
+			Path  string
+			Rel   string
+			Size  int64
+			Mod   int64
+			Hash  string
+			IsDir bool
+		}{Path: pathStr, Rel: relStr, Size: sizeInt, Mod: modNano, Hash: hashStr, IsDir: isDirInt != 0}
+	}
+
+	// Create IgnoreCache
+	ic := NewIgnoreCache(absRoot)
+
+	// Connect SSH for uploads
+	sshCli, err := ConnectSSH(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("ssh connect failed: %v", err)
+	}
+	defer sshCli.Close()
+
+	// Prepare checked file path
+	syncTemp := filepath.Join(absRoot, ".sync_temp")
+	if err := os.MkdirAll(syncTemp, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create local .sync_temp: %v", err)
+	}
+	checkedFile := filepath.Join(syncTemp, "checked_files.json")
+	checked := make([]string, 0)
+
+	uploaded := make([]string, 0)
+	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
+
+	// Walk local files (local-first)
+	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if p == absRoot {
+			return nil
+		}
+
+		rel, rerr := filepath.Rel(absRoot, p)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+
+		// check prefix match
+		matched := false
+		for _, pr := range prefixes {
+			pp := strings.TrimPrefix(pr, "/")
+			if pp == "" || strings.HasPrefix(rel, pp) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Always skip .sync_temp
+		if rel == ".sync_temp" || strings.HasPrefix(rel, ".sync_temp/") || strings.Contains(rel, "/.sync_temp/") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if ic.Match(p, false) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			skippedIgnored++
+			return nil
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		examined++
+
+		// compute local hash
+		localHash := ""
+		f, ferr := os.Open(p)
+		if ferr == nil {
+			h := xxhash.New()
+			if _, err := io.Copy(h, f); err == nil {
+				localHash = fmt.Sprintf("%x", h.Sum(nil))
+			}
+			f.Close()
+		}
+
+		rm, exists := remoteByRel[rel]
+		needUpload := false
+		if !exists {
+			needUpload = true
+		} else if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
+			needUpload = true
+		}
+
+		if needUpload {
+			util.Default.Printf("⬆️  Uploading %s -> %s\n", p, buildRemotePath(cfg, rel))
+			if err := sshCli.SyncFile(p, buildRemotePath(cfg, rel)); err != nil {
+				util.Default.Printf("❌ Failed to upload %s: %v\n", p, err)
+				uploadErrors++
+			} else {
+				uploaded = append(uploaded, p)
+			}
+		} else {
+			skippedUpToDate++
+		}
+
+		// mark as checked locally and persist checked list
+		checked = append(checked, rel)
+		tmp := checkedFile + ".tmp"
+		if data, jerr := json.MarshalIndent(checked, "", "  "); jerr == nil {
+			_ = os.WriteFile(tmp, data, 0644)
+			_ = os.Rename(tmp, checkedFile)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return uploaded, fmt.Errorf("walk error: %v", err)
+	}
+
+	util.Default.Printf("🔁 Local files examined: %d, uploaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, upload errors: %d\n",
+		examined, len(uploaded), skippedIgnored, skippedUpToDate, uploadErrors)
+
+	return uploaded, nil
+}
