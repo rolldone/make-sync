@@ -49,7 +49,7 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 			"safe_sync :: Basic sync with file watching",
 			"safe_pull_sync :: Pull from remote then sync",
 			"soft_push_sync :: Safe push to remote then sync",
-			"force_single_sync :: Single file/folder transfer",
+			"force_manual_sync :: Single file/folder transfer",
 			"remote_session :: New remote session",
 			"back :: Return to main menu",
 		}
@@ -365,7 +365,7 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 
 			util.Default.Printf("✅ Safe push completed. Remote output:\n%s\n", out)
 			return "safe_push_sync"
-		case 3: // force_single_sync
+		case 3: // force_manual_sync
 			// Delegate interactive single-sync menu to syncdata package so devsync
 			// stays small. Determine local root preference similar to other flows.
 			localRoot := cfg.LocalPath

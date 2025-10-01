@@ -153,6 +153,10 @@ func (m *menuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *menuModel) View() string {
 	if m.choice != "" {
+		if m.choice == "cancelled" {
+			// Do not render noisy 'Selected: cancelled' line
+			return ""
+		}
 		return fmt.Sprintf("Selected: %s\n", m.choice)
 	}
 	// render menu and below it a small log area showing last 8 lines

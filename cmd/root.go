@@ -221,6 +221,10 @@ node_modules
 func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(dataCmd)
+	// register exec command
+	rootCmd.AddCommand(execCmd)
+	// register devsync command
+	rootCmd.AddCommand(devsyncCmd)
 }
 
 func showRecentWorkspacesMenu() {
@@ -576,8 +580,10 @@ var devsyncCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(dataCmd)
-	rootCmd.AddCommand(devsyncCmd)
+	// register exec command
+	rootCmd.AddCommand(execCmd)
 }
 
 func showSaveMenu() error {

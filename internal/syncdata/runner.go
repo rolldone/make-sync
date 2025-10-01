@@ -699,7 +699,6 @@ func buildRemotePath(cfg *config.Config, rel string) string {
 // - downloads remote index DB into local .sync_temp
 // - walks local tree and for each file compares to remote entry by rel/hash
 // - uploads files that are new or whose hash differs (or remote hash is empty)
-// - after each comparison, records the rel into .sync_temp/checked_files.json
 // Returns list of uploaded local paths.
 func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, error) {
 	// determine local root
@@ -783,8 +782,8 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 	if err := os.MkdirAll(syncTemp, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create local .sync_temp: %v", err)
 	}
-	checkedFile := filepath.Join(syncTemp, "checked_files.json")
-	checked := make([]string, 0)
+	// checked list persisted previously to JSON is no longer required;
+	// we rely on DB 'checked' in force mode paths.
 
 	uploaded := make([]string, 0)
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
@@ -861,14 +860,7 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 			skippedUpToDate++
 		}
 
-		// mark as checked locally and persist checked list
-		checked = append(checked, rel)
-		// write tmp and rename for atomicity
-		tmp := checkedFile + ".tmp"
-		if data, jerr := json.MarshalIndent(checked, "", "  "); jerr == nil {
-			_ = os.WriteFile(tmp, data, 0644)
-			_ = os.Rename(tmp, checkedFile)
-		}
+		// no-op: JSON checked file removed
 
 		return nil
 	})
@@ -1148,8 +1140,7 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 	if err := os.MkdirAll(syncTemp, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create local .sync_temp: %v", err)
 	}
-	checkedFile := filepath.Join(syncTemp, "checked_files.json")
-	checked := make([]string, 0)
+	// No JSON checked file persistence; force mode uses DB 'checked'
 
 	uploaded := make([]string, 0)
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
@@ -1238,13 +1229,7 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 			skippedUpToDate++
 		}
 
-		// mark as checked locally and persist checked list
-		checked = append(checked, rel)
-		tmp := checkedFile + ".tmp"
-		if data, jerr := json.MarshalIndent(checked, "", "  "); jerr == nil {
-			_ = os.WriteFile(tmp, data, 0644)
-			_ = os.Rename(tmp, checkedFile)
-		}
+		// no-op: JSON checked file removed
 
 		return nil
 	})
