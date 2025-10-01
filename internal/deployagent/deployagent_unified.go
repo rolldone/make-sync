@@ -74,6 +74,16 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 		return "", fmt.Errorf("failed to create remote .sync_temp directory: %v", err)
 	}
 
+	// Kill existing agent with same name before deployment
+	localConfig, err := config.GetOrCreateLocalConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load local config: %v", err)
+	}
+	if err := killExistingAgent(opts.SSHClient, localConfig.Devsync.AgentName, targetOS); err != nil {
+		util.Default.Printf("⚠️  Failed to kill existing agent: %v\n", err)
+		// Continue with deployment even if kill fails
+	}
+
 	var agentPath string
 
 	// Build agent if requested
@@ -115,7 +125,7 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 	}
 
 	// Determine remote agent path for execution - using unique agent name from local config
-	localConfig, err := config.GetOrCreateLocalConfig()
+	localConfig, err = config.GetOrCreateLocalConfig()
 	if err != nil {
 		return "", fmt.Errorf("failed to load local config: %v", err)
 	}
@@ -238,5 +248,33 @@ func uploadConfigJSON(client *sshclient.SSHClient, cfg *config.Config, remoteSyn
 	}
 
 	util.Default.Printf("✅ Config uploaded to: %s\n", remoteConfigPath)
+	return nil
+}
+
+// killExistingAgent kills any running agent with the same agent name before deployment
+func killExistingAgent(client *sshclient.SSHClient, agentName, targetOS string) error {
+	if agentName == "" {
+		return nil // No agent name to kill
+	}
+
+	binaryName := fmt.Sprintf("sync-agent-%s", agentName)
+	var killCmd string
+
+	if strings.Contains(strings.ToLower(targetOS), "win") {
+		binaryName += ".exe"
+		killCmd = fmt.Sprintf("taskkill /F /IM %s 2>nul", binaryName)
+	} else {
+		killCmd = fmt.Sprintf("pkill -f %s", binaryName)
+	}
+
+	util.Default.Printf("🔪 Killing existing agent: %s\n", binaryName)
+
+	// Try to kill the agent - ignore errors if process not found
+	if err := client.RunCommand(killCmd); err != nil {
+		util.Default.Printf("⚠️  Kill command failed (agent may not be running): %v\n", err)
+	} else {
+		util.Default.Printf("✅ Successfully killed existing agent\n")
+	}
+
 	return nil
 }
