@@ -85,17 +85,17 @@ type DirectAccess struct {
 }
 
 type SSHConfig struct {
-	Host           string `yaml:"Host"`
-	HostName       string `yaml:"HostName"`
-	User           string `yaml:"User"`
-	Port           string `yaml:"Port"`
-	RequestTty     string `yaml:"RequestTty"`
-	IdentityFile   string `yaml:"IdentityFile"`
-	StrictHostKey  string `yaml:"StrictHostKeyChecking"`
-	RemoteCommand  string `yaml:"RemoteCommand"`
-	ProxyCommand   string `yaml:"ProxyCommand,omitempty"`
-	ServerAliveInt string `yaml:"ServerAliveInterval"`
-	ServerAliveCnt string `yaml:"ServerAliveCountMax"`
+	Host                  string `yaml:"Host"`
+	HostName              string `yaml:"HostName"`
+	User                  string `yaml:"User"`
+	Port                  string `yaml:"Port"`
+	RequestTTY            string `yaml:"RequestTTY"`
+	IdentityFile          string `yaml:"IdentityFile"`
+	StrictHostKeyChecking string `yaml:"StrictHostKeyChecking"`
+	RemoteCommand         string `yaml:"RemoteCommand"`
+	ProxyCommand          string `yaml:"ProxyCommand,omitempty"`
+	ServerAliveInterval   string `yaml:"ServerAliveInterval"`
+	ServerAliveCountMax   string `yaml:"ServerAliveCountMax"`
 }
 
 type SSHCommand struct {
@@ -161,17 +161,17 @@ type TemplateTriggerPerm struct {
 }
 
 type TemplateSSHConfig struct {
-	Host           string `yaml:"Host"`
-	HostName       string `yaml:"HostName"`
-	User           string `yaml:"User"`
-	Port           string `yaml:"Port"`
-	RequestTty     string `yaml:"RequestTty"`
-	IdentityFile   string `yaml:"IdentityFile"`
-	StrictHostKey  string `yaml:"StrictHostKeyChecking"`
-	RemoteCommand  string `yaml:"RemoteCommand"`
-	ProxyCommand   string `yaml:"ProxyCommand,omitempty"`
-	ServerAliveInt string `yaml:"ServerAliveInterval"`
-	ServerAliveCnt string `yaml:"ServerAliveCountMax"`
+	Host                  string `yaml:"Host"`
+	HostName              string `yaml:"HostName"`
+	User                  string `yaml:"User"`
+	Port                  string `yaml:"Port"`
+	RequestTTY            string `yaml:"RequestTTY"`
+	IdentityFile          string `yaml:"IdentityFile"`
+	StrictHostKeyChecking string `yaml:"StrictHostKeyChecking"`
+	RemoteCommand         string `yaml:"RemoteCommand"`
+	ProxyCommand          string `yaml:"ProxyCommand,omitempty"`
+	ServerAliveInterval   string `yaml:"ServerAliveInterval"`
+	ServerAliveCountMax   string `yaml:"ServerAliveCountMax"`
 }
 
 type TemplateDirectAccess struct {
@@ -187,13 +187,13 @@ func convertTemplateSSHToSSH(templateSSH TemplateSSHConfig) SSHConfig {
 	sshConfig.HostName = templateSSH.HostName
 	sshConfig.User = templateSSH.User
 	sshConfig.Port = templateSSH.Port
-	sshConfig.RequestTty = templateSSH.RequestTty
+	sshConfig.RequestTTY = templateSSH.RequestTTY
 	sshConfig.IdentityFile = templateSSH.IdentityFile
-	sshConfig.StrictHostKey = templateSSH.StrictHostKey
+	sshConfig.StrictHostKeyChecking = templateSSH.StrictHostKeyChecking
 	sshConfig.RemoteCommand = templateSSH.RemoteCommand
 	sshConfig.ProxyCommand = templateSSH.ProxyCommand
-	sshConfig.ServerAliveInt = templateSSH.ServerAliveInt
-	sshConfig.ServerAliveCnt = templateSSH.ServerAliveCnt
+	sshConfig.ServerAliveInterval = templateSSH.ServerAliveInterval
+	sshConfig.ServerAliveCountMax = templateSSH.ServerAliveCountMax
 	return sshConfig
 }
 
