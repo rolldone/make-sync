@@ -121,6 +121,34 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	// central stdin router: reads os.Stdin and forwards to active bridge's stdin writer.
 	// It also detects Ctrl+G (0x07) to pause and ESC+digit (Alt+[n]) to trigger slot switch.
 	m.routerStop = make(chan struct{})
+
+	// Setup input listeners ONCE - no need to re-setup in loop
+	m.bridgeActive.SetOnInputListener(func(b []byte) {
+		// fmt.Println("DEBUG: input listener received data:", string(b))
+	})
+	m.bridgeActive.SetOnInputHitCodeListener(func(b string) {
+		// Only process alt-style messages like "alt+N" or "alt+NN".
+		if strings.Contains(b, "alt") {
+			// extract digits from the string
+			newSlot := ""
+			for _, r := range b {
+				if r >= '0' && r <= '9' {
+					newSlot += string(r)
+				}
+			}
+			if newSlot != "" {
+				// fmt.Println("DEBUG: input hit digits:", digits)
+				gg, err := strconv.Atoi(newSlot)
+				if err != nil {
+					fmt.Println("DEBUG: invalid slot number:", newSlot)
+					return
+				}
+				callback(gg)
+				m.PauseSlot(slot)
+			}
+		}
+	})
+
 	// register exit listener so that when the bridge exits we stop router and
 	// close the pending channel to unblock Focus.
 	m.bridgeActive.SetOnExitListener(func() {
@@ -132,6 +160,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 		log.Println("SetOnExitListener: slot", slot, "closed by exit listener")
 	})
 
+	// Simple router goroutine - just waits for stop signal
 	m.wgGroup.Add(1)
 	go func() {
 		defer func() {
@@ -140,39 +169,8 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 			util.Default.Println("DEBUG: router goroutine exiting")
 			util.Default.ClearLine()
 		}()
-		for {
-			select {
-			case <-m.routerStop:
-				return
-			default:
-				m.bridgeActive.SetOnInputListener(func(b []byte) {
-					// fmt.Println("DEBUG: input listener received data:", string(b))
-				})
-				m.bridgeActive.SetOnInputHitCodeListener(func(b string) {
-					// Only process alt-style messages like "alt+N" or "alt+NN".
-					if strings.Contains(b, "alt") {
-						// extract digits from the string
-						newSlot := ""
-						for _, r := range b {
-							if r >= '0' && r <= '9' {
-								newSlot += string(r)
-							}
-						}
-						if newSlot != "" {
-							// fmt.Println("DEBUG: input hit digits:", digits)
-							gg, err := strconv.Atoi(newSlot)
-							if err != nil {
-								fmt.Println("DEBUG: invalid slot number:", newSlot)
-								return
-							}
-							callback(gg)
-							m.PauseSlot(slot)
-						}
-					}
-				})
-			}
-
-		}
+		// Block until stop signal - no more tight loop!
+		<-m.routerStop
 	}()
 
 	// message loop (blocks until Pendingchan closed)

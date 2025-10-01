@@ -507,10 +507,11 @@ func (w *Watcher) enterShellNonCommand() {
 		// Pass body directly to cmd.exe (body contains quoted paths)
 		initialCmd = fmt.Sprintf("cmd.exe /K %s", body)
 	} else {
-		initialCmd = fmt.Sprintf("mkdir -p %s || true && cd %s && bash -l", shellEscape(remotePath), shellEscape(remotePath))
+		initialCmd = fmt.Sprintf("mkdir -p %s || true && cd %s && exec bash", shellEscape(remotePath), shellEscape(remotePath))
 	}
 	if !w.ptyMgr.HasSlot(slot) {
 		util.Default.Println("➕ Creating new remote slot", slot, "...")
+		util.Default.ClearLine()
 		// Debug: print values before opening remote slot (slot 2)
 		util.Default.Printf("DEBUG: enterShellNonCommand targetOS=%q remotePath=%q initialCmd=%q\n", targetOS, remotePath, initialCmd)
 		if err := w.ptyMgr.OpenRemoteSlot(slot, initialCmd); err != nil {
@@ -521,7 +522,8 @@ func (w *Watcher) enterShellNonCommand() {
 	} else {
 		isExist = true
 	}
-	fmt.Println("🔄 Reusing existing slot for non command ", slot, "...")
+	util.Default.ClearLine()
+	util.Default.Println("🔄 Reusing existing slot for non command ", slot, "...")
 	util.Default.Suspend()
 	util.Default.PrintBlock(fmt.Sprintf("🔗 Attaching to slot %d ...", slot), true)
 	if err := w.ptyMgr.Focus(slot, isExist, func(slotNew int) {

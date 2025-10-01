@@ -79,23 +79,9 @@ type TriggerPermission struct {
 }
 
 type DirectAccess struct {
-	ConfigFile  string       `yaml:"config_file"`
-	SSHConfigs  []SSHConfig  `yaml:"ssh_configs"`
-	SSHCommands []SSHCommand `yaml:"ssh_commands"`
-}
-
-type SSHConfig struct {
-	Host                  string `yaml:"Host"`
-	HostName              string `yaml:"HostName"`
-	User                  string `yaml:"User"`
-	Port                  string `yaml:"Port"`
-	RequestTTY            string `yaml:"RequestTTY"`
-	IdentityFile          string `yaml:"IdentityFile"`
-	StrictHostKeyChecking string `yaml:"StrictHostKeyChecking"`
-	RemoteCommand         string `yaml:"RemoteCommand"`
-	ProxyCommand          string `yaml:"ProxyCommand,omitempty"`
-	ServerAliveInterval   string `yaml:"ServerAliveInterval"`
-	ServerAliveCountMax   string `yaml:"ServerAliveCountMax"`
+	ConfigFile  string                   `yaml:"config_file"`
+	SSHConfigs  []map[string]interface{} `yaml:"ssh_configs"`
+	SSHCommands []SSHCommand             `yaml:"ssh_commands"`
 }
 
 type SSHCommand struct {
@@ -181,22 +167,6 @@ type TemplateDirectAccess struct {
 }
 
 // convertTemplateSSHToSSH converts TemplateSSHConfig to SSHConfig
-func convertTemplateSSHToSSH(templateSSH TemplateSSHConfig) SSHConfig {
-	var sshConfig SSHConfig
-	sshConfig.Host = templateSSH.Host
-	sshConfig.HostName = templateSSH.HostName
-	sshConfig.User = templateSSH.User
-	sshConfig.Port = templateSSH.Port
-	sshConfig.RequestTTY = templateSSH.RequestTTY
-	sshConfig.IdentityFile = templateSSH.IdentityFile
-	sshConfig.StrictHostKeyChecking = templateSSH.StrictHostKeyChecking
-	sshConfig.RemoteCommand = templateSSH.RemoteCommand
-	sshConfig.ProxyCommand = templateSSH.ProxyCommand
-	sshConfig.ServerAliveInterval = templateSSH.ServerAliveInterval
-	sshConfig.ServerAliveCountMax = templateSSH.ServerAliveCountMax
-	return sshConfig
-}
-
 // MapTemplateToConfig converts TemplateConfig to Config
 func MapTemplateToConfig(template TemplateConfig) Config {
 	config := Config{
@@ -261,9 +231,22 @@ func MapTemplateToConfig(template TemplateConfig) Config {
 	}
 
 	// Map SSHConfigs
-	config.DirectAccess.SSHConfigs = make([]SSHConfig, len(template.DirectAccess.SSHConfigs))
+	config.DirectAccess.SSHConfigs = make([]map[string]interface{}, len(template.DirectAccess.SSHConfigs))
 	for i, templateSSH := range template.DirectAccess.SSHConfigs {
-		config.DirectAccess.SSHConfigs[i] = convertTemplateSSHToSSH(templateSSH)
+		m := map[string]interface{}{
+			"Host":                  templateSSH.Host,
+			"HostName":              templateSSH.HostName,
+			"User":                  templateSSH.User,
+			"Port":                  templateSSH.Port,
+			"RequestTTY":            templateSSH.RequestTTY,
+			"IdentityFile":          templateSSH.IdentityFile,
+			"StrictHostKeyChecking": templateSSH.StrictHostKeyChecking,
+			"RemoteCommand":         templateSSH.RemoteCommand,
+			"ProxyCommand":          templateSSH.ProxyCommand,
+			"ServerAliveInterval":   templateSSH.ServerAliveInterval,
+			"ServerAliveCountMax":   templateSSH.ServerAliveCountMax,
+		}
+		config.DirectAccess.SSHConfigs[i] = m
 	}
 
 	return config
@@ -323,39 +306,39 @@ func ValidateConfig(cfg *Config) error {
 
 	// Validate SSH configs
 	for i, sshConfig := range cfg.DirectAccess.SSHConfigs {
-		if strings.TrimSpace(sshConfig.Host) == "" {
+		if host, ok := sshConfig["Host"].(string); !ok || strings.TrimSpace(host) == "" {
 			validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: Host cannot be empty", i+1))
 		}
 
-		if strings.TrimSpace(sshConfig.HostName) == "" {
+		if hostName, ok := sshConfig["HostName"].(string); !ok || strings.TrimSpace(hostName) == "" {
 			validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: HostName cannot be empty", i+1))
 		}
 
-		if strings.TrimSpace(sshConfig.User) == "" {
+		if user, ok := sshConfig["User"].(string); !ok || strings.TrimSpace(user) == "" {
 			validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: User cannot be empty", i+1))
 		}
 
 		// Validate SSH port (skip validation for references starting with =)
-		if strings.TrimSpace(sshConfig.Port) != "" && !strings.HasPrefix(sshConfig.Port, "=") {
-			if port, err := strconv.Atoi(sshConfig.Port); err != nil || port <= 0 || port > 65535 {
+		if port, ok := sshConfig["Port"].(string); ok && strings.TrimSpace(port) != "" && !strings.HasPrefix(port, "=") {
+			if p, err := strconv.Atoi(port); err != nil || p <= 0 || p > 65535 {
 				validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: Port must be a valid number between 1-65535", i+1))
 			}
 		}
 
 		// Validate identity file exists (if specified and not a reference)
-		if strings.TrimSpace(sshConfig.IdentityFile) != "" && !strings.HasPrefix(sshConfig.IdentityFile, "=") {
-			if _, err := os.Stat(sshConfig.IdentityFile); os.IsNotExist(err) {
-				validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: Identity file does not exist: %s", i+1, sshConfig.IdentityFile))
+		if identityFile, ok := sshConfig["IdentityFile"].(string); ok && strings.TrimSpace(identityFile) != "" && !strings.HasPrefix(identityFile, "=") {
+			if _, err := os.Stat(identityFile); os.IsNotExist(err) {
+				validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: Identity file does not exist: %s", i+1, identityFile))
 			}
 		}
 
 		// Validate HostName (skip validation for references starting with =)
-		if !strings.HasPrefix(sshConfig.HostName, "=") && strings.TrimSpace(sshConfig.HostName) == "" {
+		if hostName, ok := sshConfig["HostName"].(string); ok && !strings.HasPrefix(hostName, "=") && strings.TrimSpace(hostName) == "" {
 			validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: HostName cannot be empty", i+1))
 		}
 
 		// Validate User (skip validation for references starting with =)
-		if !strings.HasPrefix(sshConfig.User, "=") && strings.TrimSpace(sshConfig.User) == "" {
+		if user, ok := sshConfig["User"].(string); ok && !strings.HasPrefix(user, "=") && strings.TrimSpace(user) == "" {
 			validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: User cannot be empty", i+1))
 		}
 	}
@@ -498,40 +481,40 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 		sshConfig := &renderedCfg.DirectAccess.SSHConfigs[i]
 
 		// Render each field that might contain template variables
-		if strings.HasPrefix(sshConfig.HostName, "=") {
-			oldValue := sshConfig.HostName
-			sshConfig.HostName = renderer.RenderComplexTemplates(sshConfig.HostName)
-			printer.Printf("🔧 Rendered SSH config[%d].HostName: %s → %s\n", i, oldValue, sshConfig.HostName)
+		if hostName, ok := (*sshConfig)["HostName"].(string); ok && strings.HasPrefix(hostName, "=") {
+			oldValue := hostName
+			(*sshConfig)["HostName"] = renderer.RenderComplexTemplates(hostName)
+			printer.Printf("🔧 Rendered SSH config[%d].HostName: %s → %s\n", i, oldValue, (*sshConfig)["HostName"])
 			renderCount++
 		}
-		if strings.HasPrefix(sshConfig.User, "=") {
-			oldValue := sshConfig.User
-			sshConfig.User = renderer.RenderComplexTemplates(sshConfig.User)
-			printer.Printf("🔧 Rendered SSH config[%d].User: %s → %s\n", i, oldValue, sshConfig.User)
+		if user, ok := (*sshConfig)["User"].(string); ok && strings.HasPrefix(user, "=") {
+			oldValue := user
+			(*sshConfig)["User"] = renderer.RenderComplexTemplates(user)
+			printer.Printf("🔧 Rendered SSH config[%d].User: %s → %s\n", i, oldValue, (*sshConfig)["User"])
 			renderCount++
 		}
-		if strings.HasPrefix(sshConfig.Port, "=") {
-			oldValue := sshConfig.Port
-			sshConfig.Port = renderer.RenderComplexTemplates(sshConfig.Port)
-			printer.Printf("🔧 Rendered SSH config[%d].Port: %s → %s\n", i, oldValue, sshConfig.Port)
+		if port, ok := (*sshConfig)["Port"].(string); ok && strings.HasPrefix(port, "=") {
+			oldValue := port
+			(*sshConfig)["Port"] = renderer.RenderComplexTemplates(port)
+			printer.Printf("🔧 Rendered SSH config[%d].Port: %s → %s\n", i, oldValue, (*sshConfig)["Port"])
 			renderCount++
 		}
-		if strings.HasPrefix(sshConfig.IdentityFile, "=") {
-			oldValue := sshConfig.IdentityFile
-			sshConfig.IdentityFile = renderer.RenderComplexTemplates(sshConfig.IdentityFile)
-			printer.Printf("🔧 Rendered SSH config[%d].IdentityFile: %s → %s\n", i, oldValue, sshConfig.IdentityFile)
+		if identityFile, ok := (*sshConfig)["IdentityFile"].(string); ok && strings.HasPrefix(identityFile, "=") {
+			oldValue := identityFile
+			(*sshConfig)["IdentityFile"] = renderer.RenderComplexTemplates(identityFile)
+			printer.Printf("🔧 Rendered SSH config[%d].IdentityFile: %s → %s\n", i, oldValue, (*sshConfig)["IdentityFile"])
 			renderCount++
 		}
-		if strings.Contains(sshConfig.RemoteCommand, "=") {
-			oldValue := sshConfig.RemoteCommand
-			sshConfig.RemoteCommand = renderer.RenderComplexTemplates(sshConfig.RemoteCommand)
-			printer.Printf("🔧 Rendered SSH config[%d].RemoteCommand: %s → %s\n", i, oldValue, sshConfig.RemoteCommand)
+		if remoteCommand, ok := (*sshConfig)["RemoteCommand"].(string); ok && strings.Contains(remoteCommand, "=") {
+			oldValue := remoteCommand
+			(*sshConfig)["RemoteCommand"] = renderer.RenderComplexTemplates(remoteCommand)
+			printer.Printf("🔧 Rendered SSH config[%d].RemoteCommand: %s → %s\n", i, oldValue, (*sshConfig)["RemoteCommand"])
 			renderCount++
 		}
-		if strings.Contains(sshConfig.ProxyCommand, "=") {
-			oldValue := sshConfig.ProxyCommand
-			sshConfig.ProxyCommand = renderer.RenderComplexTemplates(sshConfig.ProxyCommand)
-			printer.Printf("🔧 Rendered SSH config[%d].ProxyCommand: %s → %s\n", i, oldValue, sshConfig.ProxyCommand)
+		if proxyCommand, ok := (*sshConfig)["ProxyCommand"].(string); ok && strings.Contains(proxyCommand, "=") {
+			oldValue := proxyCommand
+			(*sshConfig)["ProxyCommand"] = renderer.RenderComplexTemplates(proxyCommand)
+			printer.Printf("🔧 Rendered SSH config[%d].ProxyCommand: %s → %s\n", i, oldValue, (*sshConfig)["ProxyCommand"])
 			renderCount++
 		}
 	}

@@ -140,17 +140,12 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 				targetOS = "linux" // Default to linux
 			}
 
-			// Get project root using same logic as watcher
-			watchPath := cfg.LocalPath
-			if watchPath == "" {
-				watchPath = "."
-			}
-			absWatchPath, err := filepath.Abs(watchPath)
+			// Get project root - handles both development (go run) and production modes
+			projectRoot, err := util.GetProjectRoot()
 			if err != nil {
-				util.Default.Printf("⚠️  Failed to get absolute watch path: %v\n", err)
-				absWatchPath = watchPath
+				util.Default.Printf("❌ Failed to get project root: %v\n", err)
+				return "error"
 			}
-			projectRoot := filepath.Dir(absWatchPath)
 
 			// Connect SSH first
 			sshClient, err := createSSHClient(cfg)
@@ -264,17 +259,12 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 				targetOS = "linux"
 			}
 
-			// Get project root using same logic as watcher
-			watchPath := cfg.LocalPath
-			if watchPath == "" {
-				watchPath = "."
-			}
-			absWatchPath, err := filepath.Abs(watchPath)
+			// Get project root - handles both development (go run) and production modes
+			projectRoot, err := util.GetProjectRoot()
 			if err != nil {
-				util.Default.Printf("⚠️  Failed to get absolute watch path: %v\n", err)
-				absWatchPath = watchPath
+				util.Default.Printf("❌ Failed to get project root: %v\n", err)
+				return "error"
 			}
-			projectRoot := filepath.Dir(absWatchPath)
 
 			// Connect SSH first
 			sshClient, err := createSSHClient(cfg)

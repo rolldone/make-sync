@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"make-sync/internal/config"
@@ -528,7 +527,7 @@ func generateSSHTempConfig(cfg *config.Config, hostName string) error {
 	// Optionally: ensure the requested host exists, but still write all
 	hasRequested := false
 	for _, sc := range renderedCfg.DirectAccess.SSHConfigs {
-		if sc.Host == hostName {
+		if host, ok := sc["Host"].(string); ok && host == hostName {
 			hasRequested = true
 			break
 		}
@@ -538,43 +537,29 @@ func generateSSHTempConfig(cfg *config.Config, hostName string) error {
 	}
 
 	for idx, sc := range renderedCfg.DirectAccess.SSHConfigs {
-		if sc.Host == "" {
+		host, ok := sc["Host"].(string)
+		if !ok || host == "" {
 			continue
 		}
 		if idx > 0 {
 			configLines = append(configLines, "")
 		}
-		configLines = append(configLines, fmt.Sprintf("Host %s", sc.Host))
+		configLines = append(configLines, fmt.Sprintf("Host %s", host))
 
-		// Dynamically scan struct fields and write non-empty ones
-		scValue := reflect.ValueOf(sc)
-		scType := scValue.Type()
-		for i := 0; i < scValue.NumField(); i++ {
-			field := scValue.Field(i)
-			fieldType := scType.Field(i)
-			fieldName := fieldType.Name
-
+		// Iterate over map and write non-empty values
+		for key, val := range sc {
 			// Skip Host field as it's already written above
-			if fieldName == "Host" {
+			if key == "Host" {
 				continue
 			}
 
-			// Get value as string, handling different types
-			var value string
-			switch field.Kind() {
-			case reflect.String:
-				value = field.String()
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				value = fmt.Sprintf("%d", field.Int())
-			case reflect.Bool:
-				value = fmt.Sprintf("%t", field.Bool())
-			default:
-				// Skip unsupported types
-				continue
-			}
-
-			if value != "" {
-				configLines = append(configLines, fmt.Sprintf("    %s %s", fieldName, quoteIfNeeded(value)))
+			if valStr := fmt.Sprintf("%v", val); valStr != "" {
+				// Khusus untuk RemoteCommand: jangan quote agar tidak ada petik ganda
+				if key == "RemoteCommand" {
+					configLines = append(configLines, fmt.Sprintf("    %s %s", key, valStr))
+				} else {
+					configLines = append(configLines, fmt.Sprintf("    %s %s", key, quoteIfNeeded(valStr)))
+				}
 			}
 		}
 	}

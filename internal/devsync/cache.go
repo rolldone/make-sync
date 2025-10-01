@@ -11,6 +11,8 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+
+	"make-sync/internal/util"
 )
 
 // FileMetadata represents file metadata stored in database
@@ -49,7 +51,8 @@ func NewFileCache(dbPath string, watchPath string) (*FileCache, error) {
 
 // ResetCache clears all cached file metadata
 func (fc *FileCache) ResetCache() error {
-	fmt.Println("🗑️  Resetting file cache...")
+	util.Default.ClearLine()
+	util.Default.Println("🗑️  Resetting file cache...")
 
 	// Delete all records from FileMetadata table
 	result := fc.db.Unscoped().Delete(&FileMetadata{}, "1 = 1") // Delete all records
@@ -57,7 +60,7 @@ func (fc *FileCache) ResetCache() error {
 		return fmt.Errorf("failed to reset cache: %v", result.Error)
 	}
 
-	fmt.Printf("✅ Cache reset complete: %d records deleted\n", result.RowsAffected)
+	util.Default.Printf("✅ Cache reset complete: %d records deleted\n", result.RowsAffected)
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package syncdata
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -227,12 +228,11 @@ func runRemoteIndexingForPull(cfg *config.Config) error {
 	if strings.TrimSpace(watchPath) == "" {
 		watchPath = "."
 	}
-	absWatchPath, err := filepath.Abs(watchPath)
+	// Get project root - handles both development (go run) and production modes
+	projectRoot, err := util.GetProjectRoot()
 	if err != nil {
-		util.Default.Printf("⚠️  Failed to get absolute watch path: %v\n", err)
-		absWatchPath = watchPath
+		return fmt.Errorf("failed to get project root: %v", err)
 	}
-	projectRoot := filepath.Dir(absWatchPath)
 
 	// Connect SSH for remote detection (adapter used by build)
 	sshClient, err := ConnectSSH(cfg)
