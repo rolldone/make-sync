@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"make-sync/internal/config"
 	"make-sync/internal/deployagent"
 	"make-sync/internal/events"
@@ -16,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -333,12 +335,137 @@ func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
 
 	// Build remote config snapshot from the new config
 	cfg := &RemoteAgentConfig{}
-	cfg.Devsync.Ignores = newCfg.Devsync.Ignores
+	// Compute aggregated ignores from local .sync_ignore files so the agent
+	// has an authoritative list even if remote does not have .sync_ignore.
+	agg := w.collectPreprocessedIgnoresFromRoot(newCfg.LocalPath)
+	// Fallback to config-provided ignores if aggregation returned none
+	if len(agg) == 0 && len(newCfg.Devsync.Ignores) > 0 {
+		agg = append(agg, newCfg.Devsync.Ignores...)
+	}
+	cfg.Devsync.Ignores = agg
 	cfg.Devsync.AgentWatchs = newCfg.Devsync.AgentWatchs
 	cfg.Devsync.ManualTransfer = newCfg.Devsync.ManualTransfer
 	cfg.Devsync.WorkingDir = newCfg.Devsync.Auth.RemotePath
 
+	// Also mirror essential fields into local .sync_temp/config.json for easier local inspection
+	// without having to SSH into remote. We avoid overwriting existing non-empty values except
+	// for WorkingDir which should reflect the current rendered RemotePath.
+	if lc, lcErr := config.GetOrCreateLocalConfig(); lcErr == nil {
+		changed := false
+		// Always update working dir to current remote path
+		if lc.Devsync.WorkingDir != newCfg.Devsync.Auth.RemotePath {
+			lc.Devsync.WorkingDir = newCfg.Devsync.Auth.RemotePath
+			changed = true
+		}
+		// Mirror aggregated ignores for visibility; avoid nulls
+		if !stringSliceEqual(lc.Devsync.Ignores, agg) {
+			lc.Devsync.Ignores = agg
+			changed = true
+		}
+		if len(lc.Devsync.AgentWatchs) == 0 && len(newCfg.Devsync.AgentWatchs) > 0 {
+			lc.Devsync.AgentWatchs = newCfg.Devsync.AgentWatchs
+			changed = true
+		}
+		if len(lc.Devsync.ManualTransfer) == 0 && len(newCfg.Devsync.ManualTransfer) > 0 {
+			lc.Devsync.ManualTransfer = newCfg.Devsync.ManualTransfer
+			changed = true
+		}
+		if changed {
+			_ = lc.Save() // best-effort; local convenience snapshot
+		}
+	}
+
 	return cfg
+}
+
+// collectPreprocessedIgnoresFromRoot walks the project root and collects .sync_ignore
+// patterns with light preprocessing similar to internal/syncdata. It returns a sorted,
+// de-duplicated list and always includes core defaults.
+func (w *Watcher) collectPreprocessedIgnoresFromRoot(root string) []string {
+	// determine root
+	r := strings.TrimSpace(root)
+	if r == "" {
+		if wd, err := os.Getwd(); err == nil {
+			r = wd
+		} else {
+			r = "."
+		}
+	}
+	// use a set to dedupe
+	found := map[string]struct{}{}
+	// default ignores
+	defaults := []string{".sync_temp", "make-sync.yaml", ".sync_ignore", ".sync_collections"}
+	for _, d := range defaults {
+		found[d] = struct{}{}
+	}
+
+	// walk the tree and read .sync_ignore files
+	_ = filepath.WalkDir(r, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.EqualFold(d.Name(), ".sync_ignore") {
+			data, rerr := os.ReadFile(p)
+			if rerr != nil {
+				return nil
+			}
+			lines := strings.Split(string(data), "\n")
+			for _, ln := range lines {
+				l := strings.TrimSpace(ln)
+				if l == "" || strings.HasPrefix(l, "#") {
+					continue
+				}
+				neg := false
+				if strings.HasPrefix(l, "!") {
+					neg = true
+					l = strings.TrimPrefix(l, "!")
+				}
+				// normalize to forward slashes
+				l = filepath.ToSlash(l)
+				if strings.Contains(l, "/") || strings.Contains(l, "**") {
+					if neg {
+						found["!"+l] = struct{}{}
+					} else {
+						found[l] = struct{}{}
+					}
+					continue
+				}
+				// add both simple and recursive variants
+				if neg {
+					found["!"+l] = struct{}{}
+					found["!**/"+l] = struct{}{}
+				} else {
+					found[l] = struct{}{}
+					found["**/"+l] = struct{}{}
+				}
+			}
+		}
+		return nil
+	})
+
+	// convert to sorted slice
+	out := make([]string, 0, len(found))
+	for k := range found {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// stringSliceEqual checks equality disregarding order (since we sort both callers)
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // configToJSON converts config struct to JSON string

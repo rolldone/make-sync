@@ -16,6 +16,11 @@ import (
 
 func main() {
 
+	// Ensure .sync_temp directory exists for logging and other runtime files
+	if err := os.MkdirAll(".sync_temp", 0755); err != nil {
+		log.Fatalf("failed to create .sync_temp directory: %v", err)
+	}
+
 	// Buka file untuk menulis log (append, create kalau belum ada)
 	f, err := os.OpenFile(".sync_temp/app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

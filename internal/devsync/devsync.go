@@ -403,8 +403,9 @@ func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
 
 func basicNewSessionSSH(cfg *config.Config) error {
 	// Get absolute path for private key
-	privateKeyPath := cfg.Devsync.Auth.PrivateKey
-	if !filepath.IsAbs(privateKeyPath) {
+	privateKeyPath := strings.TrimSpace(cfg.Devsync.Auth.PrivateKey)
+	// Only resolve to absolute path if a private key path is actually provided
+	if privateKeyPath != "" && !filepath.IsAbs(privateKeyPath) {
 		absPath, err := filepath.Abs(privateKeyPath)
 		if err != nil {
 			util.Default.Printf("❌ Failed to get absolute path for private key: %v\n", err)

@@ -92,10 +92,22 @@ var initCmd = &cobra.Command{
 			return
 		}
 
-		// Check if template.yaml exists in executable directory
-		execDir := filepath.Dir(os.Args[0])
+		// Check if template.yaml exists in the actual executable directory
+		// Use os.Executable() to get absolute path of the running binary (robust vs os.Args[0])
+		exePath, err := os.Executable()
+		if err != nil {
+			fmt.Printf("❌ Error: failed to resolve executable path: %v\n", err)
+			// Fallback to os.Args[0] directory as a last resort
+			exePath = os.Args[0]
+		}
+		if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+			exePath = resolved
+		}
+		execDir := filepath.Dir(exePath)
 		templateFile := filepath.Join(execDir, "template.yaml")
-		if _, err := os.Stat(templateFile); !os.IsNotExist(err) {
+
+		// Try template.yaml next to the executable first; fallback to current working directory
+		if _, err := os.Stat(templateFile); err == nil {
 			// Load and parse template.yaml using struct mapping
 			data, err := os.ReadFile(templateFile)
 			if err != nil {
@@ -128,7 +140,7 @@ var initCmd = &cobra.Command{
 				return
 			}
 
-			fmt.Printf("Config loaded from template.yaml to %s\n", config.GetConfigPath())
+			fmt.Printf("Config loaded from template.yaml (exec dir: %s) to %s\n", execDir, config.GetConfigPath())
 
 			// Create .sync_ignore file with default extended ignores (gitignore style)
 			syncIgnoreContent := `# Development files
@@ -163,8 +175,67 @@ node_modules
 			// Add to history
 			cwd, _ := os.Getwd()
 			history.AddPath(cwd)
+		} else if cwdTemplate := filepath.Join(".", "template.yaml"); func() bool { _, e := os.Stat(cwdTemplate); return e == nil }() {
+			// Fallback: allow reading template.yaml from current working directory (useful during development/go run)
+			data, err := os.ReadFile(cwdTemplate)
+			if err != nil {
+				fmt.Printf("Error reading template.yaml from current directory: %v\n", err)
+				return
+			}
+
+			var templateConfig config.TemplateConfig
+			if err := yaml.Unmarshal(data, &templateConfig); err != nil {
+				fmt.Printf("Error parsing template.yaml: %v\n", err)
+				return
+			}
+
+			cfg := config.MapTemplateToConfig(templateConfig)
+			outputData, err := yaml.Marshal(&cfg)
+			if err != nil {
+				fmt.Printf("Error generating config: %v\n", err)
+				return
+			}
+
+			if err := os.WriteFile("make-sync.yaml", outputData, 0644); err != nil {
+				fmt.Printf("Error writing make-sync.yaml: %v\n", err)
+				return
+			}
+
+			fmt.Printf("Config loaded from template.yaml (cwd) to %s\n", config.GetConfigPath())
+
+			// Create .sync_ignore file with default extended ignores (gitignore style)
+			syncIgnoreContent := `# Development files
+.git
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules
+
+# IDE files
+.vscode
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+
+# SSH
+.ssh`
+
+			if err := os.WriteFile(".sync_ignore", []byte(syncIgnoreContent), 0644); err != nil {
+				fmt.Printf("⚠️  Warning: Failed to create .sync_ignore file: %v\n", err)
+			} else {
+				fmt.Println("✅ Created .sync_ignore file with default ignore patterns")
+			}
+
+			cwd, _ := os.Getwd()
+			history.AddPath(cwd)
 		} else {
-			// Template.yaml not found in executable directory
+			// Template.yaml not found next to executable or in current working directory
 			fmt.Printf("❌ Error: template.yaml not found in executable directory (%s)\n", execDir)
 			fmt.Println("📝 Please ensure template.yaml exists in the same directory as the make-sync executable")
 			fmt.Println("💡 Tip: Place template.yaml alongside the make-sync binary")
