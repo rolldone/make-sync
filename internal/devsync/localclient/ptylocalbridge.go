@@ -41,6 +41,9 @@ type PTYLocalBridge struct {
 	switchOldState *term.State
 
 	outPipe *os.File
+
+	// output tap receives stdout/stderr bytes (err=false for stdout, true for stderr if implemented)
+	outputTap func([]byte, bool)
 }
 
 func NewPTYLocalBridge(initialCommand string) (*PTYLocalBridge, error) {
@@ -90,4 +93,12 @@ func (b *PTYLocalBridge) SetOnInputHitCodeListener(cb func(string)) {
 	b.mu.Lock()
 	b.inputHitCodeListener = cb
 	b.mu.Unlock()
+}
+
+// SetOutputTap registers a tap receiving stdout/stderr bytes (err=true for stderr).
+// The tap is invoked regardless of outputDisabled so logging can continue while UI is paused.
+func (b *PTYLocalBridge) SetOutputTap(fn func([]byte, bool)) {
+	b.outputMu.Lock()
+	b.outputTap = fn
+	b.outputMu.Unlock()
 }

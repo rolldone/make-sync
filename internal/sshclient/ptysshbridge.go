@@ -53,11 +53,15 @@ type PTYSSHBridge struct {
 	// into the bridge's stdin writer and notifies the inputListener.
 	inputBuf chan []byte
 
-	cancelFunc context.CancelFunc
+	// separate cancel funcs for input and output lifecycles
+	inputCancel  context.CancelFunc
+	outputCancel context.CancelFunc
 
 	oldState   *term.State
 	stdoutPipe io.Reader
 	stderrPipe io.Reader
+	// output tap receives stdout/stderr bytes regardless of outputDisabled
+	outputTap func([]byte, bool)
 	// reconnect state
 	reconnectMu    sync.Mutex
 	reconnecting   bool
@@ -167,10 +171,15 @@ func (bridge *PTYSSHBridge) StartInteractiveShell() error {
 	}
 	bridge.stderrPipe = stderrPipe
 
-	ctx, cancel := context.WithCancel(context.Background())
-	bridge.cancelFunc = cancel
+	// Create separate contexts: output stays alive until session end; input can be paused
+	outCtx, outCancel := context.WithCancel(context.Background())
+	inCtx, inCancel := context.WithCancel(context.Background())
+	bridge.outputCancel = outCancel
+	bridge.inputCancel = inCancel
 	log.Println("StartInteractiveShell : Started interactive shell session")
-	bridge.ProcessPTYReadInput(ctx, cancel)
+	// start readers: output readers long-lived, input reader can be canceled on Pause
+	bridge.ProcessPTYReadOutput(outCtx)
+	bridge.ProcessPTYReadInput(inCtx)
 
 	// Start a small resize watcher that polls the terminal size and applies
 	// WindowChange on the remote session when it changes. This is a simple
@@ -195,7 +204,7 @@ func (bridge *PTYSSHBridge) StartInteractiveShell() error {
 				}
 			}
 		}
-	}(ctx)
+	}(outCtx)
 
 	stdinPipe, err := bridge.sshSession.StdinPipe()
 	if err != nil {
@@ -314,8 +323,11 @@ func (bridge *PTYSSHBridge) StartInteractiveShell() error {
 
 	// Before notifying exit listener, cancel reader goroutines and disable output
 	// so they won't trigger reconnect logic on normal session exit.
-	if bridge.cancelFunc != nil {
-		bridge.cancelFunc()
+	if bridge.inputCancel != nil {
+		bridge.inputCancel()
+	}
+	if bridge.outputCancel != nil {
+		bridge.outputCancel()
 	}
 	bridge.outputMu.Lock()
 	bridge.outputDisabled = true
@@ -334,9 +346,8 @@ func (bridge *PTYSSHBridge) StartInteractiveShell() error {
 	return nil
 }
 
-func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel context.CancelFunc) error {
-	stdoutPipe := bridge.stdoutPipe
-	stderrPipe := bridge.stderrPipe
+// ProcessPTYReadInput starts stdin reader controlled by input context
+func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context) error {
 	// stdin reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 256)
@@ -348,9 +359,6 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 				log.Println("PTYSSHBridge stdin reader: context done, exiting")
 				return
 			default:
-				if bridge.outputDisabled {
-					return
-				}
 				n, rerr := os.Stdin.Read(buf)
 				if n > 0 {
 
@@ -398,6 +406,13 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 		}
 	}(ctx)
 
+	return nil
+}
+
+// ProcessPTYReadOutput starts stdout/stderr readers controlled by output context
+func (bridge *PTYSSHBridge) ProcessPTYReadOutput(ctx context.Context) error {
+	stdoutPipe := bridge.stdoutPipe
+	stderrPipe := bridge.stderrPipe
 	// stdout reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 4096)
@@ -411,9 +426,6 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 				log.Println("PTYSSHBridge stdout reader: context done, exiting")
 				return
 			default:
-				if bridge.outputDisabled {
-					return
-				}
 				n, err := stdoutPipe.Read(buf)
 				if n > 0 {
 					bridge.outputMu.Lock()
@@ -421,6 +433,12 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 					bridge.outputMu.Unlock()
 					if !disabled {
 						_, _ = os.Stdout.Write(buf[:n])
+					}
+					// always pass to tap regardless of disabled
+					if bridge.outputTap != nil {
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						bridge.outputTap(data, false)
 					}
 				}
 				if err != nil {
@@ -451,9 +469,6 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 				log.Println("PTYSSHBridge stderr reader: context done, exiting")
 				return
 			default:
-				if bridge.outputDisabled {
-					return
-				}
 				n, err := stderrPipe.Read(buf)
 				if n > 0 {
 					bridge.outputMu.Lock()
@@ -461,6 +476,11 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context, cancel cont
 					bridge.outputMu.Unlock()
 					if !disabled {
 						_, _ = os.Stderr.Write(buf[:n])
+					}
+					if bridge.outputTap != nil {
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						bridge.outputTap(data, true)
 					}
 				}
 				if err != nil {
@@ -489,7 +509,9 @@ func (bridge *PTYSSHBridge) Pause() error {
 	bridge.outputMu.Lock()
 	bridge.outputDisabled = true
 	bridge.outputMu.Unlock()
-	bridge.cancelFunc()
+	if bridge.inputCancel != nil {
+		bridge.inputCancel()
+	}
 
 	term.Restore(int(os.Stdin.Fd()), bridge.oldState)
 
@@ -512,9 +534,8 @@ func (bridge *PTYSSHBridge) Resume() error {
 	bridge.oldState = oldstate
 
 	ctx, cancel := context.WithCancel(context.Background())
-	bridge.cancelFunc = cancel
-
-	bridge.ProcessPTYReadInput(ctx, cancel)
+	bridge.inputCancel = cancel
+	bridge.ProcessPTYReadInput(ctx)
 
 	return nil
 }
@@ -544,7 +565,12 @@ func (bridge *PTYSSHBridge) Close() error {
 		bridge.localPTY = nil
 	}
 
-	bridge.cancelFunc()
+	if bridge.inputCancel != nil {
+		bridge.inputCancel()
+	}
+	if bridge.outputCancel != nil {
+		bridge.outputCancel()
+	}
 	log.Println("PTYSSHBridge : context cancelled")
 
 	// We dont need to clear these, PTYManager will discard the bridge reference
@@ -626,6 +652,14 @@ func (b *PTYSSHBridge) SetStdinObserver(o func([]byte)) {
 	b.mu.Lock()
 	b.StdinObserver = o
 	b.mu.Unlock()
+}
+
+// SetOutputTap registers a tap receiving stdout/stderr bytes (err=true for stderr).
+// The tap is invoked regardless of outputDisabled so logging can continue while UI is paused.
+func (bridge *PTYSSHBridge) SetOutputTap(fn func([]byte, bool)) {
+	bridge.outputMu.Lock()
+	bridge.outputTap = fn
+	bridge.outputMu.Unlock()
 }
 
 func (b *PTYSSHBridge) GetStdinObserver() func([]byte) {

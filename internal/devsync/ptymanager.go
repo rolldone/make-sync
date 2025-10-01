@@ -3,6 +3,8 @@ package devsync
 import (
 	"fmt"
 	"log"
+	"make-sync/internal/devsync/localclient"
+	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
 	"strconv"
 	"strings"
@@ -208,6 +210,28 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	// are handled by the Watcher/PTYManager input router.
 	log.Println("DEBUG: Focus exiting normally")
 	return nil
+}
+
+// SetOutputTapForSlot sets an output tap on the bridge for a given slot, if supported.
+// The tap receives stdout/stderr bytes (err=true for stderr) regardless of UI output state.
+func (m *PTYManager) SetOutputTapForSlot(slot int, tap func([]byte, bool)) error {
+	m.mu.RLock()
+	s, ok := m.sessions[slot]
+	m.mu.RUnlock()
+	if !ok || s == nil || s.Bridge == nil {
+		return fmt.Errorf("no session in slot %d", slot)
+	}
+	// SSH bridge
+	if sb, ok := s.Bridge.(*sshclient.PTYSSHBridge); ok {
+		sb.SetOutputTap(tap)
+		return nil
+	}
+	// Local bridge
+	if lb, ok := s.Bridge.(*localclient.PTYLocalBridge); ok {
+		lb.SetOutputTap(tap)
+		return nil
+	}
+	return fmt.Errorf("bridge for slot %d does not support output tap", slot)
 }
 
 // PauseSlot pauses the PTY session in the given slot.

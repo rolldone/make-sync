@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
+	"make-sync/internal/config"
 	"make-sync/internal/util"
 
 	"github.com/manifoldco/promptui"
@@ -182,14 +185,28 @@ func (w *Watcher) showCommandMenuDisplay() {
 				if result == "Enter Local Shell" {
 					result = ""
 				}
+				// Support optional local log capture marker: "command >>> file"
+				baseCmd, logFile := parseCommandLogSpec(result)
 				// Choose local initial command template based on HOST OS
 				// (local shell should reflect the OS running this watcher)
 				isWindowsTarget := runtime.GOOS == "windows"
 				var initialCmd string
 				if isWindowsTarget {
-					initialCmd = ""
+					// On Windows host: if baseCmd provided, execute it and keep shell open; else open shell only
+					if strings.TrimSpace(baseCmd) == "" {
+						initialCmd = ""
+					} else {
+						// Escape percent and caret to survive cmd parsing
+						esc := func(s string) string {
+							s = strings.ReplaceAll(s, "%", "%%")
+							s = strings.ReplaceAll(s, "^", "^^")
+							return s
+						}
+						cmdPart := esc(baseCmd)
+						initialCmd = fmt.Sprintf("cmd.exe /K cd /d \"%s\" & %s", localPath, cmdPart)
+					}
 				} else {
-					initialCmd = fmt.Sprintf("cd %s && bash -c %s ; exec bash", shellEscape(localPath), shellEscape(result))
+					initialCmd = fmt.Sprintf("cd %s && bash -c %s ; exec bash", shellEscape(localPath), shellEscape(baseCmd))
 				}
 				isExist := false
 				if !w.ptyMgr.HasSlot(*slot) {
@@ -200,8 +217,22 @@ func (w *Watcher) showCommandMenuDisplay() {
 						util.Default.Resume()
 						continue
 					}
+					// If logging requested, attach an output tap to this slot
+					if logFile != "" {
+						tap := makeFileLogTap(cfg, logFile)
+						if tap != nil {
+							_ = w.ptyMgr.SetOutputTapForSlot(*slot, tap)
+						}
+					}
 				} else {
 					isExist = true
+					// Update/attach logging tap on existing local slot as well (best-effort)
+					if logFile != "" {
+						tap := makeFileLogTap(cfg, logFile)
+						if tap != nil {
+							_ = w.ptyMgr.SetOutputTapForSlot(*slot, tap)
+						}
+					}
 				}
 
 				util.Default.Suspend()
@@ -235,6 +266,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 			if cfg != nil && cfg.Devsync.Auth.RemotePath != "" {
 				remotePath = cfg.Devsync.Auth.RemotePath
 			}
+			// Parse optional local log capture marker in the selected command
+			baseCmd, logFile := parseCommandLogSpec(result)
 			// choose remote command template based on target OS
 			targetOS := ""
 			if cfg != nil {
@@ -280,9 +313,9 @@ func (w *Watcher) showCommandMenuDisplay() {
 				// commands like `pwd`/`ls` to Windows equivalents — respect user
 				// config and dynamic entries verbatim except for escaping percent
 				// and caret characters which would be consumed by cmd.exe parsing.
-				cmdPart := result
+				cmdPart := baseCmd
 				if !inConfig {
-					cmdPart = escCmd(result)
+					cmdPart = escCmd(baseCmd)
 				}
 				// Run the user's command; assume the directory already exists and
 				// just change directory into it before running the command.
@@ -293,7 +326,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 				initialCmd = fmt.Sprintf("cmd.exe /K %s", body)
 			} else {
 				initialCmd = fmt.Sprintf("mkdir -p %s || true && cd %s && bash -c %s ; exec bash",
-					shellEscape(remotePath), shellEscape(remotePath), shellEscape(result))
+					shellEscape(remotePath), shellEscape(remotePath), shellEscape(baseCmd))
 			}
 			isExist := false
 			if !w.ptyMgr.HasSlot(*slot) {
@@ -304,8 +337,22 @@ func (w *Watcher) showCommandMenuDisplay() {
 					util.Default.Printf("⚠️  Failed to open slot %d: %v - falling back to single-run\n", *slot, err)
 					continue
 				}
+				// If logging requested, attach an output tap to this slot
+				if logFile != "" {
+					tap := makeFileLogTap(cfg, logFile)
+					if tap != nil {
+						_ = w.ptyMgr.SetOutputTapForSlot(*slot, tap)
+					}
+				}
 			} else {
 				isExist = true
+				// Update/attach logging tap on existing slot as well (best-effort)
+				if logFile != "" {
+					tap := makeFileLogTap(cfg, logFile)
+					if tap != nil {
+						_ = w.ptyMgr.SetOutputTapForSlot(*slot, tap)
+					}
+				}
 			}
 
 			util.Default.Suspend()
@@ -319,6 +366,107 @@ func (w *Watcher) showCommandMenuDisplay() {
 			}
 		}
 	}
+}
+
+// parseCommandLogSpec detects a trailing ">>> filename" marker and returns the base command and sanitized filename.
+func parseCommandLogSpec(cmd string) (string, string) {
+	s := strings.TrimSpace(cmd)
+	idx := strings.LastIndex(s, ">>>")
+	if idx == -1 {
+		return s, ""
+	}
+	left := strings.TrimSpace(s[:idx])
+	right := strings.TrimSpace(s[idx+3:])
+	if left == "" || right == "" {
+		return s, ""
+	}
+	// strip optional quotes
+	if (strings.HasPrefix(right, "\"") && strings.HasSuffix(right, "\"")) || (strings.HasPrefix(right, "'") && strings.HasSuffix(right, "'")) {
+		right = strings.Trim(right, "'\"")
+	}
+	// sanitize filename: basename only, whitelist chars
+	right = filepath.Base(right)
+	// replace spaces with underscore
+	right = strings.ReplaceAll(right, " ", "_")
+	// whitelist filter
+	cleaned := make([]rune, 0, len(right))
+	for _, r := range right {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			cleaned = append(cleaned, r)
+		}
+	}
+	fname := string(cleaned)
+	if fname == "" {
+		return left, ""
+	}
+	return left, fname
+}
+
+var logFileLocks sync.Map // map[string]*sync.Mutex
+
+// makeFileLogTap builds an output tap that appends bytes to .sync_temp/<file> in the local workspace.
+func makeFileLogTap(cfg *config.Config, file string) func([]byte, bool) {
+	// Determine local root
+	root := "."
+	if cfg != nil && cfg.Devsync.Auth.LocalPath != "" {
+		root = cfg.Devsync.Auth.LocalPath
+	}
+	syncTemp := filepath.Join(root, ".sync_temp")
+	if err := os.MkdirAll(syncTemp, 0755); err != nil {
+		util.Default.Printf("⚠️  Failed to ensure .sync_temp: %v\n", err)
+		return nil
+	}
+	path := filepath.Join(syncTemp, file)
+	// Acquire per-file lock
+	var muIface any
+	if v, ok := logFileLocks.Load(path); ok {
+		muIface = v
+	} else {
+		nm := &sync.Mutex{}
+		muIface, _ = logFileLocks.LoadOrStore(path, nm)
+	}
+	mu := muIface.(*sync.Mutex)
+
+	// Write a header once per tap creation
+	writeHeader := func(f *os.File) {
+		ts := time.Now().Format(time.RFC3339)
+		_ = appendLine(f, []byte("\n===== session start "+ts+" =====\n"))
+	}
+
+	// Open (append) and write header
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err == nil {
+			writeHeader(f)
+			_ = f.Close()
+		}
+	}()
+
+	// Use a stateful ANSI stripper so sequences crossing chunk boundaries are handled.
+	stripper := util.NewANSIStripper()
+
+	return func(b []byte, isErr bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return
+		}
+		// Optionally tag stderr
+		if isErr {
+			_ = appendLine(f, []byte("[ERR] "))
+		}
+		clean := stripper.Strip(b)
+		_, _ = f.Write(clean)
+		_ = f.Close()
+	}
+}
+
+func appendLine(f *os.File, b []byte) error {
+	_, err := f.Write(b)
+	return err
 }
 
 func (w *Watcher) enterShellNonCommand() {

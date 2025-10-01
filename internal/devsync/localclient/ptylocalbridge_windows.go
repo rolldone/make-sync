@@ -159,9 +159,19 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 				if n > 0 {
 					b.outputMu.Lock()
 					disabled := b.outputDisabled
+					tap := b.outputTap
 					b.outputMu.Unlock()
 					if !disabled {
 						_, _ = os.Stdout.Write(buf[:n])
+					}
+					if tap != nil {
+						// ConPTY exposes a combined stream for stdout/stderr via OutPipe; treat as stdout here.
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						go func(cb func([]byte, bool), d []byte) {
+							defer func() { _ = recover() }()
+							cb(d, false)
+						}(tap, data)
 					}
 				}
 				if err != nil {
