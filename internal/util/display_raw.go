@@ -1,9 +1,7 @@
 package util
 
 import (
-	"fmt"
 	"os"
-	"time"
 
 	"golang.org/x/term"
 )
@@ -21,7 +19,7 @@ func ResetRaw(oldState *term.State) error {
 		return nil
 	}
 	err := term.Restore(int(os.Stdin.Fd()), oldState)
-	fmt.Print("\033[2J\033[H")
-	time.Sleep(300 * time.Millisecond)
+	// fmt.Print("\033[2J\033[H")
+	// time.Sleep(300 * time.Millisecond)
 	return err
 }

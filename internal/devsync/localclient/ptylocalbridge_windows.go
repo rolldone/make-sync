@@ -92,12 +92,16 @@ func (b *PTYLocalBridge) StartInteractiveShellWithCommand(command string) error 
 		b.SetStdinWriter(ptyIn)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	b.cancelFunc = cancel
+	inCtx, inCancel := context.WithCancel(context.Background())
+	outCtx, outCancel := context.WithCancel(context.Background())
+	b.inputCancel = inCancel
+	b.outputCancel = outCancel
+	b.cancelFunc = inCancel // for compatibility
 
 	b.outPipe = p.OutPipe()
 
-	b.ProcessPTYReadInput(ctx, cancel)
+	b.ProcessPTYReadInput(inCtx)
+	b.ProcessPTYReadOutput(outCtx)
 
 	// start a small resize watcher: poll terminal size and update PTY when it changes
 	go func(ctx context.Context) {
@@ -130,57 +134,7 @@ func (b *PTYLocalBridge) StartInteractiveShellWithCommand(command string) error 
 	return nil
 }
 
-func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context.CancelFunc) error {
-	go func(ctx context.Context) {
-		defer func() {
-			log.Println("PTY output reader: exiting, cancelling context")
-		}()
-		out := b.outPipe
-		fmt.Println("PTY output reader: started")
-		buf := make([]byte, 4096)
-
-		readFn := func() (int, error) {
-			if out != nil {
-				return out.Read(buf)
-			}
-			return b.localPTY.Read(buf)
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				// fmt.Println("PTY output reader: context done, exiting")
-				return
-			default:
-				n, err := readFn()
-				if err != nil {
-					fmt.Println("PTY output reader: read error:", err)
-				}
-				if n > 0 {
-					b.outputMu.Lock()
-					disabled := b.outputDisabled
-					tap := b.outputTap
-					b.outputMu.Unlock()
-					if !disabled {
-						_, _ = os.Stdout.Write(buf[:n])
-					}
-					if tap != nil {
-						// ConPTY exposes a combined stream for stdout/stderr via OutPipe; treat as stdout here.
-						data := make([]byte, n)
-						copy(data, buf[:n])
-						go func(cb func([]byte, bool), d []byte) {
-							defer func() { _ = recover() }()
-							cb(d, false)
-						}(tap, data)
-					}
-				}
-				if err != nil {
-					log.Println("PTY output reader: read error, cancelling context:", err)
-					return
-				}
-			}
-		}
-	}(ctx)
+func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context) error {
 	go func(ctx context.Context) {
 		defer func() {
 			log.Println("PTY stdin reader: exiting, cancelling context")
@@ -266,15 +220,78 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 
 }
 
+func (b *PTYLocalBridge) ProcessPTYReadOutput(ctx context.Context) error {
+	go func(ctx context.Context) {
+		defer func() {
+			log.Println("PTY output reader: exiting, cancelling context")
+		}()
+		out := b.outPipe
+		fmt.Println("PTY output reader: started")
+		buf := make([]byte, 4096)
+
+		readFn := func() (int, error) {
+			if out != nil {
+				return out.Read(buf)
+			}
+			return b.localPTY.Read(buf)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				// fmt.Println("PTY output reader: context done, exiting")
+				return
+			default:
+				n, err := readFn()
+				if err != nil {
+					fmt.Println("PTY output reader: read error:", err)
+				}
+				if n > 0 {
+					b.outputMu.Lock()
+					disabled := b.outputDisabled
+					tap := b.outputTap
+					b.outputMu.Unlock()
+					if !disabled {
+						_, _ = os.Stdout.Write(buf[:n])
+					}
+					// Always cache output as history buffer
+					b.cacheOutput(buf[:n])
+					if tap != nil {
+						// ConPTY exposes a combined stream for stdout/stderr via OutPipe; treat as stdout here.
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						go func(cb func([]byte, bool), d []byte) {
+							defer func() { _ = recover() }()
+							cb(d, false)
+						}(tap, data)
+					}
+				}
+				if err != nil {
+					log.Println("PTY output reader: read error, cancelling context:", err)
+					return
+				}
+			}
+		}
+	}(ctx)
+
+	return nil
+}
+
 // Close shuts down IO goroutines, closes the PTY, and invokes the exit listener.
 func (b *PTYLocalBridge) Close() error {
 
 	log.Println("PTYLocalBridge: closing")
+	b.cacheMu.Lock()
+	b.outputCache = nil
+	b.cacheMu.Unlock()
+	log.Println("PTYLocalBridge: cache cleared")
+
 	b.outputDisabled = true
 	log.Println("PTYLocalBridge: output disabled")
 
-	b.cancelFunc()
-	log.Println("PTYLocalBridge: context cancelled")
+	b.inputCancel()
+	b.outputCancel()
+	log.Println("PTYLocalBridge: contexts cancelled")
 	b.SetOnExitListener(nil)
 	log.Println("PTYLocalBridge: exit listener cleared")
 	b.SetOnInputHitCodeListener(nil)
@@ -302,15 +319,15 @@ func (b *PTYLocalBridge) Close() error {
 }
 
 func (b *PTYLocalBridge) Pause() error {
-	// Matikan output & cancel reader goroutine
+	// Matikan output & allow caching
 
 	b.outputMu.Lock()
 	b.outputDisabled = true
 	b.outputMu.Unlock()
 	b.localPTY.Pause()
-	b.cancelFunc()
+	b.inputCancel() // cancel input to stop reading stdin
 
-	fmt.Println("1.PTYLocalBridge: reader cancelled")
+	fmt.Println("1.PTYLocalBridge: reader not cancelled for caching")
 
 	// flush dan reset mode Windows console
 	if err := b.resetConsoleMode(); err != nil {
@@ -358,21 +375,32 @@ func (b *PTYLocalBridge) resetConsoleMode() error {
 }
 
 func (b *PTYLocalBridge) Resume() error {
-	// util.Default.ClearScreen()
+	// load cached output first
+	b.cacheMu.Lock()
+	if len(b.outputCache) > 0 {
+		fmt.Print(string(b.outputCache))
+		b.outputCache = nil
+	}
+	b.cacheMu.Unlock()
 
-	err := term.Restore(int(os.Stdin.Fd()), b.oldState)
+	err := util.ResetRaw(b.oldState)
 	if err != nil {
 		return fmt.Errorf("failed to snapshot terminal state: %v", err)
 	}
+	odlState, err := util.NewRaw()
+	if err != nil {
+		return fmt.Errorf("failed to enable raw mode: %v", err)
+	}
+	b.oldState = odlState
 
 	b.outputMu.Lock()
 	b.outputDisabled = false
 	b.outputMu.Unlock()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	b.cancelFunc = cancel
-
-	b.ProcessPTYReadInput(ctx, cancel)
+	// Restart input goroutine with new context
+	inCtx, inCancel := context.WithCancel(context.Background())
+	b.inputCancel = inCancel
+	b.ProcessPTYReadInput(inCtx)
 
 	fmt.Println("PTYLocalBridge: reader resumed")
 	if b.localPTY != nil {

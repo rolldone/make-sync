@@ -23,6 +23,9 @@ type PTYLocalBridge struct {
 	outputDisabled bool
 	outputMu       sync.Mutex
 
+	outputCache []byte
+	cacheMu     sync.Mutex
+
 	initialCommand string
 	mu             sync.RWMutex
 	stdin          io.WriteCloser // optional explicit writer (set to PTY file)
@@ -40,10 +43,24 @@ type PTYLocalBridge struct {
 	oldState       *term.State
 	switchOldState *term.State
 
+	// separate cancel funcs for input and output lifecycles
+	inputCancel  context.CancelFunc
+	outputCancel context.CancelFunc
+
 	outPipe *os.File
 
 	// output tap receives stdout/stderr bytes (err=false for stdout, true for stderr if implemented)
 	outputTap func([]byte, bool)
+}
+
+// cacheOutput adds output data to the cache with size limit
+func (b *PTYLocalBridge) cacheOutput(data []byte) {
+	const maxCacheSize = 1024 * 1024 // 1MB
+	b.cacheMu.Lock()
+	if len(b.outputCache)+len(data) <= maxCacheSize {
+		b.outputCache = append(b.outputCache, data...)
+	}
+	b.cacheMu.Unlock()
 }
 
 func NewPTYLocalBridge(initialCommand string) (*PTYLocalBridge, error) {

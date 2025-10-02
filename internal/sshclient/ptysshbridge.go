@@ -33,6 +33,8 @@ type PTYSSHBridge struct {
 	StdinObserver  func([]byte)
 	outputDisabled bool
 	outputMu       sync.Mutex
+	outputCache    []byte
+	cacheMu        sync.Mutex
 
 	localTTY *os.File
 
@@ -73,7 +75,16 @@ type PTYSSHBridge struct {
 	exitingMu sync.Mutex
 }
 
-// NewPTYSSHBridge creates a new PTY-SSH bridge for interactive sessions
+// cacheOutput adds output data to the cache with size limit
+func (bridge *PTYSSHBridge) cacheOutput(data []byte) {
+	const maxCacheSize = 1024 * 1024 // 1MB
+	bridge.cacheMu.Lock()
+	if len(bridge.outputCache)+len(data) <= maxCacheSize {
+		bridge.outputCache = append(bridge.outputCache, data...)
+	}
+	bridge.cacheMu.Unlock()
+}
+
 func NewPTYSSHBridge(sshClient *SSHClient) (*PTYSSHBridge, error) {
 	ptWrapper, ptFile, err := pty.Open()
 	if err != nil {
@@ -434,6 +445,8 @@ func (bridge *PTYSSHBridge) ProcessPTYReadOutput(ctx context.Context) error {
 					if !disabled {
 						_, _ = os.Stdout.Write(buf[:n])
 					}
+					// Always cache output as history buffer
+					bridge.cacheOutput(buf[:n])
 					// always pass to tap regardless of disabled
 					if bridge.outputTap != nil {
 						data := make([]byte, n)
@@ -477,6 +490,8 @@ func (bridge *PTYSSHBridge) ProcessPTYReadOutput(ctx context.Context) error {
 					if !disabled {
 						_, _ = os.Stderr.Write(buf[:n])
 					}
+					// Always cache output as history buffer
+					bridge.cacheOutput(buf[:n])
 					if bridge.outputTap != nil {
 						data := make([]byte, n)
 						copy(data, buf[:n])
@@ -523,6 +538,14 @@ func (bridge *PTYSSHBridge) Pause() error {
 // Resume restarts stdin/output
 func (bridge *PTYSSHBridge) Resume() error {
 
+	// load cached output first
+	bridge.cacheMu.Lock()
+	if len(bridge.outputCache) > 0 {
+		fmt.Print(string(bridge.outputCache))
+		bridge.outputCache = nil
+	}
+	bridge.cacheMu.Unlock()
+
 	bridge.outputMu.Lock()
 	bridge.outputDisabled = false
 	bridge.outputMu.Unlock()
@@ -544,6 +567,11 @@ func (bridge *PTYSSHBridge) Resume() error {
 func (bridge *PTYSSHBridge) Close() error {
 	bridge.outputDisabled = true
 	log.Println("PTYSSHBridge : Close called, output disabled")
+
+	bridge.cacheMu.Lock()
+	bridge.outputCache = nil
+	bridge.cacheMu.Unlock()
+	log.Println("PTYSSHBridge : cache cleared")
 
 	bridge.exitingMu.Lock()
 	bridge.exiting = true

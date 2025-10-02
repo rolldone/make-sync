@@ -191,8 +191,6 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 					util.Default.Printf("❌ Failed to resume PTY session: %v\n", err)
 					// os.Exit(1)
 				}
-				util.Default.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
-				util.Default.ClearLine()
 			case "start":
 				go func() {
 					if err := m.bridgeActive.StartInteractiveShell(); err != nil {
@@ -248,25 +246,19 @@ func (m *PTYManager) PauseSlot(slot int) error {
 
 	close(m.Pendingchan)
 	close(m.routerStop)
-	util.ResetRaw(m.w.oldState)
 	return err
 }
 
 // ResumeSlot resumes the PTY session in the given slot.
 func (m *PTYManager) ResumeSlot(slot int) error {
+	util.Default.PrintBlock(fmt.Sprintf("✅ You are in slot %d. Press any key to resume\n", slot), true)
+	util.Default.ClearLine()
 	m.mu.RLock()
 	s, ok := m.sessions[slot]
 	m.mu.RUnlock()
 	if !ok || s == nil || m.bridgeActive == nil {
 		return fmt.Errorf("no session in slot %d", slot)
 	}
-
-	util.ResetRaw(m.w.oldState)
-	oldState, err := util.NewRaw()
-	if err != nil {
-		return fmt.Errorf("failed to enable raw mode: %w", err)
-	}
-	m.w.oldState = oldState
 
 	return m.bridgeActive.Resume()
 }
@@ -311,17 +303,6 @@ func (m *PTYManager) CloseSlot(slot int) error {
 
 	log.Println("PTYManager: Waiting for goroutines to finish")
 
-	// Consume one line from stdin so that the Enter key the user may have
-	// pressed to close the session does not get delivered to the local shell
-	// (which would cause the local shell to execute the previous command).
-	// Use a short, blocking read here; terminal should be in normal (cooked)
-	// mode because Resume() was called above.
-
-	// Local Pty hang using bufio, i dont know why
-	// reader := bufio.NewReader(os.Stdin)
-	// _, _ = reader.ReadString('\n')
-
-	util.ResetRaw(m.w.oldState)
 	return nil
 }
 
@@ -345,6 +326,12 @@ func (m *PTYManager) ListSlots() []int {
 
 // OpenLocalSlot creates (but does not attach) a local PTY session in the given slot.
 func (m *PTYManager) OpenLocalSlot(slot int, initialCmd string) error {
+	util.ResetRaw(m.w.oldState)
+	oldState, err := util.NewRaw()
+	if err != nil {
+		return fmt.Errorf("failed to enable raw mode: %w", err)
+	}
+	m.w.oldState = oldState
 	// if slot < 3 || slot > 9 {
 	// 	return fmt.Errorf("slot must be 3..9")
 	// }

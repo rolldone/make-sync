@@ -15,7 +15,9 @@ type Bridge interface {
 	// passes stdin callbacks via the SetStdinCallback family.
 	StartInteractiveShell() error
 
+	// Pause stops output to terminal and caches subsequent output for Resume.
 	Pause() error
+	// Resume loads cached output to terminal and resumes normal output.
 	Resume() error
 	Close() error
 

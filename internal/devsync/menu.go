@@ -244,7 +244,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 				} else {
 					util.Default.Resume()
 				}
-				sendKeyA()
+				// sendKeyA()
 				continue
 			}
 
@@ -255,7 +255,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 			} else {
 				util.Default.PrintBlock(out, true)
 			}
-			sendKeyA()
+			// sendKeyA()
 			util.Default.Resume()
 			continue
 		}

@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"time"
 
 	"golang.org/x/term"
 
@@ -26,11 +27,16 @@ func (b *PTYLocalBridge) StartInteractiveShell() error {
 	return b.startLocalWithCommand(b.initialCommand)
 }
 
-// StartInteractiveShell starts the provided command in a PTY and bridges IO to the terminal.
 // startLocalWithCommand starts the provided command in a PTY and bridges IO to the terminal.
 // This is the existing implementation that accepts a shell command string.
 func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 	// Detect whether stdin/stdout are real terminals. Mirror SSH bridge behavior.
+	util.ResetRaw(b.oldState)
+	oldState, err := util.NewRaw()
+	if err != nil {
+		return fmt.Errorf("failed to enable raw mode: %w", err)
+	}
+	b.oldState = oldState
 
 	// prepare command
 	cmd := exec.Command("/bin/sh", "-lc", command)
@@ -51,13 +57,14 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 	// expose PTY writer so PTYManager can forward stdin
 	b.SetStdinWriter(f)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	b.cancelFunc = cancel
+	// Create separate contexts: output stays alive until session end; input can be paused
+	outCtx, outCancel := context.WithCancel(context.Background())
+	inCtx, inCancel := context.WithCancel(context.Background())
+	b.outputCancel = outCancel
+	b.inputCancel = inCancel
 
-	b.ProcessPTYReadInput(ctx, cancel)
-	// Start a simple keyboard forwarder: read from os.Stdin and write into
-	// the PTY file. If an inputListener is registered, notify it asynchronously
-	// with a copy of the bytes read.
+	b.ProcessPTYReadOutput(outCtx)
+	b.ProcessPTYReadInput(inCtx)
 
 	err = cmd.Wait()
 	// invoke exit listener if set
@@ -66,7 +73,7 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 	return err
 }
 
-func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context.CancelFunc) error {
+func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context) error {
 	// Goroutine stdin reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 256)
@@ -74,7 +81,7 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Println("Unix stdin reader: context done, exiting")
+				log.Println("ProcessPTYReadInput :: Unix stdin reader: context done, exiting")
 				return
 			default:
 				n, rerr := os.Stdin.Read(buf)
@@ -85,15 +92,6 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 					ih := b.inputHitCodeListener
 					b.mu.RUnlock()
 
-					// forward to PTY stdin writer
-					if w != nil {
-						// fmt.Println("Writing to PTY:", string(buf[:n]))
-						_, werr := w.Write(buf[:n])
-						if werr != nil {
-							return
-						}
-					}
-
 					// call inputListener asynchronously
 					if il != nil {
 						data := make([]byte, n)
@@ -103,7 +101,7 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 							cb(d)
 						}(il, data)
 					}
-
+					matchShortcut := false
 					// detect ESC + digit (Alt+1..Alt+9, Alt+0)
 					if ih != nil {
 						for i := 0; i < n-1; i++ {
@@ -115,11 +113,28 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 										defer func() { _ = recover() }()
 										cb("alt+" + d)
 									}(ih, digit)
+									matchShortcut = true
 									i++
 								}
 							}
 						}
 					}
+
+					if matchShortcut {
+						// skip forwarding the ESC + digit sequence to the PTY
+						log.Println("ProcessPTYReadInput :: Skipping forwarding shortcut input to PTY")
+						continue
+					}
+
+					// forward to PTY stdin writer
+					if w != nil {
+						// fmt.Println("Writing to PTY:", string(buf[:n]))
+						_, werr := w.Write(buf[:n])
+						if werr != nil {
+							return
+						}
+					}
+
 				}
 
 				if rerr != nil {
@@ -129,6 +144,10 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 		}
 	}(ctx)
 
+	return nil
+}
+
+func (b *PTYLocalBridge) ProcessPTYReadOutput(ctx context.Context) error {
 	// Goroutine stdout/output reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 4096)
@@ -148,6 +167,8 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 					if !disabled {
 						_, _ = os.Stdout.Write(buf[:n])
 					}
+					// Always cache output as history buffer
+					b.cacheOutput(buf[:n])
 					if tap != nil {
 						// Local PTY only provides a single output stream; mark as stdout (isErr=false)
 						// Invoke regardless of outputDisabled to keep background logging.
@@ -173,37 +194,63 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context, cancel context
 }
 
 func (b *PTYLocalBridge) Pause() error {
+
+	util.ResetRaw(b.oldState)
+
 	b.outputMu.Lock()
 	b.outputDisabled = true
 	b.outputMu.Unlock()
 	b.localPTY.Pause()
-	b.cancelFunc()
+	if b.inputCancel != nil {
+		b.inputCancel()
+	}
+
+	time.Sleep(1 * time.Second)
 	return nil
 }
 
 func (b *PTYLocalBridge) Resume() error {
+
+	util.ResetRaw(b.oldState)
+	oldstate, err := util.NewRaw()
+	if err != nil {
+		return fmt.Errorf("failed to enable raw mode: %w", err)
+	}
+	b.oldState = oldstate
+
+	// load cached output first
+	b.cacheMu.Lock()
+	if len(b.outputCache) > 0 {
+		fmt.Print(string(b.outputCache))
+		b.outputCache = nil
+	}
+	b.cacheMu.Unlock()
+
 	// resume input/output and restore raw mode if needed
 	b.outputMu.Lock()
 	b.outputDisabled = false
 	b.outputMu.Unlock()
+
+	// restart input reader
+	inCtx, inCancel := context.WithCancel(context.Background())
+	b.inputCancel = inCancel
+	b.ProcessPTYReadInput(inCtx)
 
 	if b.localPTY != nil {
 		// try to update size on resume
 		if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
 			_ = b.localPTY.SetSize(h, w)
 		}
-		// ensure PTY writer is exposed (manager will forward stdin into this)
-		b.SetStdinWriter(b.localPTY.File())
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	b.cancelFunc = cancel
-
-	b.ProcessPTYReadInput(ctx, cancel)
 	return nil
 }
 
 func (b *PTYLocalBridge) Close() error {
 	// b.ioOnce.Do(func() { close(b.ioCancel) })
+
+	b.cacheMu.Lock()
+	b.outputCache = nil
+	b.cacheMu.Unlock()
 
 	if b.localPTY != nil {
 		_ = b.localPTY.Close()
