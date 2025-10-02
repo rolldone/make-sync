@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 var watcher *Watcher
@@ -212,6 +211,10 @@ mainMenuLoop:
 }
 
 func basicNewSessionSSH(cfg *config.Config) error {
+	oldstate, err := util.NewRaw()
+	if err != nil {
+		util.Default.Printf("❌ Failed to enable raw mode: %v\n", err)
+	}
 	// Get absolute path for private key
 	privateKeyPath := strings.TrimSpace(cfg.Devsync.Auth.PrivateKey)
 	// Only resolve to absolute path if a private key path is actually provided
@@ -309,8 +312,8 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	})
 
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		bridge.GetStdinWriter().Write([]byte("\033[2J\033[1;1H")) // Clear screen then send newline
+		// time.Sleep(500 * time.Millisecond)
+		// bridge.GetStdinWriter().Write([]byte("\033[2J\033[1;1H")) // Clear screen then send newline
 	}()
 
 	if err := bridge.StartInteractiveShell(); err != nil {
@@ -321,9 +324,7 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	bridge.Close()
 	sshClient.Close()
 
-	flushStdin()
-	sendKeyA()
-	time.Sleep(70 * time.Millisecond)
+	util.ResetRaw(oldstate)
 	return nil
 }
 

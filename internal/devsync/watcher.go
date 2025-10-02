@@ -24,7 +24,6 @@ import (
 
 	"github.com/asaskevich/EventBus"
 	"github.com/rjeczalik/notify"
-	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -169,8 +168,8 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 
 // Start begins watching files in the configured directory
 func (w *Watcher) Start() error {
-
-	restore, err := term.MakeRaw(int(os.Stdin.Fd()))
+	util.ResetRaw(w.oldState)
+	restore, err := util.NewRaw()
 	if err != nil {
 		return fmt.Errorf("failed to enable raw mode: %w", err)
 	}

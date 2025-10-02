@@ -248,7 +248,7 @@ func (m *PTYManager) PauseSlot(slot int) error {
 
 	close(m.Pendingchan)
 	close(m.routerStop)
-
+	util.ResetRaw(m.w.oldState)
 	return err
 }
 
@@ -260,6 +260,13 @@ func (m *PTYManager) ResumeSlot(slot int) error {
 	if !ok || s == nil || m.bridgeActive == nil {
 		return fmt.Errorf("no session in slot %d", slot)
 	}
+
+	util.ResetRaw(m.w.oldState)
+	oldState, err := util.NewRaw()
+	if err != nil {
+		return fmt.Errorf("failed to enable raw mode: %w", err)
+	}
+	m.w.oldState = oldState
 
 	return m.bridgeActive.Resume()
 }
@@ -314,6 +321,7 @@ func (m *PTYManager) CloseSlot(slot int) error {
 	// reader := bufio.NewReader(os.Stdin)
 	// _, _ = reader.ReadString('\n')
 
+	util.ResetRaw(m.w.oldState)
 	return nil
 }
 

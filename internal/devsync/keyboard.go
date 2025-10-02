@@ -97,10 +97,17 @@ func (w *Watcher) handleKeyboardInput() {
 			switch input {
 			case "R", "r":
 				// _ = util.RestoreGlobal()
-				term.Restore(int(os.Stdin.Fd()), w.oldState)
+				util.ResetRaw(w.oldState)
 				fmt.Print("\033[2J\033[H")
 				time.Sleep(1000 * time.Millisecond)
 				w.HandleReloadCommand()
+				oldState, err := util.NewRaw()
+				if err != nil {
+					w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
+					return
+				}
+				w.oldState = oldState
+			// case "Q", "q":
 			case "S", "s":
 				// _ = util.RestoreGlobal()
 				// w.HandleShowStatsCommand()
