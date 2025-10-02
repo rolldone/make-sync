@@ -3,6 +3,7 @@ package deployagent
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,7 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 		remoteSyncTemp = strings.ReplaceAll(remoteBase, "/", "\\") + "\\.sync_temp"
 	} else {
 		remoteSyncTemp = filepath.Join(remoteBase, ".sync_temp")
+		remoteSyncTemp = filepath.ToSlash(remoteSyncTemp)
 	}
 
 	// Create .sync_temp directory on remote
@@ -194,9 +196,12 @@ func uploadAgentBinary(client *sshclient.SSHClient, localAgentPath, remoteSyncTe
 	// Set execute permission on Unix
 	if !strings.Contains(strings.ToLower(targetOS), "win") {
 		chmodCmd := fmt.Sprintf("chmod +x %s", remoteAgentPath)
+		log.Println("[deployagent_unified.go] DEBUG: Running chmod command:", chmodCmd)
 		if err := client.RunCommand(chmodCmd); err != nil {
+			log.Println("[deployagent_unified.go] DEBUG: chmod command failed:", err)
 			return fmt.Errorf("failed to make agent executable: %v", err)
 		}
+		log.Println("[deployagent_unified.go] DEBUG: chmod command succeeded")
 	}
 
 	util.Default.Printf("✅ Agent uploaded successfully\n")

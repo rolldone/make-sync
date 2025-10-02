@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"make-sync/internal/config"
 	"make-sync/internal/deployagent"
 	"make-sync/internal/events"
@@ -88,7 +89,6 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 			if err != nil {
 				util.Default.Printf("⚠️  Failed to initialize file cache: %v\n", err)
 			} else {
-				util.Default.ClearLine()
 				util.Default.Printf("💾 File cache initialized: %s\n", dbPath)
 
 				// Reset cache if configured
@@ -652,50 +652,6 @@ func (w *Watcher) startAgentMonitoring() error {
 			if out, err := w.sshClient.RunCommandWithOutput(identityCmd); err != nil {
 				w.safePrintf("⚠️  Agent identity check failed: %v\n", err)
 				w.safePrintf("🔍 identity output: %s\n", strings.TrimSpace(out))
-
-				// If agent binary not found, deploy it automatically
-				if strings.Contains(err.Error(), "No such file") || strings.Contains(err.Error(), "command not found") || strings.Contains(err.Error(), "127") {
-					w.safePrintln("🚀 Agent binary not found, deploying agent automatically...")
-					if deployErr := w.buildAndDeployAgent(); deployErr != nil {
-						w.safePrintf("❌ Failed to auto-deploy agent: %v\n", deployErr)
-						// Add delay before retry to prevent infinite loop
-						w.safePrintln("🔄 Waiting 10 seconds before next retry...")
-						select {
-						case <-w.ctx.Done():
-							w.safePrintln("🔄 Agent monitoring stopped during deploy retry wait")
-							return
-						case <-time.After(10 * time.Second):
-							continue
-						}
-					}
-					w.safePrintln("✅ Agent deployed successfully, retrying identity check...")
-					// Retry identity check after deployment
-					if retryOut, retryErr := w.sshClient.RunCommandWithOutput(identityCmd); retryErr != nil {
-						w.safePrintf("⚠️  Agent identity check still failed after deployment: %v\n", retryErr)
-						w.safePrintf("🔍 retry identity output: %s\n", strings.TrimSpace(retryOut))
-						// Add delay before retry
-						w.safePrintln("🔄 Waiting 5 seconds before next retry...")
-						select {
-						case <-w.ctx.Done():
-							w.safePrintln("🔄 Agent monitoring stopped during identity retry wait")
-							return
-						case <-time.After(5 * time.Second):
-							continue
-						}
-					} else {
-						w.safePrintf("✅ Agent identity check succeeded after deployment: %s\n", strings.TrimSpace(retryOut))
-					}
-				} else {
-					// Other types of errors, add delay before retry
-					w.safePrintln("🔄 Waiting 5 seconds before next retry...")
-					select {
-					case <-w.ctx.Done():
-						w.safePrintln("🔄 Agent monitoring stopped during error retry wait")
-						return
-					case <-time.After(5 * time.Second):
-						continue
-					}
-				}
 			} else {
 				util.Default.ClearLine()
 				w.safePrintf("🔢 Agent identity (pre-watch): %s\n", strings.TrimSpace(out))
@@ -1058,28 +1014,17 @@ func (w *Watcher) StopAgentMonitoring() error {
 				killCmd = fmt.Sprintf(`taskkill /F /IM %s 2>nul || echo "No %s processes found"`, agentBinaryName, agentBinaryName)
 			}
 		} else {
-			// Unix/Linux: Get PID first, then kill - using unique agent name
-			getPIDCmd := fmt.Sprintf(`pgrep -f "%s" | head -1`, agentBinaryName)
-			if pidOutput, err := w.sshClient.RunCommandWithOutput(getPIDCmd); err == nil {
-				pidOutput = strings.TrimSpace(pidOutput)
-				if pidOutput != "" {
-					w.safePrintf("📍 Found agent PID: %s\n", pidOutput)
-					killCmd = fmt.Sprintf(`kill -TERM %s 2>/dev/null || echo "Agent PID %s not found"`, pidOutput, pidOutput)
-				} else {
-					w.safePrintf("⚠️  No %s processes found\n", agentBinaryName)
-					killCmd = fmt.Sprintf(`echo "No %s processes found"`, agentBinaryName)
-				}
-			} else {
-				// Fallback to process name kill
-				killCmd = fmt.Sprintf(`pkill -f "%s" || echo "No %s processes found"`, agentBinaryName, agentBinaryName)
-			}
+			// Unix/Linux: Kill by process name using pkill
+			killCmd = fmt.Sprintf(`pkill -9 -f "%s" || echo "No %s processes found"`, agentBinaryName, agentBinaryName)
 		}
 
 		// Run kill command (ignore errors since process might already be dead)
 		if err := w.sshClient.RunCommand(killCmd); err != nil {
 			w.safePrintf("⚠️  Kill command failed (this might be normal): %v\n", err)
+			log.Println("Kill command error:", err)
 		} else {
 			w.safePrintln("✅ Remote agent kill command sent")
+			log.Println("Kill command executed successfully")
 		}
 
 		// Then close SSH agent session
@@ -1164,11 +1109,8 @@ func (w *Watcher) buildAndDeployAgent() error {
 		return nil
 	}
 
-	// Get project root - handles both development (go run) and production modes
-	projectRoot, err := util.GetProjectRoot()
-	if err != nil {
-		return fmt.Errorf("failed to get project root: %v", err)
-	}
+	// Get project root
+	projectRoot := filepath.Dir(w.watchPath)
 
 	// Prepare unified deployment options
 	deployOpts := deployagent.UnifiedDeployOptions{

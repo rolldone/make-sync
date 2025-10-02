@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -249,6 +250,7 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 		} else {
 			remoteAgentPath = filepath.Join(base, ".sync_temp", remoteExecName)
 		}
+		remoteAgentPath = filepath.ToSlash(remoteAgentPath)
 	}
 
 	util.Default.Printf("🔧 DEBUG: Uploading %s to %s\n", localBinaryPath, remoteAgentPath)
@@ -263,9 +265,12 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 	// Set permissions on Unix (like watcher does)
 	if !strings.Contains(strings.ToLower(osTarget), "win") {
 		chmodCmd := fmt.Sprintf("chmod +x %s", remoteAgentPath)
+		log.Println("[runner.go] DEBUG: Running chmod command:", chmodCmd)
 		if err := client.RunCommand(chmodCmd); err != nil {
+			log.Println("[runner.go] DEBUG: chmod command failed:", err)
 			return fmt.Errorf("failed to make agent executable: %v", err)
 		}
+		log.Println("[runner.go] DEBUG: chmod command succeeded")
 	}
 
 	return nil
@@ -311,6 +316,9 @@ func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget str
 			agentPath = filepath.Join(remoteBase, ".sync_temp", binaryName)
 			cdDir = remoteBase
 		}
+		// Ensure forward slashes for Linux
+		agentPath = filepath.ToSlash(agentPath)
+		cdDir = filepath.ToSlash(cdDir)
 		cmd = fmt.Sprintf("cd %s && %s indexing", shellQuote(cdDir), shellQuote(agentPath))
 	}
 

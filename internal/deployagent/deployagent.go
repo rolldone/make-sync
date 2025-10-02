@@ -292,6 +292,7 @@ func BuildAndDeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient,
 			remoteDir = filepath.Join(remoteDir, ".sync_temp")
 		} else {
 			remoteDir = filepath.Join(remoteDir, ".sync_temp")
+			remoteDir = filepath.ToSlash(remoteDir)
 		}
 	}
 
@@ -369,7 +370,7 @@ func DeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient, localAg
 		remotePath = strings.ReplaceAll(remotePath, "/", "\\")
 	} else {
 		remotePath = filepath.Join(remoteDir, agentBinaryName)
-		remotePath = strings.ReplaceAll(remotePath, "\\", "/")
+		remotePath = filepath.ToSlash(remotePath)
 	}
 
 	// Check if we should skip upload (unless Overwrite is true)
