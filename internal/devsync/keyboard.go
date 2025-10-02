@@ -1,8 +1,10 @@
 package devsync
 
 import (
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"make-sync/internal/events"
 	"make-sync/internal/util"
@@ -95,6 +97,9 @@ func (w *Watcher) handleKeyboardInput() {
 			switch input {
 			case "R", "r":
 				// _ = util.RestoreGlobal()
+				term.Restore(int(os.Stdin.Fd()), w.oldState)
+				fmt.Print("\033[2J\033[H")
+				time.Sleep(1000 * time.Millisecond)
 				w.HandleReloadCommand()
 			case "S", "s":
 				// _ = util.RestoreGlobal()
