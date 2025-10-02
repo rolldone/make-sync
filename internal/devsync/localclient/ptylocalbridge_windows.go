@@ -123,7 +123,7 @@ func (b *PTYLocalBridge) StartInteractiveShellWithCommand(command string) error 
 				}
 			}
 		}
-	}(ctx)
+	}(inCtx)
 	log.Println("Started local interactive shell in PTY, waiting for process to exit...")
 	if err := p.Wait(); err != nil {
 		fmt.Println("process exited:", err)
