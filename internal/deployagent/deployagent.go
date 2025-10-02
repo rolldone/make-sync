@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,16 +163,21 @@ func BuildAgentForTarget(opts BuildOptions) (string, error) {
 	}
 	if opts.SourceDir == "" && opts.ProjectRoot != "" {
 		opts.SourceDir = filepath.Join(opts.ProjectRoot, "sub_app", "agent")
+		log.Printf("🔍 DEBUG: SourceDir auto-resolved from ProjectRoot: %s -> %s", opts.ProjectRoot, opts.SourceDir)
 	}
 	if opts.OutputDir == "" && opts.ProjectRoot != "" {
 		opts.OutputDir = opts.ProjectRoot
+		log.Printf("🔍 DEBUG: OutputDir set from ProjectRoot: %s", opts.OutputDir)
 	}
+
+	log.Printf("🔍 DEBUG: Final paths - ProjectRoot: %s, SourceDir: %s, OutputDir: %s", opts.ProjectRoot, opts.SourceDir, opts.OutputDir)
 
 	// Validate source directory
 	if opts.SourceDir == "" {
 		return "", fmt.Errorf("source directory required")
 	}
 	if _, err := os.Stat(opts.SourceDir); os.IsNotExist(err) {
+		fmt.Printf("❌ DEBUG: Source directory check failed: %s\n", opts.SourceDir)
 		return "", fmt.Errorf("source directory does not exist: %s", opts.SourceDir)
 	}
 
@@ -202,26 +208,31 @@ func BuildAgentForTarget(opts BuildOptions) (string, error) {
 	// Build output path
 	outputPath := filepath.Join(opts.OutputDir, binaryName)
 
-	fmt.Printf("🔨 Building agent: %s (GOOS=%s) -> %s\n", opts.SourceDir, goos, outputPath)
+	log.Printf("🔨 DEBUG: Building agent - SourceDir: %s, GOOS: %s, OutputPath: %s", opts.SourceDir, goos, outputPath)
+	log.Printf("🔍 DEBUG: Binary name: %s, Binary will be created at: %s", binaryName, outputPath)
 
-	// Prepare build command
-	cmd := exec.Command("go", "build", "-o", outputPath, ".")
+	// Prepare build command with static linking flags for maximum compatibility
+	cmd := exec.Command("go", "build",
+		"-ldflags", "-w -s -extldflags '-static'", // Strip symbols and create static binary
+		"-o", outputPath, ".")
 	cmd.Dir = opts.SourceDir
 
 	// Prepare environment variables for cross-compilation
 	env := []string{}
 	for _, e := range os.Environ() {
-		// Skip existing GOOS/GOARCH/GOARM to avoid conflicts
+		// Skip existing GOOS/GOARCH/GOARM/CGO_ENABLED to avoid conflicts
 		if strings.HasPrefix(e, "GOOS=") ||
 			strings.HasPrefix(e, "GOARCH=") ||
-			strings.HasPrefix(e, "GOARM=") {
+			strings.HasPrefix(e, "GOARM=") ||
+			strings.HasPrefix(e, "CGO_ENABLED=") {
 			continue
 		}
 		env = append(env, e)
 	}
 
-	// Set target OS
+	// Set target OS and disable CGO for maximum compatibility
 	env = append(env, "GOOS="+goos)
+	env = append(env, "CGO_ENABLED=0")
 
 	// Detect remote architecture if SSH client provided
 	if opts.SSHClient != nil {
@@ -252,41 +263,62 @@ func BuildAgentForTarget(opts BuildOptions) (string, error) {
 	cmd.Env = env
 
 	// Execute build
+	log.Printf("🔧 DEBUG: Executing build command: %s", cmd.String())
+	log.Printf("🔧 DEBUG: Build environment variables: %v", cmd.Env)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("❌ Build failed: %v\n", err)
-		fmt.Printf("Build output: %s\n", string(output))
+		log.Printf("❌ DEBUG: Build failed: %v", err)
+		log.Printf("❌ DEBUG: Build output: %s", string(output))
 		return "", fmt.Errorf("build failed: %v\nOutput: %s", err, string(output))
 	}
 
 	if len(output) > 0 {
-		fmt.Printf("✅ Build output: %s\n", string(output))
+		log.Printf("✅ DEBUG: Build output: %s", string(output))
 	}
 
-	fmt.Printf("✅ Agent built successfully: %s\n", binaryName)
+	// Verify the output file exists
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		log.Printf("❌ DEBUG: Build output file does not exist: %s", outputPath)
+		return "", fmt.Errorf("build output file does not exist: %s", outputPath)
+	}
+
+	// Get file info for verification
+	if fileInfo, err := os.Stat(outputPath); err == nil {
+		log.Printf("✅ DEBUG: Built file verified - Path: %s, Size: %d bytes, Mode: %s", outputPath, fileInfo.Size(), fileInfo.Mode())
+	}
+
+	log.Printf("✅ DEBUG: Agent built successfully at: %s", outputPath)
 	return outputPath, nil
 }
 
 // BuildAndDeployAgent is a high-level function that builds and deploys an agent in one operation.
 // It orchestrates the build -> deploy -> verify workflow.
 func BuildAndDeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient, buildOpts BuildOptions, deployOpts DeployOptions) error {
+	log.Printf("🚀 DEBUG: Starting BuildAndDeployAgent with TargetOS: %s", buildOpts.TargetOS)
+
 	// Ensure config is passed to build options
 	buildOpts.Config = cfg
 
 	// Build agent
+	log.Printf("🔧 DEBUG: Starting agent build process...")
 	builtAgentPath, err := BuildAgentForTarget(buildOpts)
 	if err != nil {
+		log.Printf("❌ DEBUG: Agent build failed: %v", err)
 		return fmt.Errorf("build failed: %v", err)
 	}
+	log.Printf("✅ DEBUG: Agent built successfully at: %s", builtAgentPath)
 
 	// Determine remote directory
 	remoteDir := cfg.Devsync.Auth.RemotePath
+	log.Printf("📁 DEBUG: RemotePath from config: '%s'", remoteDir)
+
 	if remoteDir == "" {
 		if strings.Contains(strings.ToLower(deployOpts.OSTarget), "win") {
 			remoteDir = "%TEMP%\\.sync_temp"
 		} else {
 			remoteDir = "/tmp/.sync_temp"
 		}
+		log.Printf("📁 DEBUG: Using default remote directory: %s", remoteDir)
 	} else {
 		if strings.Contains(strings.ToLower(deployOpts.OSTarget), "win") {
 			remoteDir = filepath.Join(remoteDir, ".sync_temp")
@@ -294,10 +326,13 @@ func BuildAndDeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient,
 			remoteDir = filepath.Join(remoteDir, ".sync_temp")
 			remoteDir = filepath.ToSlash(remoteDir)
 		}
+		log.Printf("📁 DEBUG: Using configured remote directory: %s", remoteDir)
 	}
 
 	// Deploy agent
+	log.Printf("📤 DEBUG: Starting deployment to remote directory: %s", remoteDir)
 	if err := DeployAgent(ctx, cfg, ssh, builtAgentPath, remoteDir, deployOpts); err != nil {
+		log.Printf("❌ DEBUG: Deployment failed: %v", err)
 		return fmt.Errorf("deployment failed: %v", err)
 	}
 
@@ -335,33 +370,54 @@ func FindFallbackAgent(projectRoot, targetOS string) string {
 // DeployAgent uploads an agent binary, sets permissions, and handles identity checks.
 // This is the high-level function that orchestrates the deployment process.
 func DeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient, localAgentPath, remoteDir string, opts DeployOptions) error {
+	log.Printf("🚀 DEBUG: DeployAgent called with localPath: %s, remoteDir: %s", localAgentPath, remoteDir)
+
 	// Basic validation
 	if ssh == nil {
+		log.Printf("❌ DEBUG: SSH client is nil")
 		return fmt.Errorf("ssh client required")
 	}
+
+	// Check if local agent file exists
+	if localAgentPath == "" {
+		log.Printf("❌ DEBUG: localAgentPath is empty")
+		return fmt.Errorf("local agent path is required")
+	}
+	if _, err := os.Stat(localAgentPath); os.IsNotExist(err) {
+		log.Printf("❌ DEBUG: Local agent file does not exist: %s", localAgentPath)
+		return fmt.Errorf("local agent file does not exist: %s", localAgentPath)
+	}
+	log.Printf("✅ DEBUG: Local agent file exists: %s", localAgentPath)
+
 	if opts.Timeout == 0 {
 		opts.Timeout = 30 * time.Second
 	}
 	if opts.OSTarget == "" {
 		opts.OSTarget = "linux" // default assumption
 	}
+	log.Printf("⚙️ DEBUG: Deploy options - OSTarget: %s, Timeout: %v, Overwrite: %v", opts.OSTarget, opts.Timeout, opts.Overwrite)
 
 	// Create timeout context
 	timeoutCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
 	// Ensure remote directory exists
+	log.Printf("📁 DEBUG: Ensuring remote directory exists: %s", remoteDir)
 	if err := EnsureRemoteDir(ssh, remoteDir, opts.OSTarget); err != nil {
+		log.Printf("❌ DEBUG: Failed to create remote directory: %v", err)
 		return fmt.Errorf("failed to create remote directory: %v", err)
 	}
+	log.Printf("✅ DEBUG: Remote directory ensured: %s", remoteDir)
 
 	// Build remote file path using unique agent binary name
 	localConfig, err := config.GetOrCreateLocalConfig()
 	if err != nil {
+		log.Printf("❌ DEBUG: Failed to load local config: %v", err)
 		return fmt.Errorf("failed to load local config: %v", err)
 	}
 
 	agentBinaryName := localConfig.GetAgentBinaryName(opts.OSTarget)
+	log.Printf("🔧 DEBUG: Agent binary name from config: %s", agentBinaryName)
 
 	isWindows := strings.Contains(strings.ToLower(opts.OSTarget), "win")
 	var remotePath string
@@ -372,9 +428,11 @@ func DeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient, localAg
 		remotePath = filepath.Join(remoteDir, agentBinaryName)
 		remotePath = filepath.ToSlash(remotePath)
 	}
+	log.Printf("🎯 DEBUG: Final remote path constructed: %s (isWindows: %v)", remotePath, isWindows)
 
 	// Check if we should skip upload (unless Overwrite is true)
 	if !opts.Overwrite {
+		log.Printf("🔍 DEBUG: Checking if upload should be skipped (Overwrite=false)")
 		select {
 		case <-timeoutCtx.Done():
 			return fmt.Errorf("timeout during skip check")
@@ -383,30 +441,43 @@ func DeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient, localAg
 
 		shouldSkip, err := ShouldSkipUpload(ssh, localAgentPath, remotePath, opts.OSTarget)
 		if err == nil && shouldSkip {
+			log.Printf("⏭️ DEBUG: File is identical, skipping upload")
 			// File is identical, just ensure permissions and return
 			if err := SetExecutePermission(ssh, remotePath, opts.OSTarget); err != nil {
 				return fmt.Errorf("failed to set execute permission: %v", err)
 			}
+			log.Printf("✅ DEBUG: Permissions set, deployment complete")
 			return nil
 		}
+		log.Printf("🔄 DEBUG: File differs or error checking, proceeding with upload")
 		// If error or not identical, proceed with upload
+	} else {
+		log.Printf("🔄 DEBUG: Overwrite=true, forcing upload")
 	}
 
 	// Upload the file
+	log.Printf("📤 DEBUG: Starting file upload from %s to %s", localAgentPath, remotePath)
 	select {
 	case <-timeoutCtx.Done():
+		log.Printf("⏰ DEBUG: Timeout during upload")
 		return fmt.Errorf("timeout during upload")
 	default:
 	}
 
 	if err := ssh.UploadFile(localAgentPath, remotePath); err != nil {
+		log.Printf("❌ DEBUG: Upload failed: %v", err)
 		return fmt.Errorf("upload failed: %v", err)
 	}
+	log.Printf("✅ DEBUG: File uploaded successfully to %s", remotePath)
 
 	// Set execute permission on Unix
+	log.Printf("🔧 DEBUG: Setting execute permissions on %s", remotePath)
 	if err := SetExecutePermission(ssh, remotePath, opts.OSTarget); err != nil {
+		log.Printf("❌ DEBUG: Failed to set execute permission: %v", err)
 		return fmt.Errorf("failed to set execute permission: %v", err)
 	}
+	log.Printf("✅ DEBUG: Execute permissions set successfully")
 
+	log.Printf("🎉 DEBUG: DeployAgent completed successfully")
 	return nil
 }

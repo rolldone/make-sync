@@ -7,18 +7,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"make-sync/internal/config"
 	"make-sync/internal/deployagent"
 	"make-sync/internal/events"
 	"make-sync/internal/sshclient"
+	"make-sync/internal/syncdata"
 	"make-sync/internal/util"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -216,6 +215,7 @@ func (w *Watcher) Start() error {
 	}
 
 	w.safePrintf("🔍 Starting file watcher on: %s\n", absWatchPath)
+	log.Printf("🔍 DEBUG: Watch directory resolved - cfg.LocalPath: '%s', final absWatchPath: '%s'", w.config.LocalPath, absWatchPath)
 	util.Default.ClearLine()
 	w.safePrintf("📋 Watch permissions - Add: %v, Change: %v, Unlink: %v, UnlinkFolder: %v\n",
 		w.config.Devsync.TriggerPerm.Add,
@@ -380,10 +380,10 @@ func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
 }
 
 // collectPreprocessedIgnoresFromRoot walks the project root and collects .sync_ignore
-// patterns with light preprocessing similar to internal/syncdata. It returns a sorted,
-// de-duplicated list and always includes core defaults.
+// patterns with advanced preprocessing using IgnoreCache system. It returns a sorted,
+// de-duplicated list with proper negation pattern priority support.
 func (w *Watcher) collectPreprocessedIgnoresFromRoot(root string) []string {
-	// determine root
+	// Determine root
 	r := strings.TrimSpace(root)
 	if r == "" {
 		if wd, err := os.Getwd(); err == nil {
@@ -392,68 +392,25 @@ func (w *Watcher) collectPreprocessedIgnoresFromRoot(root string) []string {
 			r = "."
 		}
 	}
-	// use a set to dedupe
-	found := map[string]struct{}{}
-	// default ignores
-	defaults := []string{".sync_temp", "make-sync.yaml", ".sync_ignore", ".sync_collections"}
-	for _, d := range defaults {
-		found[d] = struct{}{}
+
+	// Use IgnoreCache system to get properly processed patterns with negation support
+	ignoreCache := syncdata.NewIgnoreCache(r)
+
+	// Get all processed patterns from IgnoreCache
+	// This includes proper negation pattern handling and priority logic
+	allPatterns := ignoreCache.GetAllPatterns()
+
+	log.Printf("🔍 DEBUG: Agent config - loaded %d patterns with negation support from IgnoreCache", len(allPatterns))
+	for i, pattern := range allPatterns {
+		if i < 10 { // Show first 10 patterns
+			log.Printf("  [%d] %s", i, pattern)
+		} else if i == 10 {
+			log.Printf("  ... and %d more patterns", len(allPatterns)-10)
+			break
+		}
 	}
 
-	// walk the tree and read .sync_ignore files
-	_ = filepath.WalkDir(r, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if strings.EqualFold(d.Name(), ".sync_ignore") {
-			data, rerr := os.ReadFile(p)
-			if rerr != nil {
-				return nil
-			}
-			lines := strings.Split(string(data), "\n")
-			for _, ln := range lines {
-				l := strings.TrimSpace(ln)
-				if l == "" || strings.HasPrefix(l, "#") {
-					continue
-				}
-				neg := false
-				if strings.HasPrefix(l, "!") {
-					neg = true
-					l = strings.TrimPrefix(l, "!")
-				}
-				// normalize to forward slashes
-				l = filepath.ToSlash(l)
-				if strings.Contains(l, "/") || strings.Contains(l, "**") {
-					if neg {
-						found["!"+l] = struct{}{}
-					} else {
-						found[l] = struct{}{}
-					}
-					continue
-				}
-				// add both simple and recursive variants
-				if neg {
-					found["!"+l] = struct{}{}
-					found["!**/"+l] = struct{}{}
-				} else {
-					found[l] = struct{}{}
-					found["**/"+l] = struct{}{}
-				}
-			}
-		}
-		return nil
-	})
-
-	// convert to sorted slice
-	out := make([]string, 0, len(found))
-	for k := range found {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return allPatterns
 }
 
 // stringSliceEqual checks equality disregarding order (since we sort both callers)
@@ -1109,8 +1066,14 @@ func (w *Watcher) buildAndDeployAgent() error {
 		return nil
 	}
 
-	// Get project root
-	projectRoot := filepath.Dir(w.watchPath)
+	// Get project root using proper detection (handles symlinks and cross-directory execution)
+	projectRoot, err := util.GetProjectRoot()
+	if err != nil {
+		return fmt.Errorf("failed to detect project root: %v", err)
+	}
+
+	// Temporary debug to verify fix
+	fmt.Printf("🔍 WATCHER DEBUG: Project Root detected as: %s\n", projectRoot)
 
 	// Prepare unified deployment options
 	deployOpts := deployagent.UnifiedDeployOptions{
@@ -1249,6 +1212,12 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 
 	// Check permissions using snapshot
 	if cfgSnapshot != nil {
+		// Debug: log file events for docker-compose.yml specifically
+		eventPath := event.Path()
+		if strings.Contains(eventPath, "docker-compose.yml") {
+			log.Printf("🔍 DEBUG: File event detected for docker-compose.yml: type=%v, path=%s", eventType, eventPath)
+		}
+
 		switch eventType {
 		case EventCreate:
 			if !cfgSnapshot.Devsync.TriggerPerm.Add {
@@ -1521,46 +1490,17 @@ func (w *Watcher) mapNotifyEvent(event notify.Event) EventType {
 }
 
 func (w *Watcher) shouldIgnore(path string) bool {
-	// Core ignores that are ALWAYS applied
-	coreIgnores := []string{
-		".sync_collections",
-		".sync_temp",
-		"make-sync.yaml",
-		".sync_ignore",
+	// Use new IgnoreCache system for .sync_ignore files
+	ignoreCache := syncdata.NewIgnoreCache(w.watchPath)
+	isDir := false
+
+	// Check if path is directory
+	if stat, err := os.Stat(path); err == nil && stat.IsDir() {
+		isDir = true
 	}
 
-	for _, ignore := range coreIgnores {
-		if w.matchesPattern(path, ignore) {
-			return true
-		}
-	}
-
-	if strings.Contains(path, ".sync_temp") {
-		return true
-	}
-
-	// Extended ignores - loadExtendedIgnores is concurrency-safe and returns a copy
-	extended := w.loadExtendedIgnores()
-	for _, ignore := range extended {
-		if w.matchesPattern(path, ignore) {
-			return true
-		}
-	}
-
-	// Snapshot config for user-configured ignores
-	w.configMu.RLock()
-	cfg := w.config
-	w.configMu.RUnlock()
-
-	if cfg != nil {
-		for _, ignore := range cfg.Devsync.Ignores {
-			if w.matchesPattern(path, ignore) {
-				return true
-			}
-		}
-	}
-
-	return false
+	// Use the new ignore system with negation pattern support
+	return ignoreCache.Match(path, isDir)
 }
 
 // filepath: /home/donny/workspaces/make-sync/internal/devsync/watcher.go

@@ -287,6 +287,8 @@ func init() {
 	rootCmd.AddCommand(execCmd)
 	// register devsync command
 	rootCmd.AddCommand(devsyncCmd)
+	// register path-info command
+	rootCmd.AddCommand(pathinfoCmd)
 }
 
 func showRecentWorkspacesMenu() {

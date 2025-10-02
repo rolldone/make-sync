@@ -1,6 +1,7 @@
 package util
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,25 +21,92 @@ func GetProjectRoot() (string, error) {
 		return "", err
 	}
 
-	// Resolve symlinks if any
+	// Store original path for debug
+	originalExePath := exePath
+
+	// Debug current working directory vs executable (uncomment for debugging)
+	// wd, _ := os.Getwd()
+	// fmt.Printf("DEBUG: Working Directory: %s\n", wd)
+	// fmt.Printf("DEBUG: Executable (original): %s\n", originalExePath)
+
+	// Resolve symlinks if any - this handles cases where executable is symlinked
+	// from /usr/local/bin/make-sync to actual project location
 	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
 		exePath = resolved
 	}
 
-	// Check if we're running in development mode (go run)
-	// go run creates temporary executables in system temp directory
+	// Strategy: Always try executable location first, then fallback to working directory
+	// This ensures consistent behavior regardless of where user runs the command
+
+	var projectRoot string
+	var detectionError error
+
 	if isDevelopmentMode(exePath) {
-		// In development mode, find project root by looking for go.mod
-		root, err := findProjectRootFromWorkingDir()
-		// Debug: uncomment to see path detection
-		// fmt.Printf("DEBUG: Development mode detected. Executable: %s, Project root: %s\n", exePath, root)
-		return root, err
+		// fmt.Printf("DEBUG: Development mode detected\n")
+
+		// In development mode, executable is in temp dir, so use working directory
+		// But validate that working directory actually contains a go project
+		projectRoot, detectionError = findProjectRootFromWorkingDir()
+		if detectionError != nil {
+			// fmt.Printf("DEBUG: Failed to find project root from working dir: %v\n", detectionError)
+			return "", detectionError
+		}
+
+		// Additional validation: ensure this is actually the make-sync project
+		// by checking for expected structure
+		if !isValidMakeSyncProject(projectRoot) {
+			// If working dir is not make-sync project, try to find it
+			// This handles the case where user is in a different project
+			actualRoot, err := findMakeSyncProjectRoot()
+			if err == nil {
+				// fmt.Printf("DEBUG: Working dir is not make-sync project, using detected: %s\n", actualRoot)
+				projectRoot = actualRoot
+			} else {
+				// fmt.Printf("DEBUG: Could not find make-sync project, using working dir: %s\n", projectRoot)
+			}
+		}
+
+		// fmt.Printf("DEBUG: Development mode final root: %s\n", projectRoot)
+	} else {
+		// fmt.Printf("DEBUG: Production mode detected\n")
+
+		// Production mode: project root is the directory containing the executable
+		// After symlink resolution, this should now point to the actual project location
+		projectRoot = filepath.Dir(exePath)
+
+		// Additional safety check: if we resolved a symlink and the resolved path
+		// doesn't contain go.mod, try searching upward from the resolved location
+		if originalExePath != exePath {
+			if _, err := os.Stat(filepath.Join(projectRoot, "go.mod")); os.IsNotExist(err) {
+				// Symlink was resolved but go.mod not found at executable location
+				// Try searching upward from resolved path
+				if foundRoot, err := findProjectRootFromPath(projectRoot); err == nil {
+					projectRoot = foundRoot
+				}
+			}
+		}
+
+		// fmt.Printf("DEBUG: Production mode final root: %s\n", projectRoot)
 	}
 
-	// Production mode: project root is the directory containing the executable
+	return projectRoot, nil // Production mode: project root is the directory containing the executable
+	// After symlink resolution, this should now point to the actual project location
 	root := filepath.Dir(exePath)
+
+	// Additional safety check: if we resolved a symlink and the resolved path
+	// doesn't contain go.mod, try searching upward from the resolved location
+	if originalExePath != exePath {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); os.IsNotExist(err) {
+			// Symlink was resolved but go.mod not found at executable location
+			// Try searching upward from resolved path
+			if foundRoot, err := findProjectRootFromPath(root); err == nil {
+				root = foundRoot
+			}
+		}
+	}
+
 	// Debug: uncomment to see path detection
-	// fmt.Printf("DEBUG: Production mode detected. Executable: %s, Project root: %s\n", exePath, root)
+	fmt.Printf("DEBUG: Production mode detected. Original: %s, Resolved: %s, Project root: %s\n", originalExePath, exePath, root)
 	return root, nil
 }
 
@@ -177,4 +245,63 @@ func GetProjectRootFromCaller() (string, error) {
 
 	// Start searching from the directory containing the caller
 	return findProjectRootFromPath(filepath.Dir(filename))
+}
+
+// isValidMakeSyncProject checks if the given path contains make-sync project structure
+func isValidMakeSyncProject(projectPath string) bool {
+	// Check for go.mod with make-sync module
+	goModPath := filepath.Join(projectPath, "go.mod")
+	if content, err := os.ReadFile(goModPath); err == nil {
+		// Check if go.mod contains "module make-sync"
+		if strings.Contains(string(content), "module make-sync") {
+			return true
+		}
+	}
+
+	// Alternative check: look for make-sync specific structure
+	agentPath := filepath.Join(projectPath, "sub_app", "agent")
+	if _, err := os.Stat(agentPath); err == nil {
+		// Also check for main.go in root
+		mainGoPath := filepath.Join(projectPath, "main.go")
+		if _, err := os.Stat(mainGoPath); err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+// findMakeSyncProjectRoot tries to find make-sync project root using various strategies
+func findMakeSyncProjectRoot() (string, error) {
+	// Strategy 1: Check if executable path resolution gives us the answer
+	if exePath, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+			// Try from executable location upward
+			if root, err := findProjectRootFromPath(filepath.Dir(resolved)); err == nil {
+				if isValidMakeSyncProject(root) {
+					return root, nil
+				}
+			}
+		}
+	}
+
+	// Strategy 2: Look in common locations relative to executable
+	if _, err := os.Executable(); err == nil {
+		// If executable is in /usr/local/bin, /usr/bin, etc.,
+		// make-sync might be installed, check common source locations
+		commonPaths := []string{
+			"/home/donny/workspaces/make-sync",
+			"/mnt/sda/workspaces/make-sync",
+			"/workspaces/make-sync",
+		}
+
+		for _, path := range commonPaths {
+			if isValidMakeSyncProject(path) {
+				return path, nil
+			}
+		}
+	}
+
+	// Strategy 3: Search upward from working directory as last resort
+	return findProjectRootFromWorkingDir()
 }
