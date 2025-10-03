@@ -4,25 +4,22 @@
 package devsync
 
 import (
-	"fmt"
 	"os"
 	"syscall"
 	"time"
 
-	"github.com/eiannone/keyboard"
 	"golang.org/x/term"
 )
 
 func FlushAllStdinNonBlocking() {
-	fmt.Print("Press any key to continue...")
-	err := keyboard.Open()
-	if err != nil {
-		panic(err)
-	}
-	defer keyboard.Close()
-	// Tunggu satu key apa saja, langsung lanjut
-	_, _, _ = keyboard.GetKey()
-	fmt.Println()
+	// fmt.Print("Press any key to continue...")
+	// err := keyboard.Open()
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// defer keyboard.Close()
+	// // Tunggu satu key apa saja, langsung lanjut
+	// _, _, _ = keyboard.GetKey()
 }
 
 // flushStdin flushes the Windows console input buffer (best-effort)

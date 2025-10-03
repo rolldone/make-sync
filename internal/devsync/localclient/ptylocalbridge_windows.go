@@ -378,13 +378,6 @@ func (b *PTYLocalBridge) resetConsoleMode() error {
 }
 
 func (b *PTYLocalBridge) Resume() error {
-	// load cached output first
-	b.cacheMu.Lock()
-	if len(b.outputCache) > 0 {
-		fmt.Print(string(b.outputCache))
-	}
-	b.cacheMu.Unlock()
-
 	err := util.ResetRaw(b.oldState)
 	if err != nil {
 		return fmt.Errorf("failed to snapshot terminal state: %v", err)
@@ -395,6 +388,13 @@ func (b *PTYLocalBridge) Resume() error {
 	}
 	b.oldState = odlState
 
+	// load cached output first
+	b.cacheMu.Lock()
+	if len(b.outputCache) > 0 {
+		fmt.Print(string(b.outputCache))
+	}
+	b.cacheMu.Unlock()
+
 	b.outputMu.Lock()
 	b.outputDisabled = false
 	b.outputMu.Unlock()
@@ -404,7 +404,6 @@ func (b *PTYLocalBridge) Resume() error {
 	b.inputCancel = inCancel
 	b.ProcessPTYReadInput(inCtx)
 
-	fmt.Println("PTYLocalBridge: reader resumed")
 	if b.localPTY != nil {
 		// re-expose stdin writer
 		b.SetStdinWriter(b.localPTY.InPipe())
