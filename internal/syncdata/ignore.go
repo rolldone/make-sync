@@ -2,7 +2,6 @@ package syncdata
 
 import (
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,14 +25,17 @@ func NewIgnoreCache(absRoot string) *IgnoreCache {
 	return &IgnoreCache{Root: absRoot, cache: map[string]*ig.GitIgnore{}, rawLinesCache: map[string][]string{}}
 }
 
+// ClearCache invalidates all cached matchers and raw lines, forcing reload on next Match call.
+func (c *IgnoreCache) ClearCache() {
+	c.cache = map[string]*ig.GitIgnore{}
+	c.rawLinesCache = map[string][]string{}
+}
+
 // Match returns true if the given path (absolute or relative) should be ignored.
 // isDir indicates whether the path refers to a directory.
 func (c *IgnoreCache) Match(path string, isDir bool) bool {
 	// PRIORITY CHECK: If file matches any negation pattern (!), include immediately
 	if c.matchesPriorityIncludes(path, isDir) {
-		if strings.Contains(path, "docker-compose.yml") {
-			log.Printf("🔍 DEBUG: docker-compose.yml matched priority include pattern - NOT IGNORED")
-		}
 		return false // Not ignored - priority include
 	}
 
@@ -76,22 +78,26 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 	}
 
 	// Build or reuse a cumulative matcher for the target directory 'dir'
-	if m, ok := c.cache[dir]; ok {
+	if m, ok := c.cache[dir]; ok && !strings.Contains(path, ".git") {
 		if m == nil {
 			return false
 		}
-		relp, _ := filepath.Rel(dir, path)
+		relp, _ := filepath.Rel(c.Root, path)
 		relp = filepath.ToSlash(relp)
+
+		var result bool
 		if strings.HasPrefix(strings.ToLower(runtime.GOOS), "windows") {
-			if m.MatchesPath(strings.ToLower(relp)) {
-				return true
+			result = m.MatchesPath(strings.ToLower(relp))
+			if !result {
+				result = m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
 			}
-			return m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
+		} else {
+			result = m.MatchesPath(relp)
+			if !result {
+				result = m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
+			}
 		}
-		if m.MatchesPath(relp) {
-			return true
-		}
-		return m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
+		return result
 	}
 
 	// Collect preprocessed lines from each ancestor in order
@@ -111,7 +117,6 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 				for _, ln := range rawLines {
 					l := strings.TrimSpace(ln)
 					if l == "" || strings.HasPrefix(l, "#") {
-						lines = append(lines, ln)
 						continue
 					}
 					neg := false
@@ -141,9 +146,10 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 				cumulative = append(cumulative, lines...)
 				continue
 			}
+		} else {
+			// .sync_ignore not found, mark empty to avoid repeated stat calls
+			c.rawLinesCache[td] = nil
 		}
-		// mark empty to avoid repeated stat calls
-		c.rawLinesCache[td] = nil
 	}
 
 	if len(cumulative) == 0 {
@@ -153,30 +159,36 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 
 	m := ig.CompileIgnoreLines(cumulative...)
 	c.cache[dir] = m
-	relp, _ := filepath.Rel(dir, path)
+	relp, _ := filepath.Rel(c.Root, path)
 	relp = filepath.ToSlash(relp)
+
+	if strings.Contains(path, ".git") {
+		// Git path handling - no special logic needed
+	}
 
 	var result bool
 	if strings.HasPrefix(strings.ToLower(runtime.GOOS), "windows") {
-		if m.MatchesPath(strings.ToLower(relp)) {
-			result = true
-		} else {
+		result = m.MatchesPath(strings.ToLower(relp))
+		if !result {
 			result = m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
 		}
 	} else {
-		if m.MatchesPath(relp) {
-			result = true
-		} else {
-			result = m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
+		result = m.MatchesPath(relp)
+		if !result {
+			baseResult := m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
+			result = baseResult
 		}
 	}
 
-	// Debug: log result for docker-compose.yml specifically
+	if strings.Contains(path, ".git") {
+	}
+
 	if strings.Contains(path, "docker-compose.yml") {
-		log.Printf("🔍 DEBUG: docker-compose.yml ignore result: %v (relp=%s, patterns=%d)", result, relp, len(cumulative))
 		if len(cumulative) <= 10 {
-			log.Printf("🔍 DEBUG: All patterns: %v", cumulative)
 		}
+	}
+
+	if strings.Contains(path, ".git") {
 	}
 
 	return result
@@ -186,7 +198,6 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 	// Debug for docker-compose.yml
 	if strings.Contains(path, "docker-compose.yml") {
-		log.Printf("🔍 DEBUG: matchesPriorityIncludes called for docker-compose.yml")
 	}
 	dir := path
 	if !isDir {
@@ -252,13 +263,11 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 
 	if len(priorityPatterns) == 0 {
 		if strings.Contains(path, "docker-compose.yml") {
-			log.Printf("🔍 DEBUG: No priority patterns found for docker-compose.yml")
 		}
 		return false
 	}
 
 	if strings.Contains(path, "docker-compose.yml") {
-		log.Printf("🔍 DEBUG: Priority patterns found for docker-compose.yml: %v", priorityPatterns)
 	}
 
 	// Test against priority patterns
@@ -267,7 +276,6 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 	relp = filepath.ToSlash(relp)
 
 	if strings.Contains(path, "docker-compose.yml") {
-		log.Printf("🔍 DEBUG: Testing docker-compose.yml - dir=%s, path=%s, relp=%s", dir, path, relp)
 	}
 
 	if strings.HasPrefix(strings.ToLower(runtime.GOOS), "windows") {
@@ -276,7 +284,6 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 			result = m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
 		}
 		if strings.Contains(path, "docker-compose.yml") {
-			log.Printf("🔍 DEBUG: Windows matching result for docker-compose.yml: %v", result)
 		}
 		return result
 	}
@@ -285,7 +292,6 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 		result = m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
 	}
 	if strings.Contains(path, "docker-compose.yml") {
-		log.Printf("🔍 DEBUG: Non-Windows matching result for docker-compose.yml: %v", result)
 	}
 	return result
 }

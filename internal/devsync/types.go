@@ -9,6 +9,7 @@ import (
 
 	"make-sync/internal/config"
 	"make-sync/internal/sshclient"
+	"make-sync/internal/syncdata"
 	"make-sync/internal/util"
 
 	"github.com/asaskevich/EventBus"
@@ -91,16 +92,17 @@ type Watcher struct {
 	eventChan         chan FileEvent
 	lastEvents        map[string]FileEvent // For debouncing
 	sshClient         *sshclient.SSHClient
-	extendedIgnores   []string            // Cached extended ignore patterns
-	ignoreFileModTime time.Time           // Last modification time of .sync_ignore file
-	fileCache         *FileCache          // File metadata cache
-	sessions          map[string]*Session // Active sessions
-	sessionCounter    int                 // For generating unique IDs
-	keyboardStop      chan bool           // Channel to stop keyboard input during sessions
-	keyboardRestart   chan bool           // Channel to restart keyboard input after sessions
-	keyboardStopped   chan struct{}       // Ack channel: keyboard handler signals when it has stopped
-	eventBus          EventBus.Bus        // Event bus for inter-component communication
-	commands          *CommandManager     // Command manager for all command operations
+	extendedIgnores   []string              // Cached extended ignore patterns
+	ignoreFileModTime time.Time             // Last modification time of .sync_ignore file
+	ignoreCache       *syncdata.IgnoreCache // Cached IgnoreCache instance for .sync_ignore patterns
+	fileCache         *FileCache            // File metadata cache
+	sessions          map[string]*Session   // Active sessions
+	sessionCounter    int                   // For generating unique IDs
+	keyboardStop      chan bool             // Channel to stop keyboard input during sessions
+	keyboardRestart   chan bool             // Channel to restart keyboard input after sessions
+	keyboardStopped   chan struct{}         // Ack channel: keyboard handler signals when it has stopped
+	eventBus          EventBus.Bus          // Event bus for inter-component communication
+	commands          *CommandManager       // Command manager for all command operations
 
 	// notify stop control - used to stop only the file-notify subsystem
 	notifyStopOnce sync.Once

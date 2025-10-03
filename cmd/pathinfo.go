@@ -244,7 +244,7 @@ func isDevelopmentMode(exePath string) bool {
 
 // runIgnorePatternsSimulation tests ignore patterns against sample files
 func runIgnorePatternsSimulation(projectRoot string) {
-	// Use current working directory for ignore simulation instead of make-sync project root
+	// Use current working directory for ignore simulation to test local .sync_ignore files
 	wd, err := os.Getwd()
 	if err != nil {
 		fmt.Printf("❌ Cannot run simulation: Failed to get working directory: %v\n", err)
@@ -283,22 +283,22 @@ func runIgnorePatternsSimulation(projectRoot string) {
 		fmt.Printf("✅ Found .sync_ignore file\n")
 
 		// Show patterns being used
-		allPatterns := ignoreCache.GetAllPatterns()
-		if len(allPatterns) > 0 {
-			fmt.Printf("📋 Active patterns (%d total):\n", len(allPatterns))
-			for i, pattern := range allPatterns {
-				if i < 10 { // Show first 10
-					status := "🔸"
-					if strings.HasPrefix(pattern, "!") {
-						status = "🔹" // Different icon for negation
-					}
-					fmt.Printf("   %s %s\n", status, pattern)
-				} else if i == 10 {
-					fmt.Printf("   ... and %d more patterns\n", len(allPatterns)-10)
-					break
-				}
-			}
-		}
+		// allPatterns := ignoreCache.GetAllPatterns()
+		// if len(allPatterns) > 0 {
+		fmt.Printf("📋 Active patterns (unknown total):\n")
+		// for i, pattern := range allPatterns {
+		// 	if i < 10 { // Show first 10
+		// 		status := "🔸"
+		// 		if strings.HasPrefix(pattern, "!") {
+		// 			status = "🔹" // Different icon for negation
+		// 		}
+		// 		fmt.Printf("   %s %s\n", status, pattern)
+		// 	} else if i == 10 {
+		// 		fmt.Printf("   ... and %d more patterns\n", len(allPatterns)-10)
+		// 		break
+		// 	}
+		// }
+		// }
 	} else {
 		fmt.Printf("ℹ️  No .sync_ignore file found, using defaults only\n")
 	}

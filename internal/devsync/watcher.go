@@ -1193,6 +1193,7 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 		w.ignoresMu.Lock()
 		w.extendedIgnores = nil
 		w.ignoreFileModTime = time.Time{}
+		w.ignoreCache = nil // Clear the IgnoreCache instance to force reload
 		w.ignoresMu.Unlock()
 	}
 
@@ -1489,8 +1490,19 @@ func (w *Watcher) mapNotifyEvent(event notify.Event) EventType {
 }
 
 func (w *Watcher) shouldIgnore(path string) bool {
-	// Use new IgnoreCache system for .sync_ignore files
-	ignoreCache := syncdata.NewIgnoreCache(w.watchPath)
+	// Use cached IgnoreCache instance for .sync_ignore files
+	w.ignoresMu.RLock()
+	ignoreCache := w.ignoreCache
+	w.ignoresMu.RUnlock()
+
+	// Create new instance if not cached
+	if ignoreCache == nil {
+		ignoreCache = syncdata.NewIgnoreCache(w.watchPath)
+		w.ignoresMu.Lock()
+		w.ignoreCache = ignoreCache
+		w.ignoresMu.Unlock()
+	}
+
 	isDir := false
 
 	// Check if path is directory
@@ -1498,17 +1510,18 @@ func (w *Watcher) shouldIgnore(path string) bool {
 		isDir = true
 	}
 
-	// Use the new ignore system with negation pattern support
+	// Use the cached ignore system with negation pattern support
 	return ignoreCache.Match(path, isDir)
 }
 
 // filepath: /home/donny/workspaces/make-sync/internal/devsync/watcher.go
 func (w *Watcher) ReloadWatchPatterns() error {
 	// Build new patterns off-line if needed (not holding locks)
-	// Invalidate cached extended ignores under write lock
+	// Invalidate cached extended ignores and IgnoreCache under write lock
 	w.ignoresMu.Lock()
 	w.extendedIgnores = nil
 	w.ignoreFileModTime = time.Time{}
+	w.ignoreCache = nil // Clear the IgnoreCache instance to force reload
 	w.ignoresMu.Unlock()
 
 	// Preload extended ignores (will populate cache safely)
