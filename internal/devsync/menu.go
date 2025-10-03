@@ -24,12 +24,6 @@ var promptMu sync.Mutex
 
 // displayMainMenu moved to view so watcher UI code is grouped
 func (w *Watcher) displayMainMenu() {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		w.safePrintln("⚠️  failed to snapshot terminal state:", err)
-		os.Exit(1)
-	}
-	w.oldState = oldState
 	lines := []string{
 		"🔧 DevSync Main Menu",
 		"====================",
@@ -64,14 +58,16 @@ func (w *Watcher) showCommandMenuDisplay() {
 
 	// Snapshot config for local use in this function to avoid repeated nil-checks
 	cfg := w.config
+	var oldStateHead *term.State
 	for {
+		util.ResetRaw(oldStateHead)
+		oldstate, err := util.NewRaw()
+		if err != nil {
+			w.safePrintln("⚠️  failed to enable raw mode:", err)
+			return
+		}
+		oldStateHead = oldstate
 		slot := w.Slot
-		// oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-		// if err != nil {
-		// 	w.safePrintln("⚠️  failed to enable raw mode:", err)
-		// 	os.Exit(1)
-		// }
-		// w.oldState = oldState
 
 		if *slot == 1 {
 			w.displayMainMenu()
@@ -88,6 +84,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 			if err := w.ptyMgr.Focus(*slot, true, callback); err != nil {
 				w.safePrintf("❌ Failed to focus slot %d: %v\n", *slot, err)
 			}
+			FlushAllStdinNonBlocking()
 			continue
 		} else {
 		}
@@ -135,6 +132,11 @@ func (w *Watcher) showCommandMenuDisplay() {
 			HideHelp: true,
 		}
 
+		// oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+		// if err != nil {
+		// 	w.safePrintln("⚠️  failed to snapshot terminal state:", err)
+		// 	return
+		// }
 		i, result, err := prompt.Run()
 		promptMu.Unlock()
 
@@ -240,11 +242,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 				log.Println("DEBUG: attaching to local slot", *slot, "isExist=", isExist)
 				if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
 					util.Default.Printf("⚠️  Failed to focus local slot %d: %v\n", *slot, err)
-					util.Default.Resume()
-				} else {
-					util.Default.Resume()
 				}
-				// sendKeyA()
+				FlushAllStdinNonBlocking()
 				continue
 			}
 
@@ -255,8 +254,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 			} else {
 				util.Default.PrintBlock(out, true)
 			}
-			// sendKeyA()
-			util.Default.Resume()
+			FlushAllStdinNonBlocking()
 			continue
 		}
 
@@ -360,10 +358,8 @@ func (w *Watcher) showCommandMenuDisplay() {
 			util.Default.PrintBlock(fmt.Sprintf("🔗 Attaching to slot %d ...", *slot), true)
 			if err := w.ptyMgr.Focus(*slot, isExist, callback); err != nil {
 				util.Default.Printf("⚠️  Failed to focus slot %d: %v\n", *slot, err)
-				util.Default.Resume()
-			} else {
-				util.Default.Resume()
 			}
+			FlushAllStdinNonBlocking()
 		}
 	}
 }

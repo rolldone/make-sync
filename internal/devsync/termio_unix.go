@@ -5,6 +5,7 @@ package devsync
 
 import (
 	"log"
+	"make-sync/internal/util"
 	"os"
 	"syscall"
 	"time"
@@ -124,4 +125,20 @@ func waitAnyKey() {
 	}
 	buf := make([]byte, 1)
 	_, _ = os.Stdin.Read(buf)
+}
+
+func FlushAllStdinNonBlocking() {
+	fd := int(os.Stdin.Fd())
+	util.Default.Println("Press any key to continue...")
+	// Set stdin ke non-blocking
+	_ = syscall.SetNonblock(fd, true)
+	defer syscall.SetNonblock(fd, false)
+
+	var buf [1]byte
+	for {
+		n, err := os.Stdin.Read(buf[:])
+		if n == 0 || err != nil {
+			break
+		}
+	}
 }

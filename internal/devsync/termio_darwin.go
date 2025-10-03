@@ -5,10 +5,26 @@ package devsync
 
 import (
 	"os"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
 )
+
+func FlushAllStdinNonBlocking() {
+	fd := int(os.Stdin.Fd())
+	// Set stdin ke non-blocking
+	_ = syscall.SetNonblock(fd, true)
+	defer syscall.SetNonblock(fd, false)
+
+	var buf [1]byte
+	for {
+		n, err := os.Stdin.Read(buf[:])
+		if n == 0 || err != nil {
+			break
+		}
+	}
+}
 
 // On darwin some ioctl constants used on Linux/BSD are not available. Provide
 // a conservative, portable implementation: flushStdin is a best-effort no-op

@@ -321,6 +321,9 @@ func (b *PTYLocalBridge) Close() error {
 func (b *PTYLocalBridge) Pause() error {
 	// Matikan output & allow caching
 
+	b.localPTY.Write([]byte("\x1b")) // ensure prompt ends cleanly
+	b.localPTY.Write([]byte("\x08")) // send backspace to clear any partial input
+
 	b.outputMu.Lock()
 	b.outputDisabled = true
 	b.outputMu.Unlock()
@@ -379,7 +382,6 @@ func (b *PTYLocalBridge) Resume() error {
 	b.cacheMu.Lock()
 	if len(b.outputCache) > 0 {
 		fmt.Print(string(b.outputCache))
-		b.outputCache = nil
 	}
 	b.cacheMu.Unlock()
 
@@ -407,6 +409,10 @@ func (b *PTYLocalBridge) Resume() error {
 		// re-expose stdin writer
 		b.SetStdinWriter(b.localPTY.InPipe())
 	}
+
+	b.localPTY.Write([]byte("\x1b\x08")) // ensure prompt ends cleanly and clear any partial input
+	b.outputCache = nil
+
 	return nil
 }
 

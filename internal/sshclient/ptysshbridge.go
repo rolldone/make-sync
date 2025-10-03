@@ -521,6 +521,9 @@ func (bridge *PTYSSHBridge) ProcessPTYReadOutput(ctx context.Context) error {
 // Pause stops stdin/output
 func (bridge *PTYSSHBridge) Pause() error {
 
+	bridge.localPTY.Write([]byte("\x1b")) // ensure prompt ends cleanly
+	bridge.localPTY.Write([]byte("\x08")) // send backspace to clear any partial input
+
 	bridge.outputMu.Lock()
 	bridge.outputDisabled = true
 	bridge.outputMu.Unlock()
@@ -542,7 +545,6 @@ func (bridge *PTYSSHBridge) Resume() error {
 	bridge.cacheMu.Lock()
 	if len(bridge.outputCache) > 0 {
 		fmt.Print(string(bridge.outputCache))
-		bridge.outputCache = nil
 	}
 	bridge.cacheMu.Unlock()
 
@@ -559,6 +561,9 @@ func (bridge *PTYSSHBridge) Resume() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	bridge.inputCancel = cancel
 	bridge.ProcessPTYReadInput(ctx)
+
+	bridge.localPTY.Write([]byte("\x1b")) // ensure prompt ends cleanly
+	bridge.localPTY.Write([]byte("\x08")) // send backspace to clear any partial input
 
 	return nil
 }

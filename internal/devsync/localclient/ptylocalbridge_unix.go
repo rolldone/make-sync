@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"time"
 
 	"golang.org/x/term"
 
@@ -65,6 +64,8 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 
 	b.ProcessPTYReadOutput(outCtx)
 	b.ProcessPTYReadInput(inCtx)
+
+	b.localPTY.Write([]byte("\n")) // ensure prompt starts on new line
 
 	err = cmd.Wait()
 	// invoke exit listener if set
@@ -195,6 +196,9 @@ func (b *PTYLocalBridge) ProcessPTYReadOutput(ctx context.Context) error {
 
 func (b *PTYLocalBridge) Pause() error {
 
+	b.localPTY.Write([]byte("\x1b")) // ensure prompt ends cleanly
+	b.localPTY.Write([]byte("\x08")) // send backspace to clear any partial input
+
 	util.ResetRaw(b.oldState)
 
 	b.outputMu.Lock()
@@ -205,7 +209,6 @@ func (b *PTYLocalBridge) Pause() error {
 		b.inputCancel()
 	}
 
-	time.Sleep(1 * time.Second)
 	return nil
 }
 
@@ -220,9 +223,9 @@ func (b *PTYLocalBridge) Resume() error {
 
 	// load cached output first
 	b.cacheMu.Lock()
-	if len(b.outputCache) > 0 {
+	earlyTotal := len(b.outputCache)
+	if earlyTotal > 0 {
 		fmt.Print(string(b.outputCache))
-		b.outputCache = nil
 	}
 	b.cacheMu.Unlock()
 
@@ -242,11 +245,18 @@ func (b *PTYLocalBridge) Resume() error {
 			_ = b.localPTY.SetSize(h, w)
 		}
 	}
+
+	b.localPTY.Write([]byte("\x1b")) // ensure prompt ends cleanly
+	b.localPTY.Write([]byte("\x08")) // send backspace to clear any partial input
+	b.outputCache = nil
+
 	return nil
 }
 
 func (b *PTYLocalBridge) Close() error {
 	// b.ioOnce.Do(func() { close(b.ioCancel) })
+
+	b.localPTY.Write([]byte("\x1b\x08")) // ensure prompt ends cleanly and clear any partial input
 
 	b.cacheMu.Lock()
 	b.outputCache = nil
@@ -256,6 +266,8 @@ func (b *PTYLocalBridge) Close() error {
 		_ = b.localPTY.Close()
 		b.localPTY = nil
 	}
+	util.ResetRaw(b.oldState)
+
 	return nil
 }
 
