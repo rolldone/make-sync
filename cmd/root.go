@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"make-sync/internal/config"
 	"make-sync/internal/devsync"
 	"make-sync/internal/history"
+	"make-sync/internal/util"
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -87,160 +90,108 @@ var initCmd = &cobra.Command{
 		fmt.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
 		fmt.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
 
-		if config.ConfigExists() {
-			fmt.Println("Config file already exists.")
+		// Find make-sync-sample.yaml in project root
+		var sampleFile string
+		var foundSample bool
+
+		// Get project root and look for make-sync-sample.yaml there
+		if projectRoot, err := util.GetProjectRoot(); err == nil {
+			projectSample := filepath.Join(projectRoot, "make-sync-sample.yaml")
+			if _, err := os.Stat(projectSample); err == nil {
+				sampleFile = projectSample
+				foundSample = true
+			}
+		}
+
+		if !foundSample {
+			fmt.Println("❌ Error: make-sync-sample.yaml not found in project root")
+			fmt.Println("📝 Please ensure make-sync-sample.yaml exists in the project root directory")
+			fmt.Println("💡 You can copy from an existing make-sync.yaml:")
+			fmt.Println("   cp make-sync.yaml make-sync-sample.yaml")
 			return
 		}
 
-		// Check if template.yaml exists in the actual executable directory
-		// Use os.Executable() to get absolute path of the running binary (robust vs os.Args[0])
-		exePath, err := os.Executable()
+		fmt.Printf("📄 Using make-sync-sample.yaml as template from: %s\n", sampleFile)
+
+		// Generate unique filenames to avoid overwriting existing files
+		var configFileName, ignoreFileName string
+		for {
+			suffix := generateRandomSuffix(4)
+			configFileName = fmt.Sprintf("make-sync-%s.yaml", suffix)
+			ignoreFileName = fmt.Sprintf(".sync_ignore_%s", suffix)
+
+			// Check if both files don't exist
+			if _, err := os.Stat(configFileName); os.IsNotExist(err) {
+				if _, err := os.Stat(ignoreFileName); os.IsNotExist(err) {
+					break // Found unique names
+				}
+			}
+			// If collision, loop will continue with new suffix
+		}
+
+		data, err := os.ReadFile(sampleFile)
 		if err != nil {
-			fmt.Printf("❌ Error: failed to resolve executable path: %v\n", err)
-			// Fallback to os.Args[0] directory as a last resort
-			exePath = os.Args[0]
-		}
-		if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
-			exePath = resolved
-		}
-		execDir := filepath.Dir(exePath)
-		templateFile := filepath.Join(execDir, "template.yaml")
-
-		// Try template.yaml next to the executable first; fallback to current working directory
-		if _, err := os.Stat(templateFile); err == nil {
-			// Load and parse template.yaml using struct mapping
-			data, err := os.ReadFile(templateFile)
-			if err != nil {
-				fmt.Printf("Error reading template.yaml: %v\n", err)
-				return
-			}
-
-			// Unmarshal template.yaml to TemplateConfig struct
-			var templateConfig config.TemplateConfig
-			err = yaml.Unmarshal(data, &templateConfig)
-			if err != nil {
-				fmt.Printf("Error parsing template.yaml: %v\n", err)
-				return
-			}
-
-			// Map TemplateConfig to Config
-			cfg := config.MapTemplateToConfig(templateConfig)
-
-			// Marshal Config to YAML
-			outputData, err := yaml.Marshal(&cfg)
-			if err != nil {
-				fmt.Printf("Error generating config: %v\n", err)
-				return
-			}
-
-			// Write to make-sync.yaml
-			err = os.WriteFile("make-sync.yaml", outputData, 0644)
-			if err != nil {
-				fmt.Printf("Error writing make-sync.yaml: %v\n", err)
-				return
-			}
-
-			fmt.Printf("Config loaded from template.yaml (exec dir: %s) to %s\n", execDir, config.GetConfigPath())
-
-			// Create .sync_ignore file with default extended ignores (gitignore style)
-			syncIgnoreContent := `# Development files
-.git
-.DS_Store
-Thumbs.db
-
-# Dependencies
-node_modules
-
-# IDE files
-.vscode
-
-# Log files
-*.log
-
-# Temporary files
-*.tmp
-*.swp
-*.bak
-
-# SSH
-.ssh`
-
-			err = os.WriteFile(".sync_ignore", []byte(syncIgnoreContent), 0644)
-			if err != nil {
-				fmt.Printf("⚠️  Warning: Failed to create .sync_ignore file: %v\n", err)
-			} else {
-				fmt.Println("✅ Created .sync_ignore file with default ignore patterns")
-			}
-
-			// Add to history
-			cwd, _ := os.Getwd()
-			history.AddPath(cwd)
-		} else if cwdTemplate := filepath.Join(".", "template.yaml"); func() bool { _, e := os.Stat(cwdTemplate); return e == nil }() {
-			// Fallback: allow reading template.yaml from current working directory (useful during development/go run)
-			data, err := os.ReadFile(cwdTemplate)
-			if err != nil {
-				fmt.Printf("Error reading template.yaml from current directory: %v\n", err)
-				return
-			}
-
-			var templateConfig config.TemplateConfig
-			if err := yaml.Unmarshal(data, &templateConfig); err != nil {
-				fmt.Printf("Error parsing template.yaml: %v\n", err)
-				return
-			}
-
-			cfg := config.MapTemplateToConfig(templateConfig)
-			outputData, err := yaml.Marshal(&cfg)
-			if err != nil {
-				fmt.Printf("Error generating config: %v\n", err)
-				return
-			}
-
-			if err := os.WriteFile("make-sync.yaml", outputData, 0644); err != nil {
-				fmt.Printf("Error writing make-sync.yaml: %v\n", err)
-				return
-			}
-
-			fmt.Printf("Config loaded from template.yaml (cwd) to %s\n", config.GetConfigPath())
-
-			// Create .sync_ignore file with default extended ignores (gitignore style)
-			syncIgnoreContent := `# Development files
-.git
-.DS_Store
-Thumbs.db
-
-# Dependencies
-node_modules
-
-# IDE files
-.vscode
-
-# Log files
-*.log
-
-# Temporary files
-*.tmp
-*.swp
-*.bak
-
-# SSH
-.ssh`
-
-			if err := os.WriteFile(".sync_ignore", []byte(syncIgnoreContent), 0644); err != nil {
-				fmt.Printf("⚠️  Warning: Failed to create .sync_ignore file: %v\n", err)
-			} else {
-				fmt.Println("✅ Created .sync_ignore file with default ignore patterns")
-			}
-
-			cwd, _ := os.Getwd()
-			history.AddPath(cwd)
-		} else {
-			// Template.yaml not found next to executable or in current working directory
-			fmt.Printf("❌ Error: template.yaml not found in executable directory (%s)\n", execDir)
-			fmt.Println("📝 Please ensure template.yaml exists in the same directory as the make-sync executable")
-			fmt.Println("💡 Tip: Place template.yaml alongside the make-sync binary")
+			fmt.Printf("Error reading make-sync-sample.yaml: %v\n", err)
 			return
 		}
+
+		// Parse as regular config (make-sync-sample.yaml is already in final format)
+		var cfg config.Config
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			fmt.Printf("Error parsing make-sync-sample.yaml: %v\n", err)
+			return
+		}
+
+		// Write config file with unique name
+		outputData, err := yaml.Marshal(&cfg)
+		if err != nil {
+			fmt.Printf("Error generating config: %v\n", err)
+			return
+		}
+
+		if err := os.WriteFile(configFileName, outputData, 0644); err != nil {
+			fmt.Printf("Error writing %s: %v\n", configFileName, err)
+			return
+		}
+
+		fmt.Printf("✅ Config created: %s\n", configFileName)
+
+		// Create .sync_ignore file with unique name
+		syncIgnoreContent := `# Development files
+.git
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules
+
+# IDE files
+.vscode
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.bak
+
+# SSH
+.ssh`
+
+		if err := os.WriteFile(ignoreFileName, []byte(syncIgnoreContent), 0644); err != nil {
+			fmt.Printf("⚠️  Warning: Failed to create %s file: %v\n", ignoreFileName, err)
+		} else {
+			fmt.Printf("✅ Ignore file created: %s\n", ignoreFileName)
+		}
+
+		// Show usage instructions
+		fmt.Println("💡 To use this config:")
+		fmt.Printf("   cp %s make-sync.yaml\n", configFileName)
+		fmt.Printf("   cp %s .sync_ignore\n", ignoreFileName)
+
+		// Add to history
+		history.AddPath(cwd)
 	},
 }
 
@@ -595,6 +546,17 @@ func parseSSHCommand(command string) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not find host in SSH command")
+}
+
+// generateRandomSuffix generates a random 4-character alphanumeric string
+func generateRandomSuffix(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	result := make([]byte, length)
+	for i := range result {
+		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		result[i] = charset[num.Int64()]
+	}
+	return string(result)
 }
 
 func Execute() {
