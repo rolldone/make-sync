@@ -21,6 +21,7 @@ port: "221"
 localPath: ""
 remotePath: /home/ubuntu/workspaces
 devsync:
+    # os_target: "linux" or "windows" - affects RemoteCommand syntax in direct_access
     os_target: linux
     auth:
         username: ""
@@ -60,6 +61,8 @@ devsync:
 direct_access:
     config_file: ""
     ssh_configs:
+        # For Windows targets, use: RemoteCommand: cmd /K cd =remotePath
+        # For Linux targets, use: RemoteCommand: cd =remotePath && bash -l
         - Host: workspaces_digital_ocean
           HostName: 45.55.35.150
           IdentityFile: =privateKey

@@ -56,6 +56,54 @@ Catatan:
 - `devsync.manual_transfer` adalah daftar path yang ditampilkan di menu Manual/Single Sync.
 - `.sync_ignore` di root mengatur pola ignore biasa, dan juga bisa memuat pola negasi `!pattern` untuk fitur include-by-pattern.
 
+## Konfigurasi Direct Access (SSH Config)
+
+make-sync mendukung pembuatan file SSH config otomatis untuk akses langsung ke remote server. Konfigurasi ini memungkinkan koneksi SSH yang lebih mudah tanpa perlu mengetik kredensial berulang.
+
+### RemoteCommand Berdasarkan Target OS
+
+`RemoteCommand` di `direct_access.ssh_configs` harus disesuaikan dengan target OS:
+
+#### Untuk Windows Target:
+```yaml
+RemoteCommand: cmd /K cd =remotePath
+```
+- Menggunakan `cmd /K` untuk menjaga command prompt tetap terbuka
+- `cd =remotePath` untuk berpindah ke direktori project
+
+#### Untuk Linux/Unix Target:
+```yaml
+RemoteCommand: cd =remotePath && bash -l
+```
+- Menggunakan `bash -l` untuk login shell
+- `cd =remotePath` untuk berpindah ke direktori project
+
+### Contoh Konfigurasi Lengkap:
+
+```yaml
+direct_access:
+  config_file: ""  # Kosongkan untuk generate otomatis ke .sync_temp/.ssh/config
+  ssh_configs:
+    - Host: my-server
+      HostName: 192.168.1.100
+      User: username
+      Port: "22"
+      RemoteCommand: cmd /K cd =remotePath  # Untuk Windows target
+      RequestTty: force
+      StrictHostKeyChecking: "no"
+      ServerAliveInterval: "300"
+      ServerAliveCountMax: "2"
+  ssh_commands:
+    - access_name: Connect to Server
+      command: ssh -v my-server
+```
+
+### Cara Kerja:
+1. Jalankan `make-sync direct_access` untuk generate SSH config
+2. File config akan dibuat di `.sync_temp/.ssh/config`
+3. Gunakan `ssh my-server` untuk koneksi langsung
+4. RemoteCommand akan otomatis menjalankan command sesuai target OS
+
 ## Cara Pakai (Menu Interaktif)
 1. Jalankan binary `make-sync.exe` (Windows) atau `make-sync` (Unix).
 2. Di menu utama pilih DevSync → Single/Manual Sync.
