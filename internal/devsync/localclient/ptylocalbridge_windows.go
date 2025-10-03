@@ -49,6 +49,7 @@ func (b *PTYLocalBridge) StartInteractiveShellWithCommand(command string) error 
 	cmd := exec.Command("cmd.exe", "/C", command)
 	p, err := pty.Start(cmd)
 	if err != nil {
+		log.Printf("Failed to start local pty on Windows: %v\n", err)
 		return fmt.Errorf("failed to start local pty on Windows: %w", err)
 	}
 
@@ -73,16 +74,18 @@ func (b *PTYLocalBridge) StartInteractiveShellWithCommand(command string) error 
 		if fw, fh, ferr := getTerminalSizeWindows(); ferr == nil {
 			cols = fw
 			rows = fh
-			util.Default.Printf("DEBUG: fallback Windows PTY start size width=%d height=%d\n", fw, fh)
+			log.Printf("DEBUG: fallback Windows PTY start size width=%d height=%d\n", fw, fh)
 			_ = b.localPTY.SetSize(rows, cols)
 			go func(rows, cols int) {
 				for i := 0; i < 3; i++ {
 					time.Sleep(50 * time.Millisecond)
-					_ = b.localPTY.SetSize(rows, cols)
+					if b.localPTY != nil {
+						_ = b.localPTY.SetSize(rows, cols)
+					}
 				}
 			}(fh, fw)
 		} else {
-			util.Default.Printf("DEBUG: local PTY start size detection failed: %v (fallback err: %v)\n", err, ferr)
+			log.Printf("DEBUG: local PTY start size detection failed: %v (fallback err: %v)\n", err, ferr)
 			// still apply a default so the ConPTY has a non-zero buffer
 			_ = b.localPTY.SetSize(24, 80)
 		}

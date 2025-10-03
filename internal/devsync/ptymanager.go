@@ -6,6 +6,7 @@ import (
 	"make-sync/internal/devsync/localclient"
 	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,7 +196,7 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 				go func() {
 					if err := m.bridgeActive.StartInteractiveShell(); err != nil {
 						util.Default.Printf("❌ Failed to start interactive shell: %v\n", err)
-						// os.Exit(1)
+						os.Exit(1)
 					}
 				}()
 			}

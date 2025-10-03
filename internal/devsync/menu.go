@@ -205,7 +205,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 							return s
 						}
 						cmdPart := esc(baseCmd)
-						initialCmd = fmt.Sprintf("cmd.exe /K cd /d \"%s\" & %s", localPath, cmdPart)
+						initialCmd = fmt.Sprintf("cd %s & %s & cmd", localPath, cmdPart)
 					}
 				} else {
 					initialCmd = fmt.Sprintf("cd %s && bash -c %s ; exec bash", shellEscape(localPath), shellEscape(baseCmd))
