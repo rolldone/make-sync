@@ -25,12 +25,6 @@ func NewIgnoreCache(absRoot string) *IgnoreCache {
 	return &IgnoreCache{Root: absRoot, cache: map[string]*ig.GitIgnore{}, rawLinesCache: map[string][]string{}}
 }
 
-// ClearCache invalidates all cached matchers and raw lines, forcing reload on next Match call.
-func (c *IgnoreCache) ClearCache() {
-	c.cache = map[string]*ig.GitIgnore{}
-	c.rawLinesCache = map[string][]string{}
-}
-
 // Match returns true if the given path (absolute or relative) should be ignored.
 // isDir indicates whether the path refers to a directory.
 func (c *IgnoreCache) Match(path string, isDir bool) bool {
@@ -78,7 +72,7 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 	}
 
 	// Build or reuse a cumulative matcher for the target directory 'dir'
-	if m, ok := c.cache[dir]; ok && !strings.Contains(path, ".git") {
+	if m, ok := c.cache[dir]; ok {
 		if m == nil {
 			return false
 		}
@@ -183,22 +177,11 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 	if strings.Contains(path, ".git") {
 	}
 
-	if strings.Contains(path, "docker-compose.yml") {
-		if len(cumulative) <= 10 {
-		}
-	}
-
-	if strings.Contains(path, ".git") {
-	}
-
 	return result
 }
 
 // matchesPriorityIncludes checks if a path matches any negation patterns (!) for priority inclusion
 func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
-	// Debug for docker-compose.yml
-	if strings.Contains(path, "docker-compose.yml") {
-	}
 	dir := path
 	if !isDir {
 		dir = filepath.Dir(path)
@@ -232,25 +215,38 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 				if rerr != nil {
 					continue
 				}
-				lines := strings.Split(string(data), "\n")
-				var processedLines []string
-				for _, ln := range lines {
+				rawLines := strings.Split(string(data), "\n")
+				// preprocess lines: convert patterns like '*.log' to '**/*.log' so they match in subdirs
+				var lines []string
+				for _, ln := range rawLines {
 					l := strings.TrimSpace(ln)
 					if l == "" || strings.HasPrefix(l, "#") {
 						continue
 					}
-					// Only collect negation patterns for priority check
+					neg := false
 					if strings.HasPrefix(l, "!") {
+						neg = true
 						l = strings.TrimPrefix(l, "!")
-						l = filepath.ToSlash(l)
-						processedLines = append(processedLines, "!"+l)
-						// Add recursive variant for simple patterns
-						if !strings.Contains(l, "/") && !strings.Contains(l, "**") {
-							processedLines = append(processedLines, "!**/"+l)
+					}
+					// if pattern contains a slash or starts with a leading slash or already contains **, leave it
+					if strings.Contains(l, "/") || strings.HasPrefix(l, "/") || strings.Contains(l, "**") {
+						if neg {
+							lines = append(lines, "!"+l)
+						} else {
+							lines = append(lines, l)
 						}
+						continue
+					}
+					// otherwise add both forms: pattern and **/pattern so it matches in any subtree
+					if neg {
+						lines = append(lines, "!"+l)
+						lines = append(lines, "!**/"+l)
+					} else {
+						lines = append(lines, l)
+						lines = append(lines, "**/"+l)
 					}
 				}
-				c.rawLinesCache[td] = processedLines
+				c.rawLinesCache[td] = lines
 			}
 			// Add cached negation patterns
 			for _, line := range c.rawLinesCache[td] {
@@ -262,12 +258,7 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 	}
 
 	if len(priorityPatterns) == 0 {
-		if strings.Contains(path, "docker-compose.yml") {
-		}
 		return false
-	}
-
-	if strings.Contains(path, "docker-compose.yml") {
 	}
 
 	// Test against priority patterns
@@ -275,23 +266,16 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 	relp, _ := filepath.Rel(dir, path)
 	relp = filepath.ToSlash(relp)
 
-	if strings.Contains(path, "docker-compose.yml") {
-	}
-
 	if strings.HasPrefix(strings.ToLower(runtime.GOOS), "windows") {
 		result := m.MatchesPath(strings.ToLower(relp))
 		if !result {
 			result = m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
-		}
-		if strings.Contains(path, "docker-compose.yml") {
 		}
 		return result
 	}
 	result := m.MatchesPath(relp)
 	if !result {
 		result = m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
-	}
-	if strings.Contains(path, "docker-compose.yml") {
 	}
 	return result
 }
