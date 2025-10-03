@@ -75,14 +75,47 @@ type PTYSSHBridge struct {
 	exitingMu sync.Mutex
 }
 
-// cacheOutput adds output data to the cache with size limit
+// cacheOutput adds output data to the cache with FIFO strategy (removes oldest data when full)
 func (bridge *PTYSSHBridge) cacheOutput(data []byte) {
 	const maxCacheSize = 1024 * 1024 // 1MB
 	bridge.cacheMu.Lock()
-	if len(bridge.outputCache)+len(data) <= maxCacheSize {
+	defer bridge.cacheMu.Unlock()
+
+	dataLen := len(data)
+	if dataLen == 0 {
+		return
+	}
+
+	currentLen := len(bridge.outputCache)
+
+	// If we have space, just append
+	if currentLen+dataLen <= maxCacheSize {
+		bridge.outputCache = append(bridge.outputCache, data...)
+		return
+	}
+
+	// Need to make room using FIFO: remove oldest data
+	spaceNeeded := dataLen
+	spaceAvailable := maxCacheSize - currentLen
+
+	if spaceAvailable < 0 {
+		// Cache is already over limit, clear it entirely
+		bridge.outputCache = make([]byte, 0, maxCacheSize)
+		bridge.outputCache = append(bridge.outputCache, data...)
+		return
+	}
+
+	// Remove enough from the beginning to make room
+	bytesToRemove := spaceNeeded - spaceAvailable
+	if bytesToRemove > currentLen {
+		// Need to remove more than we have, clear and add new data
+		bridge.outputCache = make([]byte, 0, maxCacheSize)
+		bridge.outputCache = append(bridge.outputCache, data...)
+	} else {
+		// Remove oldest bytes and append new data
+		bridge.outputCache = bridge.outputCache[bytesToRemove:]
 		bridge.outputCache = append(bridge.outputCache, data...)
 	}
-	bridge.cacheMu.Unlock()
 }
 
 func NewPTYSSHBridge(sshClient *SSHClient) (*PTYSSHBridge, error) {

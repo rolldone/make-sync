@@ -53,14 +53,47 @@ type PTYLocalBridge struct {
 	outputTap func([]byte, bool)
 }
 
-// cacheOutput adds output data to the cache with size limit
+// cacheOutput adds output data to the cache with FIFO strategy (removes oldest data when full)
 func (b *PTYLocalBridge) cacheOutput(data []byte) {
 	const maxCacheSize = 1024 * 1024 // 1MB
 	b.cacheMu.Lock()
-	if len(b.outputCache)+len(data) <= maxCacheSize {
+	defer b.cacheMu.Unlock()
+
+	dataLen := len(data)
+	if dataLen == 0 {
+		return
+	}
+
+	currentLen := len(b.outputCache)
+
+	// If we have space, just append
+	if currentLen+dataLen <= maxCacheSize {
+		b.outputCache = append(b.outputCache, data...)
+		return
+	}
+
+	// Need to make room using FIFO: remove oldest data
+	spaceNeeded := dataLen
+	spaceAvailable := maxCacheSize - currentLen
+
+	if spaceAvailable < 0 {
+		// Cache is already over limit, clear it entirely
+		b.outputCache = make([]byte, 0, maxCacheSize)
+		b.outputCache = append(b.outputCache, data...)
+		return
+	}
+
+	// Remove enough from the beginning to make room
+	bytesToRemove := spaceNeeded - spaceAvailable
+	if bytesToRemove > currentLen {
+		// Need to remove more than we have, clear and add new data
+		b.outputCache = make([]byte, 0, maxCacheSize)
+		b.outputCache = append(b.outputCache, data...)
+	} else {
+		// Remove oldest bytes and append new data
+		b.outputCache = b.outputCache[bytesToRemove:]
 		b.outputCache = append(b.outputCache, data...)
 	}
-	b.cacheMu.Unlock()
 }
 
 func NewPTYLocalBridge(initialCommand string) (*PTYLocalBridge, error) {

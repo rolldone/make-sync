@@ -411,7 +411,7 @@ func (b *PTYLocalBridge) Resume() error {
 	}
 
 	b.localPTY.Write([]byte("\x1b\x08")) // ensure prompt ends cleanly and clear any partial input
-	b.outputCache = nil
+	// b.outputCache = nil
 
 	return nil
 }
