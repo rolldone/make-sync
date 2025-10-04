@@ -21,6 +21,7 @@ require (
 	golang.org/x/sys v0.36.0
 	golang.org/x/term v0.35.0
 	gopkg.in/yaml.v3 v3.0.1
+	github.com/joho/godotenv v1.5.1
 	gorm.io/gorm v1.31.0
 )
 
