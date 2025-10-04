@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"make-sync/internal/util"
@@ -224,15 +225,47 @@ func LoadAndValidateConfig() (*Config, error) {
 	// Interpolate ${VAR} using OS env first, then .env values
 	rendered := interpolateEnv(string(data), envMap)
 
+	// First unmarshal into a temporary config to access cfg.Var for var-based refs
+	var tmpCfg Config
+	if err := yaml.Unmarshal([]byte(rendered), &tmpCfg); err != nil {
+		return nil, fmt.Errorf("error parsing config file (initial unmarshal): %v", err)
+	}
+
+	// Create renderer backed by tmpCfg to resolve =var.* inside var map
+	renderer := NewAdvancedTemplateRenderer(&tmpCfg)
+
+	// Resolve var entries iteratively (to handle transitive =var.* references)
+	if err := renderVarMap(renderer, tmpCfg.Var); err != nil {
+		return nil, fmt.Errorf("error resolving var entries: %v", err)
+	}
+
+	// Now parse YAML into node tree and render =... expressions using renderer
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(rendered), &root); err != nil {
+		return nil, fmt.Errorf("error parsing config file to node: %v", err)
+	}
+
+	if err := walkAndRenderNode(&root, renderer); err != nil {
+		return nil, fmt.Errorf("error rendering config nodes: %v", err)
+	}
+
+	// Encode node back to YAML bytes
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&root); err != nil {
+		return nil, fmt.Errorf("error encoding rendered yaml: %v", err)
+	}
+	enc.Close()
+
+	// Final unmarshal into cfg
 	var cfg Config
-	err = yaml.Unmarshal([]byte(rendered), &cfg)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing config file: %v", err)
+	if err := yaml.Unmarshal(buf.Bytes(), &cfg); err != nil {
+		return nil, fmt.Errorf("error parsing config file (final unmarshal): %v", err)
 	}
 
 	// Validate the configuration
-	err = ValidateConfig(&cfg)
-	if err != nil {
+	if err := ValidateConfig(&cfg); err != nil {
 		return nil, err
 	}
 
@@ -705,4 +738,70 @@ func interpolateEnv(input string, envMap map[string]string) string {
 		// os.Expand passes the variable name without braces
 		return lookup(name)
 	})
+}
+
+// renderVarMap resolves string entries inside vars map using the provided renderer.
+// It performs iterative passes to resolve transitive =var.* references and detects cycles.
+func renderVarMap(renderer *AdvancedTemplateRenderer, vars map[string]interface{}) error {
+	if vars == nil {
+		return nil
+	}
+
+	const maxPasses = 10
+
+	for pass := 0; pass < maxPasses; pass++ {
+		changed := false
+
+		for k, v := range vars {
+			switch val := v.(type) {
+			case string:
+				// Only render when it contains = (RenderComplexTemplates will ignore otherwise)
+				if strings.Contains(val, "=") {
+					rendered := renderer.RenderComplexTemplates(val)
+					if rendered != val {
+						vars[k] = rendered
+						changed = true
+					}
+				}
+			case map[string]interface{}:
+				// recurse into nested maps
+				if err := renderVarMap(renderer, val); err != nil {
+					return err
+				}
+			}
+		}
+
+		if !changed {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("max passes reached while resolving var entries (possible cycle)")
+}
+
+// walkAndRenderNode traverses a YAML node tree and renders scalar nodes that contain
+// =... template references using the provided renderer.
+func walkAndRenderNode(node *yaml.Node, renderer *AdvancedTemplateRenderer) error {
+	if node == nil {
+		return nil
+	}
+
+	// If this is a scalar node, try to render it
+	if node.Kind == yaml.ScalarNode {
+		if strings.Contains(node.Value, "=") {
+			newVal := renderer.RenderComplexTemplates(node.Value)
+			node.Value = newVal
+			node.Tag = "!!str"
+		}
+		return nil
+	}
+
+	// Recurse on sequence and mapping nodes
+	for i := 0; i < len(node.Content); i++ {
+		if err := walkAndRenderNode(node.Content[i], renderer); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
