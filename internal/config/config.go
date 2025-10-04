@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
 
@@ -210,13 +211,21 @@ func LoadAndValidateConfig() (*Config, error) {
 		return nil, errors.New("make-sync.yaml not found. Please run 'make-sync init' first")
 	}
 
+	// Read raw config file
 	data, err := os.ReadFile(ConfigFileName)
 	if err != nil {
 		return nil, fmt.Errorf("error reading config file: %v", err)
 	}
 
+	// Load .env if exists (same dir as config file)
+	cfgDir := filepath.Dir(ConfigFileName)
+	envMap, _ := loadDotEnvIfExists(cfgDir)
+
+	// Interpolate ${VAR} using OS env first, then .env values
+	rendered := interpolateEnv(string(data), envMap)
+
 	var cfg Config
-	err = yaml.Unmarshal(data, &cfg)
+	err = yaml.Unmarshal([]byte(rendered), &cfg)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing config file: %v", err)
 	}
@@ -658,4 +667,42 @@ func ConfigExists() bool {
 func GetConfigPath() string {
 	cwd, _ := os.Getwd()
 	return filepath.Join(cwd, ConfigFileName)
+}
+
+// loadDotEnvIfExists attempts to load a .env file from the directory of config
+// and returns a map of key->value. If no .env exists or parsing fails, an empty map is returned.
+func loadDotEnvIfExists(dir string) (map[string]string, error) {
+	envPath := filepath.Join(dir, ".env")
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		return map[string]string{}, nil
+	}
+
+	m, err := godotenv.Read(envPath)
+	if err != nil {
+		printer.Printf("⚠️  Failed to parse .env at %s: %v\n", envPath, err)
+		return map[string]string{}, err
+	}
+	return m, nil
+}
+
+// interpolateEnv replaces ${VAR} occurrences in the input text. Precedence: OS env > envMap.
+// Missing variables are replaced with empty string and a warning is emitted.
+func interpolateEnv(input string, envMap map[string]string) string {
+	lookup := func(varName string) string {
+		if v := os.Getenv(varName); v != "" {
+			return v
+		}
+		if v, ok := envMap[varName]; ok {
+			return v
+		}
+		// warn about missing but return empty
+		printer.Printf("⚠️  Environment variable %s not set; using empty string\n", varName)
+		return ""
+	}
+
+	// Use os.Expand to replace ${VAR} and $VAR
+	return os.Expand(input, func(name string) string {
+		// os.Expand passes the variable name without braces
+		return lookup(name)
+	})
 }

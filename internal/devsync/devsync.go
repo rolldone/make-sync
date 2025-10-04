@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 var watcher *Watcher
@@ -20,6 +22,10 @@ var watcher *Watcher
 // ShowDevSyncModeMenu displays the DevSync mode selection menu
 // and respects context cancellation.
 func ShowDevSyncModeMenu(ctx context.Context, cfg *config.Config) string {
+	oldStage, err := term.GetState(int(os.Stdin.Fd()))
+	if err != nil {
+		util.Default.Printf("❌ Failed to get current terminal state: %v\n", err)
+	}
 	// oldstate, err := term.MakeRaw(int(os.Stdin.Fd()))
 	// if err != nil {
 	// 	util.Default.Printf("❌ Failed to enable raw mode: %v\n", err)
@@ -131,6 +137,7 @@ mainMenuLoop:
 			// After watcher stops, loop back to the menu
 			continue
 		case 1: // safe_pull_sync
+			util.ResetRaw(oldStage)
 			// Connect SSH first
 			sshClient, err := createSSHClient(cfg)
 			if err != nil {
@@ -153,6 +160,7 @@ mainMenuLoop:
 				continue mainMenuLoop // back to main menu
 			}
 		case 2: // soft_push_sync -> safe_push_sync
+			util.ResetRaw(oldStage)
 			// Connect SSH first
 			sshClient, err := createSSHClient(cfg)
 			if err != nil {

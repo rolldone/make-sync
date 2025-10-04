@@ -117,7 +117,19 @@ func (w *Watcher) handleKeyboardInput() {
 				// 	}
 				// }
 			case "A", "a":
+				util.ResetRaw(w.oldState)
 				w.HandleDeployAgentCommand()
+				_, err := util.NewRaw()
+				if err != nil {
+					w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
+					return
+				}
+				oldState, err := util.NewRaw()
+				if err != nil {
+					w.safePrintln("⚠️  keyboard handler: failed to re-enable raw mode:", err)
+					return
+				}
+				w.oldState = oldState
 			default:
 				// unhandled
 				// Ignore arrow-key fragments and other stray control bytes that may arrive
