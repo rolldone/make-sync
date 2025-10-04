@@ -24,11 +24,12 @@ devsync:
     # os_target: "linux" or "windows" - affects RemoteCommand syntax in direct_access
     os_target: linux
     auth:
-        username: ""
-        privateKey: ""
-        host: ""
-        port: ""
-        remotePath: ""
+        username: =username
+        privateKey: =privateKey
+        password: =password
+        host: =host
+        port: =port
+        remotePath: =remotePath
     ignores: []
     agent_watchs:
         - artywiz_hotfix/storage/logs/
