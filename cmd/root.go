@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"make-sync/internal/config"
@@ -67,12 +68,7 @@ Supports SSH connections, file sync operations, and interactive configuration ma
 				// Continue to show menu again after SSH session ends
 			}
 		} else {
-			fmt.Println("Config file not found")
-			fmt.Println("USAGE:")
-			fmt.Println("Make sure you have the config file by running.")
-			fmt.Println("make-sync init")
-			fmt.Println("------------------------------")
-			fmt.Println("For more details please visit. https://github.com/rolldone/ngi-sync")
+			// No config found - enter directory navigation mode
 			showRecentWorkspacesMenu()
 		}
 	},
@@ -309,7 +305,27 @@ func showWorkspaceSubMenu(path string) string {
 
 	if subResult == "Enter Directory" {
 		fmt.Printf("Changing to directory: %s\n", path)
-		// Note: In real CLI, this would change shell directory, but for demo we print
+		// Update history with current access time
+		if err := history.AddPath(path); err != nil {
+			fmt.Printf("⚠️  Failed to update history: %v\n", err)
+		}
+		// Spawn new shell in the target directory
+		var cmd *exec.Cmd
+		quotedPath := fmt.Sprintf("\"%s\"", path) // Quote path to handle spaces
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command("cmd", "/c", fmt.Sprintf("cd /d %s && cmd", quotedPath))
+		} else {
+			// Linux, macOS, etc.
+			cmd = exec.Command("bash", "-c", fmt.Sprintf("cd %s && exec bash", quotedPath))
+		}
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		err := cmd.Run()
+		if err != nil {
+			fmt.Printf("❌ Failed to start shell in directory: %v\n", err)
+		}
+		// After shell exits, return to menu
 	} else if subResult == "Delete Directory" {
 		history.RemovePath(path)
 		fmt.Printf("Removed from history: %s\n", path)

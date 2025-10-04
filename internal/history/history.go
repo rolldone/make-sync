@@ -6,13 +6,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const HistoryDir = ".make-sync"
 const HistoryFile = "history.json"
 
+type HistoryEntry struct {
+	Path       string    `json:"path"`
+	LastAccess time.Time `json:"last_access"`
+}
+
 type History struct {
-	Paths []string `json:"paths"`
+	Entries []HistoryEntry `json:"entries"`
 }
 
 func GetHistoryDir() string {
@@ -27,14 +33,39 @@ func GetHistoryPath() string {
 func LoadHistory() (*History, error) {
 	path := GetHistoryPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return &History{Paths: []string{}}, nil
+		return &History{Entries: []HistoryEntry{}}, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+
 	var h History
 	err = json.Unmarshal(data, &h)
+	if err != nil || len(h.Entries) == 0 {
+		// Try old format migration
+		var oldHistory struct {
+			Paths []string `json:"paths"`
+		}
+		if oldErr := json.Unmarshal(data, &oldHistory); oldErr == nil && len(oldHistory.Paths) > 0 {
+			// Migrate old format to new format
+			h.Entries = make([]HistoryEntry, len(oldHistory.Paths))
+			now := time.Now()
+			for i, p := range oldHistory.Paths {
+				h.Entries[i] = HistoryEntry{
+					Path:       p,
+					LastAccess: now, // Set all to now for migration
+				}
+			}
+			// Save migrated format
+			_ = SaveHistory(&h) // Ignore error for now
+			return &h, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &h, err
 }
 
@@ -55,12 +86,18 @@ func AddPath(path string) error {
 		return err
 	}
 	// Avoid duplicates
-	for _, p := range h.Paths {
-		if p == path {
-			return nil
+	for i, entry := range h.Entries {
+		if entry.Path == path {
+			// Update last access time
+			h.Entries[i].LastAccess = time.Now()
+			return SaveHistory(h)
 		}
 	}
-	h.Paths = append(h.Paths, path)
+	// Add new entry
+	h.Entries = append(h.Entries, HistoryEntry{
+		Path:       path,
+		LastAccess: time.Now(),
+	})
 	return SaveHistory(h)
 }
 
@@ -69,9 +106,9 @@ func RemovePath(path string) error {
 	if err != nil {
 		return err
 	}
-	for i, p := range h.Paths {
-		if p == path {
-			h.Paths = append(h.Paths[:i], h.Paths[i+1:]...)
+	for i, entry := range h.Entries {
+		if entry.Path == path {
+			h.Entries = append(h.Entries[:i], h.Entries[i+1:]...)
 			break
 		}
 	}
@@ -84,9 +121,9 @@ func SearchPaths(query string) []string {
 		return []string{}
 	}
 	var results []string
-	for _, p := range h.Paths {
-		if strings.Contains(strings.ToLower(p), strings.ToLower(query)) {
-			results = append(results, p)
+	for _, entry := range h.Entries {
+		if strings.Contains(strings.ToLower(entry.Path), strings.ToLower(query)) {
+			results = append(results, entry.Path)
 		}
 	}
 	sort.Strings(results)
@@ -98,5 +135,19 @@ func GetAllPaths() []string {
 	if err != nil {
 		return []string{}
 	}
-	return h.Paths
+	if len(h.Entries) == 0 {
+		return []string{}
+	}
+
+	// Sort by last access time (most recent first)
+	sort.Slice(h.Entries, func(i, j int) bool {
+		return h.Entries[i].LastAccess.After(h.Entries[j].LastAccess)
+	})
+
+	var result []string
+	for _, entry := range h.Entries {
+		result = append(result, entry.Path)
+	}
+
+	return result
 }
