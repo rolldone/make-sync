@@ -32,12 +32,15 @@ type FileMeta struct {
 type IndexMap map[string]FileMeta
 
 // BuildIndex walks root and builds an IndexMap. It skips the root itself.
-// Note: .sync_ignore support is not implemented in this first iteration.
-func BuildIndex(root string) (IndexMap, error) {
+// bypassIgnore: if true, skip ignore pattern checking and index all files
+func BuildIndex(root string, bypassIgnore bool) (IndexMap, error) {
 	idx := IndexMap{}
 
-	// create ignore cache
-	ic := NewSimpleIgnoreCache(root)
+	// create ignore cache only if not bypassing
+	var ic *SimpleIgnoreCache
+	if !bypassIgnore {
+		ic = NewSimpleIgnoreCache(root)
+	}
 
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -57,8 +60,8 @@ func BuildIndex(root string) (IndexMap, error) {
 		if err != nil {
 			return nil
 		}
-		// skip ignored entries
-		if ic.Match(p, info.IsDir()) {
+		// skip ignored entries (only if not bypassing)
+		if !bypassIgnore && ic.Match(p, info.IsDir()) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}

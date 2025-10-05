@@ -12,6 +12,11 @@ import (
 	"make-sync/internal/util"
 )
 
+// isBypassMode returns true if the modeChoice indicates bypass ignore patterns
+func isBypassMode(modeChoice string) bool {
+	return strings.Contains(modeChoice, "(Bypass)")
+}
+
 // readNegationPatterns reads .sync_ignore in the given root and returns lines
 // starting with '!' with leading '!' and whitespace trimmed.
 func readNegationPatterns(root string) []string {
@@ -117,7 +122,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			}
 
 			// mode selection
-			modeChoice, err := tui.ShowMenuWithPrints([]string{"Rsync Soft Mode", "Rsync Force Mode", "Back Previous / Exit"}, "? Single Sync : ["+choice+"] | Which mode :")
+			modeChoice, err := tui.ShowMenuWithPrints([]string{"Rsync Soft Mode", "Rsync Force Mode", "Rsync Soft Mode (Bypass)", "Rsync Force Mode (Bypass)", "Back Previous / Exit"}, "? Single Sync : ["+choice+"] | Which mode :")
 			if err != nil {
 				util.Default.Printf("❌ Mode selection cancelled: %v\n", err)
 				continue
@@ -137,7 +142,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			case "Download":
 				util.Default.Printf("🔁 Running Download (%s) for prefixes: %v\n", modeChoice, prefixes)
 				// Mirror safe_pull_sync: build agent (with fallback) and run remote indexing first
-				if err := runRemoteIndexingForPull(cfg); err != nil {
+				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice)); err != nil {
 					util.Default.Printf("❌ Remote indexing (safe_pull) failed: %v\n", err)
 					continue
 				}
@@ -152,10 +157,19 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 					}
 				} else {
 					if modeChoice == "Rsync Force Mode" {
-						// Force mode: rsync --delete semantics within prefixes
-						downloaded, err = CompareAndDownloadManualTransferForce(cfg, localRoot, prefixes)
+						// Force mode: rsync --delete semantics within prefixes (parallel)
+						downloaded, err = CompareAndDownloadManualTransferForceParallel(cfg, localRoot, prefixes)
+					} else if modeChoice == "Rsync Soft Mode" {
+						// Soft mode: rsync semantics within prefixes (parallel)
+						downloaded, err = CompareAndDownloadManualTransferParallel(cfg, localRoot, prefixes)
+					} else if modeChoice == "Rsync Force Mode (Bypass)" {
+						// Force bypass mode: rsync --delete semantics within prefixes, bypass ignore patterns
+						downloaded, err = CompareAndDownloadManualTransferForceParallel(cfg, localRoot, prefixes)
+					} else if modeChoice == "Rsync Soft Mode (Bypass)" {
+						// Soft bypass mode: rsync semantics within prefixes, bypass ignore patterns
+						downloaded, err = CompareAndDownloadManualTransferBypassParallel(cfg, localRoot, prefixes)
 					} else {
-						downloaded, err = CompareAndDownloadManualTransfer(cfg, localRoot, prefixes)
+						downloaded, err = CompareAndDownloadManualTransferParallel(cfg, localRoot, prefixes)
 					}
 				}
 				if err != nil {
@@ -173,7 +187,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			case "Upload":
 				util.Default.Printf("🔁 Running Upload (%s) for prefixes: %v\n", modeChoice, prefixes)
 				// Mirror safe_push_sync: run remote indexing first so DB is fresh
-				if err := runRemoteIndexingForPull(cfg); err != nil {
+				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice)); err != nil {
 					util.Default.Printf("❌ Remote indexing (safe_push) failed: %v\n", err)
 					continue
 				}
@@ -188,7 +202,15 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 					}
 				} else {
 					if modeChoice == "Rsync Force Mode" {
-						uploaded, err = CompareAndUploadManualTransferForce(cfg, localRoot, prefixes)
+						uploaded, err = CompareAndUploadManualTransferForceParallel(cfg, localRoot, prefixes)
+					} else if modeChoice == "Rsync Soft Mode" {
+						uploaded, err = CompareAndUploadManualTransfer(cfg, localRoot, prefixes)
+					} else if modeChoice == "Rsync Force Mode (Bypass)" {
+						// Force bypass mode: rsync --delete semantics within prefixes, bypass ignore patterns
+						uploaded, err = CompareAndUploadManualTransferForceParallel(cfg, localRoot, prefixes)
+					} else if modeChoice == "Rsync Soft Mode (Bypass)" {
+						// Soft bypass mode: rsync semantics within prefixes, bypass ignore patterns
+						uploaded, err = CompareAndUploadManualTransferBypassParallel(cfg, localRoot, prefixes)
 					} else {
 						uploaded, err = CompareAndUploadManualTransfer(cfg, localRoot, prefixes)
 					}
@@ -216,7 +238,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 // runRemoteIndexingForPull mirrors the safe_pull_sync flow: it builds the agent
 // (with fallback) using remote detection, uploads agent and config, and runs
 // remote indexing so the DB is fresh before pulling.
-func runRemoteIndexingForPull(cfg *config.Config) error {
+func runRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool) error {
 	// Determine target OS
 	targetOS := cfg.Devsync.OSTarget
 	if strings.TrimSpace(targetOS) == "" {
@@ -265,7 +287,7 @@ func runRemoteIndexingForPull(cfg *config.Config) error {
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
 	// Run remote indexing via existing flow (handles upload agent+config, execute, etc.)
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath})
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, bypassIgnore)
 	if err != nil {
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)
 		return err

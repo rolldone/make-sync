@@ -75,16 +75,16 @@ func loadConfig() (*AgentConfig, error) {
 }
 
 // loadConfigAndChangeDir loads config and changes working directory if specified
-func loadConfigAndChangeDir() error {
+func loadConfigAndChangeDir() (*AgentConfig, error) {
 	// Load configuration - REQUIRED, no fallback
 	config, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("config is required for indexing: %v", err)
+		return nil, fmt.Errorf("config is required for indexing: %v", err)
 	}
 
 	// Working directory is required from config
 	if config.Devsync.WorkingDir == "" {
-		return fmt.Errorf("working_dir must be specified in config for indexing")
+		return nil, fmt.Errorf("working_dir must be specified in config for indexing")
 	}
 
 	workingDir := config.Devsync.WorkingDir
@@ -94,7 +94,7 @@ func loadConfigAndChangeDir() error {
 	util.Default.Printf("🔧 DEBUG: workingDir = '%s'\n", workingDir)
 
 	if err := os.Chdir(workingDir); err != nil {
-		return fmt.Errorf("failed to change to working directory '%s': %v", workingDir, err)
+		return nil, fmt.Errorf("failed to change to working directory '%s': %v", workingDir, err)
 	}
 
 	// Print actual working directory after chdir
@@ -105,7 +105,7 @@ func loadConfigAndChangeDir() error {
 	}
 	util.Default.ClearLine()
 	util.Default.Printf("✅ Successfully changed to working directory: %s\n", workingDir)
-	return nil
+	return config, nil
 }
 
 func displayConfig() {
@@ -170,6 +170,16 @@ func main() {
 	// Check for command line arguments
 	if len(os.Args) > 1 {
 		command := os.Args[1]
+
+		// Parse flags after command
+		bypassOverride := false
+		for _, arg := range os.Args[2:] {
+			if arg == "--bypass-ignore" {
+				bypassOverride = true
+				break
+			}
+		}
+
 		switch command {
 		case "identity":
 			printIdentity()
@@ -186,18 +196,44 @@ func main() {
 		case "indexing":
 			// perform indexing now and write .sync_temp/indexing_files.db
 			// Load config and change working directory first, then perform indexing
-			if err := loadConfigAndChangeDir(); err != nil {
+			config, err := loadConfigAndChangeDir()
+			if err != nil {
 				util.Default.ClearLine()
 				util.Default.Printf("⚠️  Config setup failed: %v\n", err)
 				fmt.Println("❌ Cannot proceed with indexing without proper config. Exiting.")
 				os.Exit(1)
 			}
-			performIndexing()
+			// Apply bypass override if specified
+			if bypassOverride {
+				util.Default.ClearLine()
+				util.Default.Printf("🔄 Bypass ignore mode enabled via --bypass-ignore flag\n")
+			}
+			performIndexing(config, bypassOverride)
 			return
+		case "help":
+			fmt.Println("Sync Agent v1.0.0")
+			fmt.Println("")
+			fmt.Println("Commands:")
+			fmt.Println("  identity     - Print agent identity information")
+			fmt.Println("  version      - Print agent version")
+			fmt.Println("  config       - Display current configuration")
+			fmt.Println("  watch        - Start file watching mode")
+			fmt.Println("  indexing     - Perform one-time indexing and exit")
+			fmt.Println("  help         - Show this help message")
+			fmt.Println("")
+			fmt.Println("Flags:")
+			fmt.Println("  --bypass-ignore  Bypass .sync_ignore patterns during indexing (temporary override)")
+			fmt.Println("")
+			fmt.Println("Examples:")
+			fmt.Println("  ./sync-agent indexing                    # Index respecting ignore patterns")
+			fmt.Println("  ./sync-agent indexing --bypass-ignore   # Index bypassing ignore patterns")
+			return
+		default:
+			fmt.Printf("❌ Unknown command: %s\n", command)
+			fmt.Println("Run './sync-agent help' for available commands.")
+			os.Exit(1)
 		}
 	}
-
-	fmt.Println("🚀 Sync Agent Started")
 	util.Default.ClearLine()
 	util.Default.Printf("📅 Started at: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 
@@ -221,7 +257,7 @@ func gracefulShutdown() {
 
 func startWatching() {
 	// Load config and change working directory
-	if err := loadConfigAndChangeDir(); err != nil {
+	if _, err := loadConfigAndChangeDir(); err != nil {
 		util.Default.ClearLine()
 		util.Default.Printf("⚠️  Config setup failed: %v\n", err)
 		os.Exit(1)
@@ -321,7 +357,7 @@ func startWatching() {
 	setupWatcher(watchPaths)
 }
 
-func performIndexing() {
+func performIndexing(config *AgentConfig, bypassIgnore bool) {
 	// Use current working dir as root for indexing
 	root, err := os.Getwd()
 	if err != nil {
@@ -361,7 +397,7 @@ func performIndexing() {
 		os.Exit(1)
 	}
 
-	idx, err := indexer.BuildIndex(root)
+	idx, err := indexer.BuildIndex(root, bypassIgnore)
 	if err != nil {
 		util.Default.ClearLine()
 		util.Default.Printf("❌ Indexing failed: %v\n", err)

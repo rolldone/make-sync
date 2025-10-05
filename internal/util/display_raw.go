@@ -8,6 +8,14 @@ import (
 	"golang.org/x/term"
 )
 
+func GetState() (*term.State, error) {
+	state, err := term.GetState(int(os.Stdin.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
 func NewRaw() (*term.State, error) {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"database/sql"
@@ -276,7 +277,7 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 	return nil
 }
 
-func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string) (string, error) {
+func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool) (string, error) {
 	isWin := strings.Contains(strings.ToLower(osTarget), "win")
 
 	// Get unique agent binary name from local config
@@ -303,7 +304,11 @@ func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget str
 			agentPath = winRemoteDir + "\\.sync_temp\\" + binaryName
 			cdDir = winRemoteDir
 		}
-		cmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && \"%s\" indexing", cdDir, agentPath)
+		indexingCmd := "indexing"
+		if bypassIgnore {
+			indexingCmd = "indexing --bypass-ignore"
+		}
+		cmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && \"%s\" %s", cdDir, agentPath, indexingCmd)
 	} else {
 		var agentPath, cdDir string
 		if strings.HasSuffix(remoteBase, ".sync_temp") {
@@ -319,7 +324,11 @@ func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget str
 		// Ensure forward slashes for Linux
 		agentPath = filepath.ToSlash(agentPath)
 		cdDir = filepath.ToSlash(cdDir)
-		cmd = fmt.Sprintf("cd %s && %s indexing", shellQuote(cdDir), shellQuote(agentPath))
+		indexingCmd := "indexing"
+		if bypassIgnore {
+			indexingCmd = "indexing --bypass-ignore"
+		}
+		cmd = fmt.Sprintf("cd %s && %s %s", shellQuote(cdDir), shellQuote(agentPath), indexingCmd)
 	}
 
 	fmt.Printf("🔍 DEBUG: Executing remote command: %s\n", cmd)
@@ -383,7 +392,7 @@ func shellQuote(s string) string {
 // If skipUpload is true, the function will not upload the agent or config and
 // assumes they are already present on the remote (useful when caller already
 // deployed the agent).
-func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string) (string, string, error) {
+func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIgnore bool) (string, string, error) {
 	// find local binary
 	var localBinary string
 	for _, c := range localCandidates {
@@ -441,7 +450,7 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string) (string,
 
 	// Run remote indexing
 	util.Default.Println("🔍 Running remote agent indexing...")
-	out, err := RemoteRunAgentIndexing(sshCli, remoteSyncTemp, osTarget)
+	out, err := RemoteRunAgentIndexing(sshCli, remoteSyncTemp, osTarget, bypassIgnore)
 	if err != nil {
 		return "", out, fmt.Errorf("remote indexing failed: %v", err)
 	}
@@ -795,8 +804,17 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 
 	uploaded := make([]string, 0)
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
+	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
-	// Walk local files (local-first)
+	// Collect all files that need upload
+	var uploadTasks []util.ConcurrentTask
+	var filesToProcess []struct {
+		path      string
+		rel       string
+		localHash string
+	}
+
+	// First pass: collect all files that might need upload
 	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -826,7 +844,9 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			mu.Lock()
 			skippedIgnored++
+			mu.Unlock()
 			return nil
 		}
 
@@ -834,7 +854,9 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 			return nil
 		}
 
+		mu.Lock()
 		examined++
+		mu.Unlock()
 
 		// compute local hash
 		localHash := ""
@@ -847,33 +869,55 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 			f.Close()
 		}
 
-		// decide upload
-		rm, exists := remoteByRel[rel]
-		needUpload := false
-		if !exists {
-			needUpload = true
-		} else if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
-			needUpload = true
-		}
-
-		if needUpload {
-			util.Default.Printf("⬆️  Uploading %s -> %s\n", p, buildRemotePath(cfg, rel))
-			if err := sshCli.SyncFile(p, buildRemotePath(cfg, rel)); err != nil {
-				util.Default.Printf("❌ Failed to upload %s: %v\n", p, err)
-				uploadErrors++
-			} else {
-				uploaded = append(uploaded, p)
-			}
-		} else {
-			skippedUpToDate++
-		}
-
-		// no-op: JSON checked file removed
+		filesToProcess = append(filesToProcess, struct {
+			path      string
+			rel       string
+			localHash string
+		}{p, rel, localHash})
 
 		return nil
 	})
 	if err != nil {
 		return uploaded, fmt.Errorf("walk error: %v", err)
+	}
+
+	// Second pass: create upload tasks for files that need uploading
+	for _, file := range filesToProcess {
+		// decide upload
+		rm, exists := remoteByRel[file.rel]
+		needUpload := false
+		if !exists {
+			needUpload = true
+		} else if strings.TrimSpace(rm.Hash) == "" || rm.Hash != file.localHash {
+			needUpload = true
+		}
+
+		if needUpload {
+			uploadTasks = append(uploadTasks, func() error {
+				util.Default.Printf("⬆️  Uploading %s -> %s\n", file.path, buildRemotePath(cfg, file.rel))
+				if err := sshCli.SyncFile(file.path, buildRemotePath(cfg, file.rel)); err != nil {
+					util.Default.Printf("❌ Failed to upload %s: %v\n", file.path, err)
+					mu.Lock()
+					uploadErrors++
+					mu.Unlock()
+					return err
+				}
+				mu.Lock()
+				uploaded = append(uploaded, file.path)
+				mu.Unlock()
+				return nil
+			})
+		} else {
+			mu.Lock()
+			skippedUpToDate++
+			mu.Unlock()
+		}
+	}
+
+	// Execute all upload tasks with bounded concurrency (max 5 parallel)
+	const maxConcurrency = 5
+	if err := util.RunConcurrent(uploadTasks, maxConcurrency); err != nil {
+		util.Default.Printf("⚠️  Some uploads failed: %v\n", err)
 	}
 
 	util.Default.Printf("🔁 Local files examined: %d, uploaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, upload errors: %d\n",
@@ -993,10 +1037,17 @@ func CompareAndDownloadByHashWithFilter(cfg *config.Config, localRoot string, pr
 	skippedIgnored := 0
 	skippedUpToDate := 0
 	downloadErrors := 0
+	var mu sync.Mutex // mutex for thread-safe access to shared variables
+
+	// Collect all files that need download
+	var downloadTasks []util.ConcurrentTask
 
 	for _, rel := range rels {
 		rm := remoteByRel[rel]
+		mu.Lock()
 		examined++
+		mu.Unlock()
+
 		if rm.IsDir {
 			continue
 		}
@@ -1005,24 +1056,37 @@ func CompareAndDownloadByHashWithFilter(cfg *config.Config, localRoot string, pr
 		localPath := filepath.Join(absRoot, filepath.FromSlash(relNorm))
 
 		if relNorm == ".sync_temp" || strings.HasPrefix(relNorm, ".sync_temp/") || strings.Contains(relNorm, "/.sync_temp/") {
+			mu.Lock()
 			skippedIgnored++
+			mu.Unlock()
 			continue
 		}
 
 		if ic.Match(localPath, false) {
+			mu.Lock()
 			skippedIgnored++
+			mu.Unlock()
 			continue
 		}
 
 		info, statErr := os.Stat(localPath)
 		if statErr != nil {
-			util.Default.Printf("⬇️  Downloading %s -> %s\n", buildRemotePath(cfg, relNorm), localPath)
-			if err := sshCli.DownloadFile(localPath, buildRemotePath(cfg, relNorm)); err != nil {
-				util.Default.Printf("❌ Failed to download %s: %v\n", buildRemotePath(cfg, relNorm), err)
-				downloadErrors++
-				continue
-			}
-			downloaded = append(downloaded, localPath)
+			// File doesn't exist, needs download
+			remotePath := buildRemotePath(cfg, relNorm)
+			downloadTasks = append(downloadTasks, func() error {
+				util.Default.Printf("⬇️  Downloading %s -> %s\n", remotePath, localPath)
+				if err := sshCli.DownloadFile(localPath, remotePath); err != nil {
+					util.Default.Printf("❌ Failed to download %s: %v\n", remotePath, err)
+					mu.Lock()
+					downloadErrors++
+					mu.Unlock()
+					return err
+				}
+				mu.Lock()
+				downloaded = append(downloaded, localPath)
+				mu.Unlock()
+				return nil
+			})
 			continue
 		}
 		if info.IsDir() {
@@ -1041,17 +1105,34 @@ func CompareAndDownloadByHashWithFilter(cfg *config.Config, localRoot string, pr
 		}
 
 		if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
-			util.Default.Printf("⬇️  Downloading %s -> %s\n", buildRemotePath(cfg, relNorm), localPath)
-			if err := sshCli.DownloadFile(localPath, buildRemotePath(cfg, relNorm)); err != nil {
-				util.Default.Printf("❌ Failed to download %s: %v\n", buildRemotePath(cfg, relNorm), err)
-				downloadErrors++
-				continue
-			}
-			downloaded = append(downloaded, localPath)
+			// File exists but different, needs download
+			remotePath := buildRemotePath(cfg, relNorm)
+			downloadTasks = append(downloadTasks, func() error {
+				util.Default.Printf("⬇️  Downloading %s -> %s\n", remotePath, localPath)
+				if err := sshCli.DownloadFile(localPath, remotePath); err != nil {
+					util.Default.Printf("❌ Failed to download %s: %v\n", remotePath, err)
+					mu.Lock()
+					downloadErrors++
+					mu.Unlock()
+					return err
+				}
+				mu.Lock()
+				downloaded = append(downloaded, localPath)
+				mu.Unlock()
+				return nil
+			})
 			continue
 		}
 
+		mu.Lock()
 		skippedUpToDate++
+		mu.Unlock()
+	}
+
+	// Execute all download tasks with bounded concurrency (max 5 parallel)
+	const maxConcurrency = 5
+	if err := util.RunConcurrent(downloadTasks, maxConcurrency); err != nil {
+		util.Default.Printf("⚠️  Some downloads failed: %v\n", err)
 	}
 
 	util.Default.Printf("🔁 Remote index entries examined: %d, downloaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, errors: %d\n",
@@ -1152,8 +1233,17 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 
 	uploaded := make([]string, 0)
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
+	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
-	// Walk local files (local-first)
+	// Collect all files that need upload
+	var uploadTasks []util.ConcurrentTask
+	var filesToProcess []struct {
+		path      string
+		rel       string
+		localHash string
+	}
+
+	// First pass: collect all files that might need upload
 	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -1196,7 +1286,9 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
+			mu.Lock()
 			skippedIgnored++
+			mu.Unlock()
 			return nil
 		}
 
@@ -1204,7 +1296,9 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 			return nil
 		}
 
+		mu.Lock()
 		examined++
+		mu.Unlock()
 
 		// compute local hash
 		localHash := ""
@@ -1217,32 +1311,54 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 			f.Close()
 		}
 
-		rm, exists := remoteByRel[rel]
-		needUpload := false
-		if !exists {
-			needUpload = true
-		} else if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
-			needUpload = true
-		}
-
-		if needUpload {
-			util.Default.Printf("⬆️  Uploading %s -> %s\n", p, buildRemotePath(cfg, rel))
-			if err := sshCli.SyncFile(p, buildRemotePath(cfg, rel)); err != nil {
-				util.Default.Printf("❌ Failed to upload %s: %v\n", p, err)
-				uploadErrors++
-			} else {
-				uploaded = append(uploaded, p)
-			}
-		} else {
-			skippedUpToDate++
-		}
-
-		// no-op: JSON checked file removed
+		filesToProcess = append(filesToProcess, struct {
+			path      string
+			rel       string
+			localHash string
+		}{p, rel, localHash})
 
 		return nil
 	})
 	if err != nil {
 		return uploaded, fmt.Errorf("walk error: %v", err)
+	}
+
+	// Second pass: create upload tasks for files that need uploading
+	for _, file := range filesToProcess {
+		rm, exists := remoteByRel[file.rel]
+		needUpload := false
+		if !exists {
+			needUpload = true
+		} else if strings.TrimSpace(rm.Hash) == "" || rm.Hash != file.localHash {
+			needUpload = true
+		}
+
+		if needUpload {
+			uploadTasks = append(uploadTasks, func() error {
+				util.Default.Printf("⬆️  Uploading %s -> %s\n", file.path, buildRemotePath(cfg, file.rel))
+				if err := sshCli.SyncFile(file.path, buildRemotePath(cfg, file.rel)); err != nil {
+					util.Default.Printf("❌ Failed to upload %s: %v\n", file.path, err)
+					mu.Lock()
+					uploadErrors++
+					mu.Unlock()
+					return err
+				}
+				mu.Lock()
+				uploaded = append(uploaded, file.path)
+				mu.Unlock()
+				return nil
+			})
+		} else {
+			mu.Lock()
+			skippedUpToDate++
+			mu.Unlock()
+		}
+	}
+
+	// Execute all upload tasks with bounded concurrency (max 5 parallel)
+	const maxConcurrency = 5
+	if err := util.RunConcurrent(uploadTasks, maxConcurrency); err != nil {
+		util.Default.Printf("⚠️  Some uploads failed: %v\n", err)
 	}
 
 	util.Default.Printf("🔁 Local files examined: %d, uploaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, upload errors: %d\n",

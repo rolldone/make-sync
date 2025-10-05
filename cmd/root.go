@@ -18,9 +18,11 @@ import (
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
+var oldStateRoot *term.State
 var rootCmd = &cobra.Command{
 	Use:   "make-sync",
 	Short: "Remote server sync tool",
@@ -228,6 +230,8 @@ var devsyncCmd = &cobra.Command{
 }
 
 func init() {
+	oldState, _ := util.GetState()
+	oldStateRoot = oldState
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(NewBackupRestoreCmd())
 	// register exec command
@@ -429,6 +433,7 @@ func showDirectAccessMenu(ctx context.Context, loadedCfg *config.Config) (bool, 
 		fmt.Println("Git clean up finished.")
 		return true, nil
 	case "Restart":
+		util.ResetRaw(oldStateRoot)
 		fmt.Println("🔄 Reloading configuration...")
 		newCfg, err := config.LoadAndRenderConfig()
 		if err != nil {
