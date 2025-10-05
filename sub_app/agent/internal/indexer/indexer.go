@@ -61,7 +61,7 @@ func BuildIndex(root string, bypassIgnore bool) (IndexMap, error) {
 			return nil
 		}
 		// skip ignored entries (only if not bypassing)
-		if !bypassIgnore && ic.Match(p, info.IsDir()) {
+		if !bypassIgnore && ic.MatchWithManualTransfer(p, info.IsDir()) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}

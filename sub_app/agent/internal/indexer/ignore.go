@@ -19,6 +19,8 @@ type SimpleIgnoreCache struct {
 	raw  map[string][]string // directory -> preprocessed lines
 	// if authoritative is true, use only c.raw[Root] and do not scan disk for .sync_ignore
 	authoritative bool
+	// manualTransfer contains paths that should not be ignored even if they match ignore patterns
+	manualTransfer []string
 }
 
 func NewSimpleIgnoreCache(root string) *SimpleIgnoreCache {
@@ -26,10 +28,11 @@ func NewSimpleIgnoreCache(root string) *SimpleIgnoreCache {
 	// attempt to read preprocessed ignores from .sync_temp/config.json under root
 	cfgPath := filepath.Join(root, ".sync_temp", "config.json")
 	if data, err := os.ReadFile(cfgPath); err == nil {
-		// try to parse minimal JSON structure { "devsync": { "ignores": [ ... ] } }
+		// try to parse JSON structure with ignores and manual_transfer
 		type devsyncCfg struct {
 			Devsync struct {
-				Ignores []string `json:"ignores"`
+				Ignores        []string `json:"ignores"`
+				ManualTransfer []string `json:"manual_transfer"`
 			} `json:"devsync"`
 		}
 		var dc devsyncCfg
@@ -40,6 +43,8 @@ func NewSimpleIgnoreCache(root string) *SimpleIgnoreCache {
 				// mark authoritative so we do not scan per-directory .sync_ignore files
 				c.authoritative = true
 			}
+			// store manual transfer paths
+			c.manualTransfer = dc.Devsync.ManualTransfer
 		}
 	}
 	return c
@@ -173,6 +178,32 @@ func (c *SimpleIgnoreCache) Match(path string, isDir bool) bool {
 		}
 	}
 	return matched
+}
+
+// MatchWithManualTransfer returns true if path should be ignored, but respects manual_transfer context.
+// If path belongs to a manual transfer endpoint, it will not be ignored even if it matches ignore patterns.
+func (c *SimpleIgnoreCache) MatchWithManualTransfer(path string, isDir bool) bool {
+	// Check if path belongs to manual transfer endpoint
+	for _, endpoint := range c.manualTransfer {
+		// Normalize endpoint to use forward slashes
+		endpoint = filepath.ToSlash(endpoint)
+
+		// Check if path is the endpoint itself or sub-path of endpoint
+		pathRel, err := filepath.Rel(c.Root, path)
+		if err != nil {
+			pathRel = path
+		}
+		pathRel = filepath.ToSlash(pathRel)
+
+		// If path is endpoint itself or starts with endpoint/
+		if pathRel == endpoint || strings.HasPrefix(pathRel, endpoint+"/") {
+			// Belongs to manual transfer - don't ignore
+			return false
+		}
+	}
+
+	// Not in manual transfer - use normal ignore logic
+	return c.Match(path, isDir)
 }
 
 // matchedGlob is a helper that tries filepath.Match with pattern variants.
