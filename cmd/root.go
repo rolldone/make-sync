@@ -603,6 +603,7 @@ func NewPipelineCmd() *cobra.Command {
 	cmd.AddCommand(
 		newPipelineRunCmd(),
 		newPipelineListCmd(),
+		newPipelineCreateCmd(),
 	)
 
 	return cmd
@@ -696,6 +697,98 @@ func newPipelineListCmd() *cobra.Command {
 	}
 
 	return cmd
+}
+
+// newPipelineCreateCmd creates the pipeline create subcommand
+func newPipelineCreateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "create [name]",
+		Short: "Create a new pipeline template",
+		Long:  `Create a new pipeline YAML file with a Docker-focused template for CI/CD workflows.`,
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			name := args[0]
+
+			// Validate pipeline name - reject names that would conflict with system files
+			reservedNames := []string{"vars", "scripts"}
+			for _, reserved := range reservedNames {
+				if name == reserved {
+					fmt.Printf("❌ Pipeline name '%s' is not allowed as it would conflict with system files\n", name)
+					os.Exit(1)
+				}
+			}
+
+			filename := name + ".yaml"
+
+			// Load config to get pipeline_dir
+			cfg, err := config.LoadAndRenderConfig()
+			if err != nil {
+				fmt.Printf("❌ Failed to load config: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Determine where to save the pipeline file
+			var outputPath string
+			if cfg.DirectAccess.PipelineDir != "" {
+				// Use configured pipeline directory
+				outputPath = filepath.Join(cfg.DirectAccess.PipelineDir, filename)
+				// Ensure pipeline directory exists
+				if err := os.MkdirAll(cfg.DirectAccess.PipelineDir, 0755); err != nil {
+					fmt.Printf("❌ Failed to create pipeline directory: %v\n", err)
+					os.Exit(1)
+				}
+			} else {
+				// Fallback to current working directory
+				outputPath = filename
+			}
+
+			// Check if file already exists
+			if _, err := os.Stat(outputPath); err == nil {
+				fmt.Printf("❌ Pipeline file '%s' already exists\n", outputPath)
+				fmt.Printf("💡 Use a different name or remove the existing file if you want to recreate it\n")
+				os.Exit(1)
+			}
+
+			// Get template
+			template := getDockerPipelineTemplate(name)
+
+			// Write to file
+			if err := os.WriteFile(outputPath, []byte(template), 0644); err != nil {
+				fmt.Printf("❌ Failed to create pipeline file: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("✅ Created pipeline template: %s\n", outputPath)
+			fmt.Println("📝 Edit the file to customize your pipeline configuration")
+		},
+	}
+
+	return cmd
+}
+
+// getDockerPipelineTemplate returns a Docker-focused pipeline template
+func getDockerPipelineTemplate(name string) string {
+	// Get project root using the same method as other commands
+	projectRoot, err := util.GetProjectRoot()
+	if err != nil {
+		fmt.Printf("❌ Failed to detect project root: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Read template from project root
+	templatePath := filepath.Join(projectRoot, "pipeline-sample.yaml")
+	templateBytes, err := os.ReadFile(templatePath)
+	if err != nil {
+		fmt.Printf("❌ Failed to read template file: %v\n", err)
+		os.Exit(1)
+	}
+
+	template := string(templateBytes)
+
+	// Replace placeholders
+	template = strings.ReplaceAll(template, "{{PIPELINE_NAME}}", name)
+
+	return template
 }
 
 // ExecuteContext allows running the root command with a supplied context for cancellation.
