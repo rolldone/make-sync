@@ -43,6 +43,7 @@ type SyncCollection struct {
 
 type Devsync struct {
 	OSTarget       string            `yaml:"os_target"`
+	SizeLimit      int               `yaml:"size_limit,omitempty"` // Size limit in MB, 0 = no limit, default 0 (no limit)
 	AgentName      string            `yaml:"agent_name,omitempty"` // Unique identifier for agent process
 	Auth           Auth              `yaml:"auth"`
 	Ignores        []string          `yaml:"ignores"`
@@ -341,6 +342,11 @@ func LoadAndRenderConfig() (*Config, error) {
 	}
 	renderedCfg.Devsync.Auth.LocalPath = absWatchPath
 	renderedCfg.LocalPath = absWatchPath
+
+	// Set default values
+	if renderedCfg.Devsync.SizeLimit == 0 {
+		renderedCfg.Devsync.SizeLimit = 0 // Default: no limit
+	}
 
 	return renderedCfg, nil
 }

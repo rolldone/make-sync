@@ -23,6 +23,7 @@ import (
 // AgentConfig represents the agent configuration
 type AgentConfig struct {
 	Devsync struct {
+		SizeLimit   int      `json:"size_limit"`
 		AgentWatchs []string `json:"agent_watchs"`
 		WorkingDir  string   `json:"working_dir"`
 	} `json:"devsync"`
@@ -30,9 +31,10 @@ type AgentConfig struct {
 
 // Global context for coordinating graceful shutdown
 var (
-	mainCtx    context.Context
-	mainCancel context.CancelFunc
-	shutdownMu sync.Mutex
+	mainCtx      context.Context
+	mainCancel   context.CancelFunc
+	shutdownMu   sync.Mutex
+	globalConfig *AgentConfig
 )
 
 // loadConfig loads configuration from .sync_temp/config.json in current dir or executable dir
@@ -272,6 +274,9 @@ func startWatching() {
 		// Initialize an empty config so we continue and poll for configuration
 		config = &AgentConfig{}
 	}
+
+	// Store config globally for use in handleFileEvent
+	globalConfig = config
 
 	// Get current working directory after config loading
 	workingDir, err := os.Getwd()
@@ -553,6 +558,17 @@ func handleFileEvent(event notify.EventInfo) {
 
 	// Calculate file hash using xxHash (only for files that exist)
 	if info, err := os.Stat(event.Path()); err == nil && !info.IsDir() {
+		// Check file size limit before processing
+		if globalConfig != nil && globalConfig.Devsync.SizeLimit > 0 {
+			fileSizeMB := float64(info.Size()) / (1024 * 1024)
+			limitMB := float64(globalConfig.Devsync.SizeLimit)
+			if fileSizeMB > limitMB {
+				util.Default.ClearLine()
+				util.Default.Printf("[%s] SKIP_SIZE|%s|%.2fMB|limit:%.0fMB\n", timestamp, event.Path(), fileSizeMB, limitMB)
+				return
+			}
+		}
+
 		if hash, err := calculateFileHash(event.Path()); err == nil {
 			util.Default.ClearLine()
 			util.Default.Printf("[%s] HASH|%s|%s\n", timestamp, event.Path(), hash)

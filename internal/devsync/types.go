@@ -87,6 +87,7 @@ type Watcher struct {
 	readyOnce         sync.Once
 	config            *config.Config
 	watchPath         string // Absolute path being watched
+	workingDir        string // Current working directory for context-aware ignore
 	watchChan         chan notify.EventInfo
 	done              chan bool
 	eventChan         chan FileEvent
@@ -157,6 +158,7 @@ type Watcher struct {
 // RemoteAgentConfig represents the configuration sent to remote agent
 type RemoteAgentConfig struct {
 	Devsync struct {
+		SizeLimit      int      `json:"size_limit"`
 		Ignores        []string `json:"ignores"`
 		AgentWatchs    []string `json:"agent_watchs"`
 		ManualTransfer []string `json:"manual_transfer"`

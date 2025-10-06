@@ -27,6 +27,7 @@ type UnifiedDeployOptions struct {
 // RemoteAgentConfig represents the configuration sent to remote agent
 type RemoteAgentConfig struct {
 	Devsync struct {
+		SizeLimit      int      `json:"size_limit"`
 		Ignores        []string `json:"ignores"`
 		AgentWatchs    []string `json:"agent_watchs"`
 		ManualTransfer []string `json:"manual_transfer"`

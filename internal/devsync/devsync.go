@@ -183,6 +183,7 @@ mainMenuLoop:
 				continue mainMenuLoop // back to main menu
 			}
 		case 3: // force_manual_sync
+			util.ResetRaw(oldStage)
 			// Delegate interactive single-sync menu to syncdata package so devsync
 			// stays small. Determine local root preference similar to other flows.
 			localRoot := cfg.LocalPath

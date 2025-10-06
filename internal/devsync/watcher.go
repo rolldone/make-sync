@@ -39,6 +39,13 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 		absWatchPath = watchPath
 	}
 
+	// Get current working directory for context-aware ignore
+	workingDir, wdErr := os.Getwd()
+	if wdErr != nil {
+		util.Default.Printf("⚠️  Failed to get working directory: %v\n", wdErr)
+		workingDir = absWatchPath // fallback to watch path
+	}
+
 	// Initialize SSH client if auth is configured
 	var sshClient *sshclient.SSHClient
 	if cfg.Devsync.Auth.Username != "" && (cfg.Devsync.Auth.PrivateKey != "" || cfg.Devsync.Auth.Password != "") {
@@ -107,6 +114,7 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 		ready:      make(chan struct{}),
 		config:     cfg,
 		watchPath:  absWatchPath,
+		workingDir: workingDir,
 		watchChan:  make(chan notify.EventInfo, 100),
 		done:       make(chan bool),
 		eventChan:  make(chan FileEvent, 100),
@@ -346,6 +354,7 @@ func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
 	cfg.Devsync.AgentWatchs = newCfg.Devsync.AgentWatchs
 	cfg.Devsync.ManualTransfer = newCfg.Devsync.ManualTransfer
 	cfg.Devsync.WorkingDir = newCfg.Devsync.Auth.RemotePath
+	cfg.Devsync.SizeLimit = newCfg.Devsync.SizeLimit
 
 	// Also mirror essential fields into local .sync_temp/config.json for easier local inspection
 	// without having to SSH into remote. We avoid overwriting existing non-empty values except
@@ -1403,6 +1412,20 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 
 	localPath := event.Path
 
+	// Check file size limit before syncing
+	if w.config.Devsync.SizeLimit > 0 {
+		if stat, err := os.Stat(localPath); err == nil {
+			fileSizeMB := float64(stat.Size()) / (1024 * 1024)
+			limitMB := float64(w.config.Devsync.SizeLimit)
+			if fileSizeMB > limitMB {
+				w.safePrintf("⚠️  File %s (%.2f MB) exceeds size limit (%.0f MB), skipping sync\n", localPath, fileSizeMB, limitMB)
+				return
+			}
+		} else {
+			w.safePrintf("⚠️  Could not get file size for %s: %v, skipping size check\n", localPath, err)
+		}
+	}
+
 	targetOS := strings.ToLower(w.config.Devsync.OSTarget)
 	remoteBase := w.config.Devsync.Auth.RemotePath
 	if remoteBase == "" {
@@ -1490,6 +1513,12 @@ func (w *Watcher) mapNotifyEvent(event notify.Event) EventType {
 }
 
 func (w *Watcher) shouldIgnore(path string) bool {
+	// Context-aware ignore bypass: if working directory is inside an ignored path,
+	// we should still watch files in the working directory and its subfolders
+	if w.isWorkingDirectoryOrSubfolder(path) {
+		return false // Don't ignore paths that contain our working directory
+	}
+
 	// Use cached IgnoreCache instance for .sync_ignore files
 	w.ignoresMu.RLock()
 	ignoreCache := w.ignoreCache
@@ -1647,6 +1676,35 @@ func (w *Watcher) loadExtendedIgnores() []string {
 	out := make([]string, len(defaultExtendedIgnores))
 	copy(out, defaultExtendedIgnores)
 	return out
+}
+
+// isWorkingDirectoryOrSubfolder checks if the given path is the working directory or a subfolder of it
+// This is used for context-aware ignore bypass - if working directory is inside an ignored path,
+// we should still watch files in that working directory and its subfolders
+func (w *Watcher) isWorkingDirectoryOrSubfolder(path string) bool {
+	if w.workingDir == "" {
+		return false
+	}
+
+	// Get absolute path for comparison
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+
+	absWorkingDir, err := filepath.Abs(w.workingDir)
+	if err != nil {
+		return false
+	}
+
+	// Check if the path is the working directory or a subfolder of it
+	rel, err := filepath.Rel(absWorkingDir, absPath)
+	if err != nil {
+		return false
+	}
+
+	// If rel doesn't contain ".." then the path is inside working directory (or equal to it)
+	return !strings.Contains(rel, "..")
 }
 
 // matchesPattern checks if a path matches a pattern (supports wildcards)
