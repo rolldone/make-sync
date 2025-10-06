@@ -14,6 +14,9 @@ import (
 	"make-sync/internal/config"
 	"make-sync/internal/devsync"
 	"make-sync/internal/history"
+	"make-sync/internal/pipeline/executor"
+	"make-sync/internal/pipeline/parser"
+	"make-sync/internal/pipeline/types"
 	"make-sync/internal/util"
 
 	"github.com/manifoldco/promptui"
@@ -240,6 +243,8 @@ func init() {
 	rootCmd.AddCommand(devsyncCmd)
 	// register path-info command
 	rootCmd.AddCommand(pathinfoCmd)
+	// register pipeline command
+	rootCmd.AddCommand(NewPipelineCmd())
 }
 
 func showRecentWorkspacesMenu() {
@@ -585,6 +590,112 @@ func Execute() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+// NewPipelineCmd creates the pipeline command
+func NewPipelineCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "pipeline",
+		Short: "Manage pipeline executions",
+		Long:  `Run, list, and manage pipeline executions for automated workflows.`,
+	}
+
+	cmd.AddCommand(
+		newPipelineRunCmd(),
+		newPipelineListCmd(),
+	)
+
+	return cmd
+}
+
+// newPipelineRunCmd creates the pipeline run subcommand
+func newPipelineRunCmd() *cobra.Command {
+	var varOverrides map[string]string
+
+	cmd := &cobra.Command{
+		Use:   "run [execution_key]",
+		Short: "Run a pipeline execution",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			executionKey := args[0]
+
+			// Load config
+			cfg, err := config.LoadAndRenderConfig()
+			if err != nil {
+				fmt.Printf("❌ Failed to load config: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Find execution
+			var execution *types.Execution
+			for i, exec := range cfg.DirectAccess.Executions {
+				if exec.Key == executionKey {
+					execution = &cfg.DirectAccess.Executions[i]
+					break
+				}
+			}
+			if execution == nil {
+				fmt.Printf("❌ Execution '%s' not found\n", executionKey)
+				os.Exit(1)
+			}
+
+			// Load pipeline
+			pipelinePath := filepath.Join(cfg.DirectAccess.PipelineDir, execution.Pipeline)
+			pipeline, err := parser.ParsePipeline(pipelinePath)
+			if err != nil {
+				fmt.Printf("❌ Failed to parse pipeline: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Load vars
+			varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
+			vars, err := parser.ParseVars(varsPath, execution.Var)
+			if err != nil {
+				fmt.Printf("❌ Failed to parse vars: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Apply overrides
+			for k, v := range varOverrides {
+				vars[k] = v
+			}
+
+			// Execute
+			executor := executor.NewExecutor()
+			if err := executor.Execute(pipeline, execution, vars, execution.Hosts, cfg); err != nil {
+				fmt.Printf("❌ Execution failed: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Println("✅ Pipeline executed successfully")
+		},
+	}
+
+	cmd.Flags().StringToStringVar(&varOverrides, "var", nil, "Override variables (key=value)")
+
+	return cmd
+}
+
+// newPipelineListCmd creates the pipeline list subcommand
+func newPipelineListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List available pipeline executions",
+		Run: func(cmd *cobra.Command, args []string) {
+			cfg, err := config.LoadAndRenderConfig()
+			if err != nil {
+				fmt.Printf("❌ Failed to load config: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Println("Available Executions:")
+			for _, exec := range cfg.DirectAccess.Executions {
+				fmt.Printf("- %s (%s): %s\n", exec.Name, exec.Key, exec.Pipeline)
+			}
+		},
+	}
+
+	return cmd
 }
 
 // ExecuteContext allows running the root command with a supplied context for cancellation.

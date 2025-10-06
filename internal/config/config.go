@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"make-sync/internal/pipeline/types"
 	"make-sync/internal/util"
 	"os"
 	"path/filepath"
@@ -83,8 +84,10 @@ type TriggerPermission struct {
 
 type DirectAccess struct {
 	ConfigFile  string                   `yaml:"config_file"`
+	PipelineDir string                   `yaml:"pipeline_dir"`
 	SSHConfigs  []map[string]interface{} `yaml:"ssh_configs"`
 	SSHCommands []SSHCommand             `yaml:"ssh_commands"`
+	Executions  []types.Execution        `yaml:"executions"`
 }
 
 type SSHCommand struct {

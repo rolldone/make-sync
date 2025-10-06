@@ -1,0 +1,59 @@
+package types
+
+// Execution represents a predefined execution profile
+type Execution struct {
+	Name     string   `yaml:"name"`
+	Key      string   `yaml:"key"`
+	Pipeline string   `yaml:"pipeline"`
+	Jobs     []string `yaml:"jobs,omitempty"`
+	Var      string   `yaml:"var"`
+	Hosts    []string `yaml:"hosts"`
+}
+
+// Pipeline represents a pipeline configuration
+type Pipeline struct {
+	Name             string            `yaml:"name"`
+	Jobs             []Job             `yaml:"jobs"`
+	StrictVariables  bool              `yaml:"strict_variables,omitempty"` // error on undefined variables if true
+	ContextVariables map[string]string `yaml:"-"`                          // runtime context variables (not serialized)
+}
+
+// Job represents a job within a pipeline
+type Job struct {
+	Name      string   `yaml:"name"`
+	DependsOn []string `yaml:"depends_on,omitempty"`
+	Steps     []Step   `yaml:"steps"`
+}
+
+// Step represents a step within a job
+type Step struct {
+	Name        string      `yaml:"name"`
+	Type        string      `yaml:"type,omitempty"`        // "command" (default), "file_transfer", "script"
+	Commands    []string    `yaml:"commands,omitempty"`    // for command type
+	File        string      `yaml:"file,omitempty"`        // for script/file_transfer
+	Source      string      `yaml:"source,omitempty"`      // for file_transfer
+	Destination string      `yaml:"destination,omitempty"` // for file_transfer
+	Direction   string      `yaml:"direction,omitempty"`   // "upload" (default) or "download" for file_transfer
+	Conditions  []Condition `yaml:"conditions,omitempty"`  // conditional execution based on output
+	Expect      []Expect    `yaml:"expect,omitempty"`      // interactive prompt responses
+	WorkingDir  string      `yaml:"working_dir,omitempty"` // override working directory for this step
+	Timeout     int         `yaml:"timeout,omitempty"`     // timeout in seconds (default 100)
+	SaveOutput  string      `yaml:"save_output,omitempty"` // save command output to context variable
+}
+
+// Condition represents a conditional check on command output
+type Condition struct {
+	Pattern string `yaml:"pattern"`        // regex pattern to match in output
+	Action  string `yaml:"action"`         // "continue", "drop", "goto_step", "goto_job"
+	Step    string `yaml:"step,omitempty"` // target step name for goto_step
+	Job     string `yaml:"job,omitempty"`  // target job name for goto_job
+}
+
+// Expect represents an expected prompt and response
+type Expect struct {
+	Prompt   string `yaml:"prompt"`   // expected prompt text
+	Response string `yaml:"response"` // response to send
+}
+
+// Vars represents variables for an environment
+type Vars map[string]interface{}
