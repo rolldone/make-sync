@@ -26,6 +26,8 @@ func NewRaw() (*term.State, error) {
 
 func ResetRaw(oldState *term.State) error {
 	if oldState == nil {
+		fmt.Print("\033[2J\033[H")
+		time.Sleep(300 * time.Millisecond)
 		return nil
 	}
 	err := term.Restore(int(os.Stdin.Fd()), oldState)
