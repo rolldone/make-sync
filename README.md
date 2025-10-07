@@ -179,6 +179,167 @@ Troubleshooting:
 - "command not found": pastikan perintah tersedia di PATH remote, atau gunakan path absolut/bin yang tepat.
 - Salah direktori kerja: set `devsync.auth.remote_path` (atau `remote_path`) pada config agar `cd` otomatis ke root project di remote.
 
+## Pipeline System
+
+make-sync menyediakan sistem pipeline yang powerful untuk menjalankan workflow otomatisasi CI/CD dengan dukungan SSH, variable persistence, dan conditional execution.
+
+### Fitur Pipeline
+
+- **Job Dependencies**: Definisi dependensi antar job untuk eksekusi berurutan
+- **Variable Persistence**: Simpan output command ke variable yang bisa digunakan job berikutnya
+- **Conditional Execution**: Jalankan job berdasarkan success/failure job sebelumnya
+- **SSH Execution**: Jalankan command di remote server via SSH
+- **Subroutine Calls**: Panggil job tertentu menggunakan `goto_job` untuk error handling
+- **Template Generation**: Buat pipeline template Docker-focused dengan mudah
+
+### Membuat Pipeline Baru
+
+Gunakan command `pipeline create` untuk membuat template pipeline baru:
+
+```bash
+# Dari directory dengan konfigurasi pipeline_dir
+make-sync pipeline create my-app
+
+# Akan membuat file di pipeline_dir (default: .sync_pipelines/my-app.yaml)
+```
+
+Template yang dihasilkan mencakup:
+- **5 Jobs**: prepare, build, test, deploy, rollback
+- **Docker Integration**: Build, test, dan deploy aplikasi container
+- **Variable Management**: Persistent variables untuk tracking build info
+- **Error Handling**: Conditional rollback pada failure
+- **SSH Deployment**: Multi-host deployment support
+
+### Struktur Pipeline
+
+```yaml
+pipeline:
+  name: "my-app"
+  description: "Docker-based CI/CD pipeline"
+  strict_variables: false
+
+  variables:
+    DOCKER_REGISTRY: "docker.io"
+    DOCKER_REPO: "your-org/my-app"
+    DOCKER_TAG: "latest"
+
+  jobs:
+    - name: "prepare"
+      steps:
+        - name: "check-docker"
+          type: "command"
+          commands: ["docker --version"]
+
+    - name: "build"
+      depends_on: ["prepare"]
+      steps:
+        - name: "build-image"
+          type: "command"
+          commands: ["docker build -t {{DOCKER_REGISTRY}}/{{DOCKER_REPO}}:{{DOCKER_TAG}} ."]
+          save_output: "image_id"
+
+  conditionals:
+    - job: "deploy"
+      condition: "success"
+      when: "test"
+    - job: "rollback"
+      condition: "failure"
+      when: "deploy"
+
+executions:
+  - name: "Development Build"
+    key: "dev"
+    pipeline: "my-app.yaml"
+    hosts: ["localhost"]
+    variables:
+      DOCKER_TAG: "dev-$(date +%Y%m%d-%H%M%S)"
+
+  - name: "Production Deploy"
+    key: "prod"
+    pipeline: "my-app.yaml"
+    hosts: ["prod-server-01", "prod-server-02"]
+    variables:
+      DOCKER_TAG: "$(git rev-parse --short HEAD)"
+```
+
+### Menjalankan Pipeline
+
+```bash
+# List available executions
+make-sync pipeline list
+
+# Run specific execution
+make-sync pipeline run dev
+make-sync pipeline run prod
+```
+
+### Variable Interpolation
+
+Pipeline mendukung variable interpolation dengan format `{{VAR_NAME}}` atau `${{VAR_NAME}}`:
+
+- **Global Variables**: Didefinisikan di `pipeline.variables`
+- **Execution Variables**: Override per execution di `executions[].variables`
+- **Runtime Variables**: Disimpan menggunakan `save_output` dari command
+
+### Advanced Features
+
+#### Variable Persistence
+```yaml
+steps:
+  - name: "get-version"
+    type: "command"
+    commands: ["echo 'v1.2.3'"]
+    save_output: "app_version"  # Simpan output ke variable
+
+  - name: "deploy"
+    type: "command"
+    commands: ["echo 'Deploying version {{app_version}}'"]  # Gunakan variable
+```
+
+#### Conditional Execution
+```yaml
+conditionals:
+  - job: "deploy"
+    condition: "success"
+    when: "test"        # Jalankan deploy jika test sukses
+
+  - job: "rollback"
+    condition: "failure"
+    when: "deploy"      # Jalankan rollback jika deploy gagal
+```
+
+#### Subroutine Calls
+```yaml
+steps:
+  - name: "check-condition"
+    type: "command"
+    commands: ["echo 'SUCCESS'"]
+    conditions:
+      - pattern: "SUCCESS"
+        action: "goto_job"
+        job: "success_handler"
+```
+
+### Konfigurasi Pipeline Directory
+
+Pipeline disimpan di direktori yang dikonfigurasi di `make-sync.yaml`:
+
+```yaml
+direct_access:
+  pipeline_dir: ".sync_pipelines"  # Default location
+```
+
+Jika `pipeline_dir` tidak dikonfigurasi, pipeline akan disimpan di working directory saat command dijalankan.
+
+### File Sistem Pipeline
+
+Pipeline menggunakan struktur file berikut:
+- `pipeline_dir/*.yaml`: File definisi pipeline
+- `pipeline_dir/vars.yaml`: Variable global (auto-generated)
+- `pipeline_dir/scripts/`: Script files untuk eksekusi kompleks
+
+**⚠️ Reserved Names**: Jangan gunakan nama `vars` atau `scripts` untuk pipeline karena akan konflik dengan file sistem.
+
 ## Troubleshooting
 - Tidak ada file yang tertransfer:
   - Cek apakah hash sama atau scope/pola tidak match.
