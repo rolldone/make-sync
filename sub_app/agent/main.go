@@ -258,6 +258,9 @@ func gracefulShutdown() {
 }
 
 func startWatching() {
+	// Print PID immediately when starting watch mode
+	fmt.Printf("AGENT_PID:%d\n", os.Getpid())
+
 	// Load config and change working directory
 	if _, err := loadConfigAndChangeDir(); err != nil {
 		util.Default.ClearLine()

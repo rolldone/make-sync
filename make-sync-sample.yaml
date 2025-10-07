@@ -21,6 +21,7 @@ port: "221"
 localPath: ""
 remotePath: /home/ubuntu/workspaces
 devsync:
+    size_limit: 5  # in MB, 0 = no limit, default 0 (no limit)
     # os_target: "linux" or "windows" - affects RemoteCommand syntax in direct_access
     os_target: linux
     auth:

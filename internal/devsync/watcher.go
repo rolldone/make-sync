@@ -561,11 +561,11 @@ func (w *Watcher) startAgentMonitoring() error {
 	// Start agent watch command in background - run once and keep it running
 	var watchCmd string
 	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
-		// Windows: capture PID and run agent
-		watchCmd = fmt.Sprintf(`cmd.exe /C "cd /d "%s" && (type ".sync_temp\config.json" 2>nul || echo NO_REMOTE_CONFIG) && echo AGENT_STARTING && "%s" watch"`, remoteBase, remoteAgentPath)
+		// Windows: just run agent watch (PID will be printed by agent itself)
+		watchCmd = fmt.Sprintf(`cmd.exe /C "cd /d "%s" && "%s" watch"`, remoteBase, remoteAgentPath)
 	} else {
-		// POSIX: capture PID and run agent
-		watchCmd = fmt.Sprintf(`bash -c "(cat %s/.sync_temp/config.json || echo NO_REMOTE_CONFIG) && echo AGENT_STARTING && %s watch & echo AGENT_PID:$! && wait"`, remoteBase, remoteAgentPath)
+		// POSIX: just run agent watch (PID will be printed by agent itself)
+		watchCmd = fmt.Sprintf(`%s watch`, remoteAgentPath)
 	}
 
 	// fmt.Printf("🚀 Starting agent with command: %s\n", watchCmd)
