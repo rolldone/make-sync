@@ -74,7 +74,8 @@ func RunSafePull(cfg *config.Config, sshClient *sshclient.SSHClient) SafePullRes
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
 	// Deploy agent+config and run remote indexing
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, false)
+	// No prefixes provided for full indexing
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, false, nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)
@@ -186,7 +187,8 @@ func RunSafePush(cfg *config.Config, sshClient *sshclient.SSHClient) SafePushRes
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
 	// Run remote indexing and download DB
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, false)
+	// No prefixes provided for full indexing
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, false, nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -175,10 +176,31 @@ func main() {
 
 		// Parse flags after command
 		bypassOverride := false
-		for _, arg := range os.Args[2:] {
+		// manual-transfer parsing: support --manual-transfer [value]
+		var manualPrefixes []string
+		manualFlagPresent := false
+		args := os.Args[2:]
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
 			if arg == "--bypass-ignore" {
 				bypassOverride = true
-				break
+				continue
+			}
+			if arg == "--manual-transfer" || arg == "--manual_transfer" {
+				manualFlagPresent = true
+				// try to read a following value if present and not another flag
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					// support comma separated list
+					vals := strings.Split(args[i+1], ",")
+					for _, v := range vals {
+						v = strings.TrimSpace(v)
+						if v != "" {
+							manualPrefixes = append(manualPrefixes, v)
+						}
+					}
+					i++ // skip value
+				}
+				continue
 			}
 		}
 
@@ -210,7 +232,7 @@ func main() {
 				util.Default.ClearLine()
 				util.Default.Printf("🔄 Bypass ignore mode enabled via --bypass-ignore flag\n")
 			}
-			performIndexing(config, bypassOverride)
+			performIndexing(config, bypassOverride, manualFlagPresent, manualPrefixes)
 			return
 		case "help":
 			fmt.Println("Sync Agent v1.0.0")
@@ -365,7 +387,7 @@ func startWatching() {
 	setupWatcher(watchPaths)
 }
 
-func performIndexing(config *AgentConfig, bypassIgnore bool) {
+func performIndexing(config *AgentConfig, bypassIgnore bool, manualFlagPresent bool, manualPrefixes []string) {
 	// Use current working dir as root for indexing
 	root, err := os.Getwd()
 	if err != nil {
@@ -405,10 +427,78 @@ func performIndexing(config *AgentConfig, bypassIgnore bool) {
 		os.Exit(1)
 	}
 
-	idx, err := indexer.BuildIndex(root, bypassIgnore)
-	if err != nil {
+	var idx indexer.IndexMap
+	var ierr error
+
+	// If manual-transfer flag present: either use provided prefixes or read from config
+	if manualFlagPresent {
+		prefixes := manualPrefixes
+		if len(prefixes) == 0 {
+			// use config manual_transfer (if any) — load raw config file
+			// try to read agent config file under .sync_temp/config.json
+			data, rerr := os.ReadFile(filepath.Join(root, ".sync_temp", "config.json"))
+			if rerr == nil {
+				var ac AgentConfig
+				if jerr := json.Unmarshal(data, &ac); jerr == nil {
+					// generic parse: unmarshal into map to extract manual_transfer
+					var m map[string]interface{}
+					if merr := json.Unmarshal(data, &m); merr == nil {
+						if devRaw, ok := m["devsync"]; ok {
+							if devMap, ok2 := devRaw.(map[string]interface{}); ok2 {
+								if mtRaw, ok3 := devMap["manual_transfer"]; ok3 && mtRaw != nil {
+									if mtSlice, ok4 := mtRaw.([]interface{}); ok4 {
+										for _, v := range mtSlice {
+											if s, sok := v.(string); sok {
+												prefixes = append(prefixes, s)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// If still empty -> warn and fallback to full index
+		if len(prefixes) == 0 {
+			util.Default.ClearLine()
+			util.Default.Printf("⚠️  manual-transfer flag present but no prefixes found in flag or config — falling back to full index\n")
+			idx, ierr = indexer.BuildIndex(root, bypassIgnore)
+		} else {
+			// perform per-prefix indexing and merge
+			idx = indexer.IndexMap{}
+			visited := map[string]struct{}{}
+			for _, pr := range prefixes {
+				// normalize prefix
+				p := strings.TrimPrefix(pr, "/")
+				start := filepath.Join(root, filepath.FromSlash(p))
+				util.Default.ClearLine()
+				util.Default.Printf("🔍 Indexing manual-transfer prefix: %s -> %s\n", pr, start)
+				subIdx, subErr := indexer.BuildIndexSubtree(root, start, bypassIgnore)
+				if subErr != nil {
+					util.Default.ClearLine()
+					util.Default.Printf("⚠️  failed to index prefix %s: %v\n", pr, subErr)
+					continue
+				}
+				// merge: avoid overwriting previously visited absolute paths
+				for k, v := range subIdx {
+					if _, ok := visited[k]; ok {
+						continue
+					}
+					visited[k] = struct{}{}
+					idx[k] = v
+				}
+			}
+			ierr = nil
+		}
+	} else {
+		idx, ierr = indexer.BuildIndex(root, bypassIgnore)
+	}
+	if ierr != nil {
 		util.Default.ClearLine()
-		util.Default.Printf("❌ Indexing failed: %v\n", err)
+		util.Default.Printf("❌ Indexing failed: %v\n", ierr)
 		os.Exit(1)
 	}
 	dbPath := filepath.Join(absSyncTemp, "indexing_files.db")

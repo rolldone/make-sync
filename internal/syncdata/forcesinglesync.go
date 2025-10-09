@@ -142,7 +142,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			case "Download":
 				util.Default.Printf("🔁 Running Download (%s) for prefixes: %v\n", modeChoice, prefixes)
 				// Mirror safe_pull_sync: build agent (with fallback) and run remote indexing first
-				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice)); err != nil {
+				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice), prefixes); err != nil {
 					util.Default.Printf("❌ Remote indexing (safe_pull) failed: %v\n", err)
 					continue
 				}
@@ -187,7 +187,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			case "Upload":
 				util.Default.Printf("🔁 Running Upload (%s) for prefixes: %v\n", modeChoice, prefixes)
 				// Mirror safe_push_sync: run remote indexing first so DB is fresh
-				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice)); err != nil {
+				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice), prefixes); err != nil {
 					util.Default.Printf("❌ Remote indexing (safe_push) failed: %v\n", err)
 					continue
 				}
@@ -238,7 +238,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 // runRemoteIndexingForPull mirrors the safe_pull_sync flow: it builds the agent
 // (with fallback) using remote detection, uploads agent and config, and runs
 // remote indexing so the DB is fresh before pulling.
-func runRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool) error {
+func runRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool, prefixes []string) error {
 	// Determine target OS
 	targetOS := cfg.Devsync.OSTarget
 	if strings.TrimSpace(targetOS) == "" {
@@ -287,7 +287,7 @@ func runRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool) error {
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
 	// Run remote indexing via existing flow (handles upload agent+config, execute, etc.)
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, bypassIgnore)
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, bypassIgnore, prefixes)
 	if err != nil {
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)
 		return err

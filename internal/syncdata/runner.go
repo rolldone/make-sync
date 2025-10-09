@@ -277,7 +277,7 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 	return nil
 }
 
-func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool) (string, error) {
+func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool, prefixes []string) (string, error) {
 	isWin := strings.Contains(strings.ToLower(osTarget), "win")
 
 	// Get unique agent binary name from local config
@@ -308,6 +308,10 @@ func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget str
 		if bypassIgnore {
 			indexingCmd = "indexing --bypass-ignore"
 		}
+		if len(prefixes) > 0 {
+			joined := strings.Join(prefixes, ",")
+			indexingCmd = fmt.Sprintf("%s --manual-transfer %s", indexingCmd, joined)
+		}
 		cmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && \"%s\" %s", cdDir, agentPath, indexingCmd)
 	} else {
 		var agentPath, cdDir string
@@ -327,6 +331,10 @@ func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget str
 		indexingCmd := "indexing"
 		if bypassIgnore {
 			indexingCmd = "indexing --bypass-ignore"
+		}
+		if len(prefixes) > 0 {
+			joined := strings.Join(prefixes, ",")
+			indexingCmd = fmt.Sprintf("%s --manual-transfer %s", indexingCmd, shellQuote(joined))
 		}
 		cmd = fmt.Sprintf("cd %s && %s %s", shellQuote(cdDir), shellQuote(agentPath), indexingCmd)
 	}
@@ -392,7 +400,7 @@ func shellQuote(s string) string {
 // If skipUpload is true, the function will not upload the agent or config and
 // assumes they are already present on the remote (useful when caller already
 // deployed the agent).
-func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIgnore bool) (string, string, error) {
+func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIgnore bool, prefixes []string) (string, string, error) {
 	// find local binary
 	var localBinary string
 	for _, c := range localCandidates {
@@ -450,7 +458,7 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIg
 
 	// Run remote indexing
 	util.Default.Println("🔍 Running remote agent indexing...")
-	out, err := RemoteRunAgentIndexing(sshCli, remoteSyncTemp, osTarget, bypassIgnore)
+	out, err := RemoteRunAgentIndexing(sshCli, remoteSyncTemp, osTarget, bypassIgnore, prefixes)
 	if err != nil {
 		return "", out, fmt.Errorf("remote indexing failed: %v", err)
 	}

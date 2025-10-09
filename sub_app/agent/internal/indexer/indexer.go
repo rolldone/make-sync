@@ -102,6 +102,89 @@ func BuildIndex(root string, bypassIgnore bool) (IndexMap, error) {
 	return idx, err
 }
 
+// BuildIndexSubtree walks only the subtree starting at 'start' and builds an IndexMap
+// Paths' Rel field are computed relative to root. If start does not exist, return empty map and error.
+func BuildIndexSubtree(root, start string, bypassIgnore bool) (IndexMap, error) {
+	idx := IndexMap{}
+
+	// ensure start exists
+	stInfo, err := os.Stat(start)
+	if err != nil {
+		return nil, err
+	}
+
+	// create ignore cache only if not bypassing
+	var ic *SimpleIgnoreCache
+	if !bypassIgnore {
+		ic = NewSimpleIgnoreCache(root)
+	}
+
+	// Walk starting at start
+	err = filepath.WalkDir(start, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		// compute rel relative to root
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return nil
+		}
+		if rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+
+		// skip ignored entries (only if not bypassing)
+		if !bypassIgnore && ic.MatchWithManualTransfer(p, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// compute absolute path
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		abs = filepath.ToSlash(abs)
+
+		meta := FileMeta{
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+			IsDir:   info.IsDir(),
+			Hash:    "",
+			Path:    abs,
+			Rel:     rel,
+		}
+
+		if !info.IsDir() {
+			h, err := hashFile(p)
+			if err == nil {
+				meta.Hash = h
+			} else {
+				// if hashing fails, continue without hash
+				fmt.Fprintf(os.Stderr, "warning: failed to hash %s: %v\n", p, err)
+			}
+		}
+
+		idx[meta.Path] = meta
+		return nil
+	})
+
+	// If start is a single file and not a directory, ensure it was included
+	if !stInfo.IsDir() {
+		// WalkDir above will still handle the file, so nothing special
+	}
+
+	return idx, err
+}
+
 func hashFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
