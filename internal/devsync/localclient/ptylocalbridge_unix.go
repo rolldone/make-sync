@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"time"
 
 	"golang.org/x/term"
 
@@ -78,7 +79,7 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context) error {
 	// Goroutine stdin reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 256)
-
+		throttledMyFunc := util.ThrottledFunction(300 * time.Millisecond)
 		for {
 			select {
 			case <-ctx.Done():
@@ -111,8 +112,11 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context) error {
 								if (c >= '1' && c <= '9') || c == '0' {
 									digit := string([]byte{c})
 									go func(cb func(string), d string) {
-										defer func() { _ = recover() }()
-										cb("alt+" + d)
+										throttledMyFunc(func() {
+											defer func() { _ = recover() }()
+											// prevent panic if cb misbehaves
+											cb("alt+" + d)
+										})
 									}(ih, digit)
 									matchShortcut = true
 									i++

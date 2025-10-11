@@ -19,6 +19,7 @@ import (
 func (w *Watcher) handleKeyboardInput() {
 	buffer := make([]byte, 16) // buffer for possible escape sequences
 
+	throttledMyFunc := util.ThrottledFunction(300 * time.Millisecond)
 	for {
 		select {
 		case <-w.keyboardStop:
@@ -37,7 +38,6 @@ func (w *Watcher) handleKeyboardInput() {
 			if n == 0 {
 				continue
 			}
-
 			// Quick checks for control bytes
 			b0 := buffer[0]
 			// Ctrl+R (0x12) - trigger notify reload
@@ -88,7 +88,9 @@ func (w *Watcher) handleKeyboardInput() {
 			inputRaw := string(buffer[:n])
 			if strings.HasPrefix(inputRaw, "\x1b") {
 				// Restore terminal before running interactive handlers
-				w.handleAltKey(inputRaw)
+				throttledMyFunc(func() {
+					w.handleAltKey(inputRaw)
+				})
 				continue
 			}
 

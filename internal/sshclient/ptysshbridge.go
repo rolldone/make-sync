@@ -395,6 +395,7 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context) error {
 	// stdin reader
 	go func(ctx context.Context) {
 		buf := make([]byte, 256)
+		throttledMyFunc := util.ThrottledFunction(300 * time.Millisecond)
 		util.Default.ClearLine()
 		for {
 			select {
@@ -425,7 +426,9 @@ func (bridge *PTYSSHBridge) ProcessPTYReadInput(ctx context.Context) error {
 								c := buf[i+1]
 								if (c >= '1' && c <= '9') || c == '0' {
 									digit := string([]byte{c})
-									ih("alt+" + digit)
+									throttledMyFunc(func() {
+										ih("alt+" + digit)
+									})
 									isHit = true
 									i++
 								}
