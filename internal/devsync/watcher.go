@@ -1480,15 +1480,16 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 		}
 	}
 
-	w.safePrintf("🔄 Sync (OS=%s) local='%s' → remote='%s' dir='%s'\n", targetOS, localPath, remotePath, remoteDir)
+	util.Default.Printf("🔄 Sync (OS=%s) local='%s' → remote='%s' dir='%s'\n", targetOS, localPath, remotePath, remoteDir)
+	util.Default.ClearLine()
 
 	if err := w.sshClient.UploadFile(localPath, remotePath); err != nil {
 		w.safePrintf("❌ Failed to sync file %s to %s: %v\n", localPath, remotePath, err)
 		return
 	}
 
-	w.safeStatus("✅ File synced: %s → %s\n", localPath, remotePath)
-
+	util.Default.Printf("✅ File synced: %s → %s\n", localPath, remotePath)
+	util.Default.ClearLine()
 	if w.fileCache != nil {
 		if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
 			w.safePrintf("⚠️  Failed to update cache metadata for %s: %v\n", localPath, err)

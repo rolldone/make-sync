@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"make-sync/internal/util"
 	"os"
 	"path"
 	"path/filepath"
@@ -216,7 +217,8 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 			return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\""
 		}
 		cmd := fmt.Sprintf("scp -t %s", doubleQuote(targetDir))
-		fmt.Fprintf(os.Stderr, "[sshclient] starting remote scp (windows) with cmd: %s\n", cmd)
+		util.Default.Printf("[sshclient] starting remote scp (windows) with cmd: %s\n", cmd)
+		util.Default.ClearLine()
 		if err := session.Start(cmd); err != nil {
 			session.Close()
 			return fmt.Errorf("failed to start scp on remote: %v", err)
@@ -225,7 +227,8 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 		// Use POSIX path quoting
 		targetDir := path.Dir(remotePathForScp)
 		cmd := fmt.Sprintf("scp -t %s", shellEscape(targetDir))
-		fmt.Fprintf(os.Stderr, "[sshclient] starting remote scp (posix) with cmd: %s\n", cmd)
+		util.Default.Printf("[sshclient] starting remote scp (posix) with cmd: %s\n", cmd)
+		util.Default.ClearLine()
 		if err := session.Start(cmd); err != nil {
 			session.Close()
 			return fmt.Errorf("failed to start scp on remote: %v", err)
