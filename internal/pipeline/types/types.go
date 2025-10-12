@@ -40,6 +40,7 @@ type Step struct {
 	WorkingDir  string      `yaml:"working_dir,omitempty"` // override working directory for this step
 	Timeout     int         `yaml:"timeout,omitempty"`     // timeout in seconds (default 100)
 	SaveOutput  string      `yaml:"save_output,omitempty"` // save command output to context variable
+	Silent      bool        `yaml:"silent,omitempty"`      // suppress real-time output display
 }
 
 // Condition represents a conditional check on command output

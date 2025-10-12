@@ -304,7 +304,7 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 		fmt.Printf("Running on %s: %s\n", host, fullCmd)
 
 		// Run command with interactive support and timeout
-		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout)
+		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, step.Silent)
 		if err != nil {
 			return "", "", fmt.Errorf("command failed: %v", err)
 		}
@@ -582,10 +582,10 @@ func (e *Executor) interpolateVars(commands []string, vars types.Vars) []string 
 }
 
 // runCommandInteractive runs a command with interactive prompt support and timeout
-func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string, expects []types.Expect, vars types.Vars, timeoutSeconds int) (string, error) {
+func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string, expects []types.Expect, vars types.Vars, timeoutSeconds int, silent bool) (string, error) {
 	if len(expects) == 0 {
 		// No expects, run normally with timeout
-		return e.runCommandWithTimeout(client, cmd, timeoutSeconds)
+		return e.runCommandWithTimeout(client, cmd, timeoutSeconds, silent)
 	}
 
 	// For interactive commands, try to pipe responses
@@ -604,11 +604,11 @@ func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string
 	fullCmd := echoCmd + " | " + cmd
 
 	// Use RunCommandWithOutput to capture and display output with timeout
-	return e.runCommandWithTimeout(client, fullCmd, timeoutSeconds)
+	return e.runCommandWithTimeout(client, fullCmd, timeoutSeconds, silent)
 }
 
 // runCommandWithTimeout runs a command with timeout support and real-time output
-func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string, timeoutSeconds int) (string, error) {
+func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string, timeoutSeconds int, silent bool) (string, error) {
 	type result struct {
 		output string
 		err    error
@@ -618,7 +618,7 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 
 	// Run command in goroutine with real-time output streaming
 	go func() {
-		output, err := e.runCommandWithStreaming(client, cmd)
+		output, err := e.runCommandWithStreaming(client, cmd, silent)
 		resultChan <- result{output: output, err: err}
 	}()
 
@@ -636,7 +636,7 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 }
 
 // runCommandWithStreaming runs a command and streams output in real-time
-func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd string) (string, error) {
+func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd string, silent bool) (string, error) {
 	// Create a new session like RunCommandWithOutput does
 	session, err := client.CreateSession()
 	if err != nil {
@@ -671,7 +671,9 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			fmt.Printf("Command output: %s\n", line)
+			if !silent {
+				fmt.Printf("Command output: %s\n", line)
+			}
 			outputBuf.WriteString(line + "\n")
 		}
 	}()
@@ -682,7 +684,9 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
-			fmt.Printf("Command output: %s\n", line)
+			if !silent {
+				fmt.Printf("Command output: %s\n", line)
+			}
 			outputBuf.WriteString(line + "\n")
 		}
 	}()
