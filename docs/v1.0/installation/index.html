@@ -1,12 +1,183 @@
-<!DOCTYPE html><html lang="id"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Instalasi &amp; Build</title><link rel="stylesheet" href="/make-sync/_astro/_category_.C_lbb1gT.css"></head> <body> <style>astro-island,astro-slot,astro-static-slot{display:contents}</style><script>(()=>{var e=async t=>{await(await t())()};(self.Astro||(self.Astro={})).load=e;window.dispatchEvent(new Event("astro:load"));})();</script><script>(()=>{var A=Object.defineProperty;var g=(i,o,a)=>o in i?A(i,o,{enumerable:!0,configurable:!0,writable:!0,value:a}):i[o]=a;var d=(i,o,a)=>g(i,typeof o!="symbol"?o+"":o,a);{let i={0:t=>m(t),1:t=>a(t),2:t=>new RegExp(t),3:t=>new Date(t),4:t=>new Map(a(t)),5:t=>new Set(a(t)),6:t=>BigInt(t),7:t=>new URL(t),8:t=>new Uint8Array(t),9:t=>new Uint16Array(t),10:t=>new Uint32Array(t),11:t=>1/0*t},o=t=>{let[l,e]=t;return l in i?i[l](e):void 0},a=t=>t.map(o),m=t=>typeof t!="object"||t===null?t:Object.fromEntries(Object.entries(t).map(([l,e])=>[l,o(e)]));class y extends HTMLElement{constructor(){super(...arguments);d(this,"Component");d(this,"hydrator");d(this,"hydrate",async()=>{var b;if(!this.hydrator||!this.isConnected)return;let e=(b=this.parentElement)==null?void 0:b.closest("astro-island[ssr]");if(e){e.addEventListener("astro:hydrate",this.hydrate,{once:!0});return}let c=this.querySelectorAll("astro-slot"),n={},h=this.querySelectorAll("template[data-astro-template]");for(let r of h){let s=r.closest(this.tagName);s!=null&&s.isSameNode(this)&&(n[r.getAttribute("data-astro-template")||"default"]=r.innerHTML,r.remove())}for(let r of c){let s=r.closest(this.tagName);s!=null&&s.isSameNode(this)&&(n[r.getAttribute("name")||"default"]=r.innerHTML)}let p;try{p=this.hasAttribute("props")?m(JSON.parse(this.getAttribute("props"))):{}}catch(r){let s=this.getAttribute("component-url")||"<unknown>",v=this.getAttribute("component-export");throw v&&(s+=` (export ${v})`),console.error(`[hydrate] Error parsing props for component ${s}`,this.getAttribute("props"),r),r}let u;await this.hydrator(this)(this.Component,p,n,{client:this.getAttribute("client")}),this.removeAttribute("ssr"),this.dispatchEvent(new CustomEvent("astro:hydrate"))});d(this,"unmount",()=>{this.isConnected||this.dispatchEvent(new CustomEvent("astro:unmount"))})}disconnectedCallback(){document.removeEventListener("astro:after-swap",this.unmount),document.addEventListener("astro:after-swap",this.unmount,{once:!0})}connectedCallback(){if(!this.hasAttribute("await-children")||document.readyState==="interactive"||document.readyState==="complete")this.childrenConnectedCallback();else{let e=()=>{document.removeEventListener("DOMContentLoaded",e),c.disconnect(),this.childrenConnectedCallback()},c=new MutationObserver(()=>{var n;((n=this.lastChild)==null?void 0:n.nodeType)===Node.COMMENT_NODE&&this.lastChild.nodeValue==="astro:end"&&(this.lastChild.remove(),e())});c.observe(this,{childList:!0}),document.addEventListener("DOMContentLoaded",e)}}async childrenConnectedCallback(){let e=this.getAttribute("before-hydration-url");e&&await import(e),this.start()}async start(){let e=JSON.parse(this.getAttribute("opts")),c=this.getAttribute("client");if(Astro[c]===void 0){window.addEventListener(`astro:${c}`,()=>this.start(),{once:!0});return}try{await Astro[c](async()=>{let n=this.getAttribute("renderer-url"),[h,{default:p}]=await Promise.all([import(this.getAttribute("component-url")),n?import(n):()=>()=>{}]),u=this.getAttribute("component-export")||"default";if(!u.includes("."))this.Component=h[u];else{this.Component=h;for(let f of u.split("."))this.Component=this.Component[f]}return this.hydrator=p,this.hydrate},e,this)}catch(n){console.error(`[astro-island] Error hydrating ${this.getAttribute("component-url")}`,n)}}attributeChangedCallback(){this.hydrate()}}d(y,"observedAttributes",["props"]),customElements.get("astro-island")||customElements.define("astro-island",y)}})();</script><astro-island uid="Z9gXkb" prefix="r15" component-url="/make-sync/_astro/Header.Dn0QaGRS.js" component-export="default" renderer-url="/make-sync/_astro/client.BfPWZUkF.js" props="{}" ssr client="load" opts="{&quot;name&quot;:&quot;Header&quot;,&quot;value&quot;:true}" await-children><header class="w-full border-b bg-white"><div class="mx-auto max-w-7xl px-6 py-4 flex items-center justify-between"><a href="/make-sync/" class="font-semibold text-lg">make-sync</a><nav class="space-x-4"><a href="/make-sync/" class="text-sm text-gray-700 hover:underline">Home</a><a href="/make-sync/docs" class="text-sm text-gray-700 hover:underline">Documentation</a><a href="https://github.com/" class="text-sm text-gray-700 hover:underline" target="_blank" rel="noreferrer">GitHub</a><a href="/make-sync/contact" class="text-sm text-gray-700 hover:underline">Contact</a></nav></div></header><!--astro:end--></astro-island> <div class="min-h-screen bg-background text-foreground"> <div class="mx-auto max-w-7xl px-6 py-12 grid gap-8 grid-cols-1 md:grid-cols-[280px_1fr]"> <aside> <div class="rounded-xl border bg-card text-card-foreground shadow p-4"> <div class="mb-4 font-semibold text-lg">Dokumentasi</div> <nav class="space-y-2"> <div> <div class="mb-4 font-semibold text-lg">Versi: v1.0</div> <nav class="flex flex-col space-y-2">  <a href="/make-sync/docs/v1.0/behavior">Detail Perilaku</a>  <a href="/make-sync/docs/v1.0/configuration">Konfigurasi</a>  <a href="/make-sync/docs/v1.0/direct-access">Direct Access (SSH)</a>  <a href="/make-sync/docs/v1.0/features">Fitur Utama</a>  <a href="/make-sync/docs/v1.0/getting-started">Memulai dengan make-sync</a>  <a href="/make-sync/docs/v1.0/installation">Instalasi &amp; Build</a>  <a href="/make-sync/docs/v1.0/license">Lisensi</a>  <a href="/make-sync/docs/v1.0/pipeline">Pipeline</a>  <a href="/make-sync/docs/v1.0/troubleshooting">Tips &amp; Troubleshooting</a>  <a href="/make-sync/docs/v1.0/usage">Menu Interaktif</a>  </nav> </div> </nav> <div class="mt-4">  <a href="/make-sync/docs">
-Lihat semua
-</a>  </div> </div> </aside> <main> <div class="rounded-xl border bg-card text-card-foreground shadow p-6">   <article> <astro-island uid="1KlL0W" prefix="r14" component-url="/make-sync/_astro/TOC.5ikNIGQY.js" component-export="TOC" renderer-url="/make-sync/_astro/client.BfPWZUkF.js" props="{}" ssr client="load" opts="{&quot;name&quot;:&quot;TOC&quot;,&quot;value&quot;:true}"></astro-island> <h2 id="instalasi--build">Instalasi &#x26; Build</h2>
+<!DOCTYPE html><html lang="id"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Instalasi &amp; Build</title><link rel="stylesheet" href="/make-sync/_astro/contact.iCsjhWG-.css">
+<link rel="stylesheet" href="/make-sync/_astro/_category_.9tiDSx16.css"></head> <body class="bg-background text-foreground antialiased"> <style>astro-island,astro-slot,astro-static-slot{display:contents}</style><script>(()=>{var e=async t=>{await(await t())()};(self.Astro||(self.Astro={})).load=e;window.dispatchEvent(new Event("astro:load"));})();</script><script>(()=>{var A=Object.defineProperty;var g=(i,o,a)=>o in i?A(i,o,{enumerable:!0,configurable:!0,writable:!0,value:a}):i[o]=a;var d=(i,o,a)=>g(i,typeof o!="symbol"?o+"":o,a);{let i={0:t=>m(t),1:t=>a(t),2:t=>new RegExp(t),3:t=>new Date(t),4:t=>new Map(a(t)),5:t=>new Set(a(t)),6:t=>BigInt(t),7:t=>new URL(t),8:t=>new Uint8Array(t),9:t=>new Uint16Array(t),10:t=>new Uint32Array(t),11:t=>1/0*t},o=t=>{let[l,e]=t;return l in i?i[l](e):void 0},a=t=>t.map(o),m=t=>typeof t!="object"||t===null?t:Object.fromEntries(Object.entries(t).map(([l,e])=>[l,o(e)]));class y extends HTMLElement{constructor(){super(...arguments);d(this,"Component");d(this,"hydrator");d(this,"hydrate",async()=>{var b;if(!this.hydrator||!this.isConnected)return;let e=(b=this.parentElement)==null?void 0:b.closest("astro-island[ssr]");if(e){e.addEventListener("astro:hydrate",this.hydrate,{once:!0});return}let c=this.querySelectorAll("astro-slot"),n={},h=this.querySelectorAll("template[data-astro-template]");for(let r of h){let s=r.closest(this.tagName);s!=null&&s.isSameNode(this)&&(n[r.getAttribute("data-astro-template")||"default"]=r.innerHTML,r.remove())}for(let r of c){let s=r.closest(this.tagName);s!=null&&s.isSameNode(this)&&(n[r.getAttribute("name")||"default"]=r.innerHTML)}let p;try{p=this.hasAttribute("props")?m(JSON.parse(this.getAttribute("props"))):{}}catch(r){let s=this.getAttribute("component-url")||"<unknown>",v=this.getAttribute("component-export");throw v&&(s+=` (export ${v})`),console.error(`[hydrate] Error parsing props for component ${s}`,this.getAttribute("props"),r),r}let u;await this.hydrator(this)(this.Component,p,n,{client:this.getAttribute("client")}),this.removeAttribute("ssr"),this.dispatchEvent(new CustomEvent("astro:hydrate"))});d(this,"unmount",()=>{this.isConnected||this.dispatchEvent(new CustomEvent("astro:unmount"))})}disconnectedCallback(){document.removeEventListener("astro:after-swap",this.unmount),document.addEventListener("astro:after-swap",this.unmount,{once:!0})}connectedCallback(){if(!this.hasAttribute("await-children")||document.readyState==="interactive"||document.readyState==="complete")this.childrenConnectedCallback();else{let e=()=>{document.removeEventListener("DOMContentLoaded",e),c.disconnect(),this.childrenConnectedCallback()},c=new MutationObserver(()=>{var n;((n=this.lastChild)==null?void 0:n.nodeType)===Node.COMMENT_NODE&&this.lastChild.nodeValue==="astro:end"&&(this.lastChild.remove(),e())});c.observe(this,{childList:!0}),document.addEventListener("DOMContentLoaded",e)}}async childrenConnectedCallback(){let e=this.getAttribute("before-hydration-url");e&&await import(e),this.start()}async start(){let e=JSON.parse(this.getAttribute("opts")),c=this.getAttribute("client");if(Astro[c]===void 0){window.addEventListener(`astro:${c}`,()=>this.start(),{once:!0});return}try{await Astro[c](async()=>{let n=this.getAttribute("renderer-url"),[h,{default:p}]=await Promise.all([import(this.getAttribute("component-url")),n?import(n):()=>()=>{}]),u=this.getAttribute("component-export")||"default";if(!u.includes("."))this.Component=h[u];else{this.Component=h;for(let f of u.split("."))this.Component=this.Component[f]}return this.hydrator=p,this.hydrate},e,this)}catch(n){console.error(`[astro-island] Error hydrating ${this.getAttribute("component-url")}`,n)}}attributeChangedCallback(){this.hydrate()}}d(y,"observedAttributes",["props"]),customElements.get("astro-island")||customElements.define("astro-island",y)}})();</script><astro-island uid="Z9gXkb" prefix="r16" component-url="/make-sync/_astro/Header.Dn0QaGRS.js" component-export="default" renderer-url="/make-sync/_astro/client.BfPWZUkF.js" props="{}" ssr client="load" opts="{&quot;name&quot;:&quot;Header&quot;,&quot;value&quot;:true}" await-children><header class="w-full border-b bg-white"><div class="mx-auto max-w-7xl px-6 py-4 flex items-center justify-between"><a href="/make-sync/" class="font-semibold text-lg">make-sync</a><nav class="space-x-4"><a href="/make-sync/" class="text-sm text-gray-700 hover:underline">Home</a><a href="/make-sync/docs" class="text-sm text-gray-700 hover:underline">Documentation</a><a href="https://github.com/" class="text-sm text-gray-700 hover:underline" target="_blank" rel="noreferrer">GitHub</a><a href="/make-sync/contact" class="text-sm text-gray-700 hover:underline">Contact</a></nav></div></header><!--astro:end--></astro-island> <div class="min-h-screen"> <div class="mx-auto max-w-7xl px-6 py-8"> <div class="flex gap-8"> <!-- Sidebar --> <aside class="w-64 shrink-0 border-r bg-card/50 pr-6"> <div class="sticky top-8"> <div class="mb-6"> <h2 class="text-lg font-semibold tracking-tight">Dokumentasi</h2> <p class="text-sm text-muted-foreground mt-1">API reference dan panduan</p> </div> <nav class="space-y-1"> <div> <div class="space-y-1"> <div class="px-3 py-2 text-sm font-medium text-muted-foreground">
+Versi v1.0 </div>  <a href="/make-sync/docs/v1.0/installation" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-primary-foreground"></div> Instalasi &amp; Build </a>  <a href="/make-sync/docs/v1.0/getting-started" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Memulai dengan make-sync </a>  <a href="/make-sync/docs/v1.0/behavior" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Detail Perilaku </a>  <a href="/make-sync/docs/v1.0/direct-access" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Direct Access (SSH) </a>  <a href="/make-sync/docs/v1.0/features" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Fitur Utama </a>  <a href="/make-sync/docs/v1.0/configuration" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Konfigurasi </a>  <a href="/make-sync/docs/v1.0/usage" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Menu Interaktif </a>  <a href="/make-sync/docs/v1.0/pipeline" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Pipeline </a>  <a href="/make-sync/docs/v1.0/troubleshooting" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Tips &amp; Troubleshooting </a>  <a href="/make-sync/docs/v1.0/license" class="flex items-center gap-3"> <div class="w-1 h-1 rounded-full bg-muted-foreground/40"></div> Lisensi </a>  </div> </div> </nav> <div class="mt-8 pt-6 border-t">  <a href="/make-sync/docs" class="flex items-center gap-2"> <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path> </svg>
+Lihat semua versi
+</a>  </div> </div> </aside> <!-- Main content --> <main class="flex-1 min-w-0"> <div class="max-w-4xl"> <!-- Breadcrumb --> <nav class="flex items-center text-sm text-muted-foreground mb-6"> <a href="/make-sync/" class="hover:text-foreground transition-colors">Home</a> <svg class="w-4 h-4 mx-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path> </svg> <a href="/make-sync/docs" class="hover:text-foreground transition-colors">Dokumentasi</a> <svg class="w-4 h-4 mx-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path> </svg> <span class="text-foreground font-medium">Instalasi &amp; Build</span> </nav> <!-- Content --> <article class="prose prose-slate dark:prose-invert max-w-none prose-headings:scroll-mt-20 prose-headings:font-semibold prose-h1:text-3xl prose-h2:text-2xl prose-h3:text-xl prose-p:leading-7 prose-a:font-medium prose-a:no-underline hover:prose-a:underline prose-strong:font-semibold prose-code:font-mono prose-code:text-sm prose-pre:bg-slate-900 prose-pre:text-slate-100">   <div class="space-y-6"> <!-- Page header --> <div class="space-y-3"> <div class="flex items-center gap-2 text-sm text-muted-foreground"> <span>Dokumentasi</span> <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path> </svg> <span>v1.0</span> </div> <h1 class="text-3xl font-bold tracking-tight">Instalasi &amp; Build</h1> </div> <!-- Table of contents (if needed) --> <div class="lg:hidden"> <astro-island uid="1KlL0W" prefix="r15" component-url="/make-sync/_astro/TOC.5ikNIGQY.js" component-export="TOC" renderer-url="/make-sync/_astro/client.BfPWZUkF.js" props="{}" ssr client="load" opts="{&quot;name&quot;:&quot;TOC&quot;,&quot;value&quot;:true}"></astro-island> </div> <!-- Content --> <div class="prose prose-slate dark:prose-invert max-w-none"> <h2 id="instalasi--build">Instalasi &#x26; Build</h2>
+<p>Panduan ini menjelaskan beberapa cara memasang make-sync sehingga dapat diakses secara global (<code>make-sync</code> di PATH) pada Linux, macOS, dan Windows. Secara umum Anda membutuhkan:</p>
 <ul>
-<li>Butuh Go 1.24+.</li>
-<li>Jalankan untuk membangun:</li>
+<li>Go 1.24+ (untuk membangun dari sumber) jika ingin membuat binari sendiri.</li>
+<li>Akses untuk menulis ke folder sistem (mis. <code>/usr/local/bin</code> atau <code>C:\\Program Files</code>) bila memilih pemasangan sistem-wide.</li>
 </ul>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> build</span><span style="color:#9ECBFF"> ./...</span></span></code></pre>
+<p>Pilih salah satu metode di bawah yang paling sesuai dengan kebutuhanmu: build lokal, <code>go install</code>, atau menaruh binari di folder PATH.</p>
+<h3 id="1-build-cepat-dari-kode-sumber-lokal">1) Build cepat (dari kode sumber lokal)</h3>
+<p>Jika kamu sedang berada di root repository (kode sumber sudah ada), jalankan:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> build</span><span style="color:#79B8FF"> -o</span><span style="color:#9ECBFF"> make-sync</span><span style="color:#9ECBFF"> ./...</span></span></code></pre>
+<p>Perintah di atas menghasilkan binari bernama <code>make-sync</code> (atau <code>make-sync.exe</code> di Windows) di folder sekarang. Untuk menjalankan dari lokasi manapun, pindahkan binari tersebut ke folder yang ada di PATH (lihat bagian per-OS).</p>
+<h3 id="2-go-install-cara-recommended-untuk-go-118">2) <code>go install</code> (cara recommended untuk Go >=1.18)</h3>
+<p>Jika repository tersedia melalui VCS path (contoh: <code>github.com/rolldone/make-sync</code>), kamu bisa menginstal langsung ke GOBIN:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> install</span><span style="color:#9ECBFF"> github.com/rolldone/make-sync@latest</span></span></code></pre>
+<p>Binary akan diinstall ke folder yang dikembalikan <code>go env GOBIN</code> (jika di-set) atau <code>$(go env GOPATH)/bin</code> (default: <code>$HOME/go/bin</code>). Pastikan folder tersebut ada di <code>PATH</code>.</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6A737D"># contoh menambah PATH (bash/zsh)</span></span>
+<span class="line"><span style="color:#79B8FF">echo</span><span style="color:#9ECBFF"> 'export PATH="$HOME/go/bin:$PATH"'</span><span style="color:#F97583"> >></span><span style="color:#9ECBFF"> ~/.profile</span></span>
+<span class="line"><span style="color:#79B8FF">source</span><span style="color:#9ECBFF"> ~/.profile</span></span></code></pre>
+<hr>
+<h2 id="linux">Linux</h2>
+<p>Langkah singkat:</p>
+<ol>
+<li>Build/install:</li>
+</ol>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6A737D"># build di direktori proyek</span></span>
+<span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> build</span><span style="color:#79B8FF"> -o</span><span style="color:#9ECBFF"> make-sync</span><span style="color:#9ECBFF"> ./...</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D"># atau install via go (jika tersedia sebagai modul publik)</span></span>
+<span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> install</span><span style="color:#9ECBFF"> github.com/rolldone/make-sync@latest</span></span></code></pre>
+<ol start="2">
+<li>Pasang agar dapat diakses global (opsi):</li>
+</ol>
+<ul>
+<li>Pindahkan ke <code>/usr/local/bin</code> (system-wide):</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> mv</span><span style="color:#9ECBFF"> make-sync</span><span style="color:#9ECBFF"> /usr/local/bin/</span></span>
+<span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> chmod</span><span style="color:#9ECBFF"> +x</span><span style="color:#9ECBFF"> /usr/local/bin/make-sync</span></span></code></pre>
+<ul>
+<li>Atau pakai GOBIN user-local (tanpa sudo):</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">mkdir</span><span style="color:#79B8FF"> -p</span><span style="color:#9ECBFF"> "</span><span style="color:#E1E4E8">$HOME</span><span style="color:#9ECBFF">/.local/bin"</span></span>
+<span class="line"><span style="color:#B392F0">mv</span><span style="color:#9ECBFF"> make-sync</span><span style="color:#9ECBFF"> "</span><span style="color:#E1E4E8">$HOME</span><span style="color:#9ECBFF">/.local/bin/"</span></span>
+<span class="line"><span style="color:#79B8FF">echo</span><span style="color:#9ECBFF"> 'export PATH="$HOME/.local/bin:$PATH"'</span><span style="color:#F97583"> >></span><span style="color:#9ECBFF"> ~/.profile</span></span>
+<span class="line"><span style="color:#79B8FF">source</span><span style="color:#9ECBFF"> ~/.profile</span></span></code></pre>
+<ol start="3">
+<li>Verifikasi:</li>
+</ol>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#79B8FF"> --version</span></span>
+<span class="line"><span style="color:#6A737D"># atau</span></span>
+<span class="line"><span style="color:#79B8FF">which</span><span style="color:#9ECBFF"> make-sync</span></span></code></pre>
+<p>Catatan:</p>
+<ul>
+<li>Jika mendapat <code>permission denied</code>, jalankan <code>chmod +x</code> atau gunakan <code>sudo</code> untuk memindahkan ke direktori sistem.</li>
+<li>Jika <code>command not found</code>, periksa apakah folder bin ada di <code>PATH</code>.</li>
+</ul>
+<hr>
+<h2 id="macos">macOS</h2>
+<p>Langkah mirip Linux; perhatikan lokasi Homebrew pada Apple Silicon vs Intel.</p>
+<ol>
+<li>Build/install:</li>
+</ol>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> build</span><span style="color:#79B8FF"> -o</span><span style="color:#9ECBFF"> make-sync</span><span style="color:#9ECBFF"> ./...</span></span>
+<span class="line"><span style="color:#6A737D"># atau</span></span>
+<span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> install</span><span style="color:#9ECBFF"> github.com/rolldone/make-sync@latest</span></span></code></pre>
+<ol start="2">
+<li>Pasang ke folder yang ada di PATH:</li>
+</ol>
+<ul>
+<li>Intel (default Homebrew path <code>/usr/local/bin</code>):</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> mv</span><span style="color:#9ECBFF"> make-sync</span><span style="color:#9ECBFF"> /usr/local/bin/</span></span>
+<span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> chmod</span><span style="color:#9ECBFF"> +x</span><span style="color:#9ECBFF"> /usr/local/bin/make-sync</span></span></code></pre>
+<ul>
+<li>Apple Silicon (M1/M2) menggunakan Homebrew di <code>/opt/homebrew/bin</code>:</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> mv</span><span style="color:#9ECBFF"> make-sync</span><span style="color:#9ECBFF"> /opt/homebrew/bin/</span></span>
+<span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> chmod</span><span style="color:#9ECBFF"> +x</span><span style="color:#9ECBFF"> /opt/homebrew/bin/make-sync</span></span></code></pre>
+<ol start="3">
+<li>Alternatif: Homebrew formula (jika tersedia)</li>
+</ol>
+<p>Jika ada formula resmi, menginstal via Homebrew memberi integrasi lebih baik:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">brew</span><span style="color:#9ECBFF"> install</span><span style="color:#9ECBFF"> rolldone/make-sync/make-sync</span></span></code></pre>
+<ol start="4">
+<li>Verifikasi:</li>
+</ol>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#79B8FF"> --version</span></span>
+<span class="line"><span style="color:#79B8FF">which</span><span style="color:#9ECBFF"> make-sync</span></span></code></pre>
+<hr>
+<h2 id="windows">Windows</h2>
+<p>Di Windows ada beberapa opsi: menggunakan <code>go install</code> lalu menambahkan <code>GOBIN</code> ke PATH, atau memindahkan binari ke folder terdaftar PATH.</p>
+<ol>
+<li>Build (PowerShell):</li>
+</ol>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#6A737D"># dari root project</span></span>
+<span class="line"><span style="color:#E1E4E8">go build </span><span style="color:#F97583">-</span><span style="color:#E1E4E8">o </span><span style="color:#79B8FF">make-sync.exe</span><span style="color:#E1E4E8"> .\\...</span></span>
+<span class="line"><span style="color:#6A737D"># atau</span></span>
+<span class="line"><span style="color:#E1E4E8">go install </span><span style="color:#79B8FF">github.com</span><span style="color:#F97583">/</span><span style="color:#E1E4E8">rolldone</span><span style="color:#F97583">/</span><span style="color:#E1E4E8">make</span><span style="color:#F97583">-</span><span style="color:#E1E4E8">sync@latest</span></span></code></pre>
+<ol start="2">
+<li>Pasang global:</li>
+</ol>
+<ul>
+<li>Buat folder install dan tambahkan ke PATH (eks. <code>C:\\Program Files\\make-sync</code>):</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#79B8FF">New-Item</span><span style="color:#F97583"> -</span><span style="color:#E1E4E8">ItemType Directory </span><span style="color:#F97583">-</span><span style="color:#E1E4E8">Path </span><span style="color:#9ECBFF">'"C:\\Program Files\\make-sync"'</span><span style="color:#F97583"> -</span><span style="color:#E1E4E8">Force</span></span>
+<span class="line"><span style="color:#79B8FF">Move-Item</span><span style="color:#F97583"> -</span><span style="color:#E1E4E8">Path .\\</span><span style="color:#79B8FF">make-sync.exe</span><span style="color:#F97583"> -</span><span style="color:#E1E4E8">Destination </span><span style="color:#9ECBFF">'C:\\Program Files\\make-sync\\make-sync.exe'</span></span>
+<span class="line"><span style="color:#6A737D"># Tambah ke PATH (untuk user):</span></span>
+<span class="line"><span style="color:#E1E4E8">setx PATH </span><span style="color:#9ECBFF">"%PATH%;C:\\Program Files\\make-sync"</span></span></code></pre>
+<ul>
+<li>Atau tambahkan <code>$(go env GOPATH)\\bin</code> ke PATH jika menggunakan <code>go install</code>.</li>
+</ul>
+<ol start="3">
+<li>Paket manager (opsional):</li>
+</ol>
+<ul>
+<li>Scoop (jika tersedia):</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#E1E4E8">scoop install make</span><span style="color:#F97583">-</span><span style="color:#E1E4E8">sync</span></span></code></pre>
+<ul>
+<li>Chocolatey (jika tersedia):</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#E1E4E8">choco install make</span><span style="color:#F97583">-</span><span style="color:#E1E4E8">sync</span></span></code></pre>
+<ol start="4">
+<li>Verifikasi (PowerShell):</li>
+</ol>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="powershell"><code><span class="line"><span style="color:#E1E4E8">make</span><span style="color:#F97583">-</span><span style="color:#E1E4E8">sync </span><span style="color:#F97583">--</span><span style="color:#E1E4E8">version</span></span>
+<span class="line"><span style="color:#79B8FF">where.exe</span><span style="color:#E1E4E8"> make</span><span style="color:#F97583">-</span><span style="color:#E1E4E8">sync</span></span></code></pre>
+<hr>
+<h2 id="verifikasi--troubleshooting">Verifikasi &#x26; Troubleshooting</h2>
+<ul>
+<li>Cek versi / help:</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#79B8FF"> --version</span></span>
+<span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#79B8FF"> --help</span></span></code></pre>
+<ul>
+<li>
+<p><code>command not found</code>:</p>
+<ul>
+<li>Pastikan folder bin (mis. <code>/usr/local/bin</code>, <code>$HOME/.local/bin</code>, atau <code>$GOPATH/bin</code>) ada di <code>PATH</code>.</li>
+</ul>
+</li>
+<li>
+<p><code>permission denied</code>:</p>
+<ul>
+<li>Tambahkan executable permission: <code>chmod +x make-sync</code> atau gunakan <code>sudo</code> saat memindahkan ke direktori sistem.</li>
+</ul>
+</li>
+<li>
+<p><code>go: command not found</code>:</p>
+<ul>
+<li>Install Go dan pastikan <code>go</code> di PATH. Lihat <a href="https://go.dev/doc/install">https://go.dev/doc/install</a></li>
+</ul>
+</li>
+<li>
+<p>SELinux/AppArmor (Linux):</p>
+<ul>
+<li>Jika binary tidak dijalankan karena policy, cek audit logs dan set context/allow rule sesuai kebijakan sistem.</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h2 id="uninstall-singkat">Uninstall singkat</h2>
+<ul>
+<li>Jika dipindahkan ke <code>/usr/local/bin</code> atau <code>/opt/homebrew/bin</code>:</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> rm</span><span style="color:#79B8FF"> -f</span><span style="color:#9ECBFF"> /usr/local/bin/make-sync</span></span>
+<span class="line"><span style="color:#6A737D"># atau</span></span>
+<span class="line"><span style="color:#B392F0">sudo</span><span style="color:#9ECBFF"> rm</span><span style="color:#79B8FF"> -f</span><span style="color:#9ECBFF"> /opt/homebrew/bin/make-sync</span></span></code></pre>
+<ul>
+<li>Jika di <code>C:\\Program Files\\make-sync</code> (Windows): hapus folder dan update PATH.</li>
+</ul>
+<hr>
+<p>Jika mau, saya bisa menambahkan langkah otomatis (skrip install) atau menulis instruksi Homebrew/Scoop/Chocolatey formula sebagai PR untuk mempermudah instalasi bagi pengguna lain.</p>
 <ul>
 <li>Jalankan seluruh test:</li>
 </ul>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> test</span><span style="color:#9ECBFF"> ./...</span></span></code></pre> </article>  </div> </main> </div> </div> <footer class="border-t mt-12 py-8"><div class="mx-auto max-w-5xl px-4 text-center text-sm text-muted-foreground">© <!-- -->2025<!-- --> make-sync — Built with shadcn + Astro</div></footer> </body></html>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#B392F0">go</span><span style="color:#9ECBFF"> test</span><span style="color:#9ECBFF"> ./...</span></span></code></pre> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
+Terakhir diperbarui: 12/10/2025 </div>  <a href="/make-sync/docs/v1.0">
+← Kembali ke overview
+</a>  </div> </div>  </article> </div> </main> </div> </div> </div> <footer class="border-t mt-12 py-8"><div class="mx-auto max-w-5xl px-4 text-center text-sm text-muted-foreground">© <!-- -->2025<!-- --> make-sync — Built with shadcn + Astro</div></footer> </body></html>
