@@ -1,8 +1,7 @@
-<!DOCTYPE html><html lang="en" data-astro-cid-sckkx6r4> <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><meta name="generator" content="Astro v5.14.3"><title>Astro Basics</title><!-- Apply stored theme early to avoid flash-of-unstyled --><script type="module">(function(){try{var e=localStorage.getItem("makeSync:theme");e==="dark"&&document.documentElement.classList.add("dark")}catch{}})();</script><link rel="stylesheet" href="/make-sync/_astro/contact.DrRfyVpR.css">
-<link rel="stylesheet" href="/make-sync/_astro/contact.BBim5rqi.css"></head> <body data-astro-cid-sckkx6r4> <header class="w-full border-b bg-background"> <div class="mx-auto max-w-7xl px-6 py-4 flex items-center justify-between"> <a href="/make-sync/" class="font-semibold text-lg text-foreground">make-sync</a> <nav class="flex items-center gap-4"> <div class="space-x-4 hidden sm:block"> <a href="/make-sync/" class="text-sm text-muted-foreground hover:underline hover:text-foreground">Home</a> <a href="/make-sync/docs" class="text-sm text-muted-foreground hover:underline hover:text-foreground">Documentation</a> <a href="https://github.com/rolldone/make-sync" class="text-sm text-muted-foreground hover:underline hover:text-foreground" target="_blank" rel="noreferrer">GitHub</a> </div> <div> <div id="theme-toggle-placeholder"></div> </div> </nav> </div> </header> <main class="p-6" data-astro-cid-sckkx6r4>  <h1>Contact</h1> <p>For inquiries, email: <a href="mailto:info@example.com">info@example.com</a></p>  </main> <!-- Theme toggle client script: mounts into #theme-toggle-placeholder --> <script type="module">
+<!DOCTYPE html><html lang="en" data-astro-cid-sckkx6r4> <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><meta name="generator" content="Astro v5.14.3"><title>Astro Basics</title><!-- Apply stored theme early to avoid flash-of-unstyled --><script type="module">(function(){try{var e=localStorage.getItem("makeSync:theme");e==="dark"&&document.documentElement.classList.add("dark")}catch{}})();</script><link rel="stylesheet" href="/make-sync/_astro/contact.sgdJDSWR.css">
+<link rel="stylesheet" href="/make-sync/_astro/contact.wee_CiVQ.css"></head> <body data-astro-cid-sckkx6r4> <header class="w-full border-b bg-background"> <div class="mx-auto max-w-7xl px-4 sm:px-6 py-4 flex items-center justify-between"> <a href="/make-sync/" class="font-semibold text-lg text-foreground">make-sync</a> <!-- Mobile menu button (only button on mobile) --> <button id="mobile-menu-button" class="sm:hidden p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted" aria-label="Toggle menu"> <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"> <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path> </svg> </button> <!-- Desktop navigation --> <nav class="hidden sm:flex items-center gap-4"> <div class="space-x-4"> <a href="/make-sync/" class="text-sm text-muted-foreground hover:underline hover:text-foreground">Home</a> <a href="/make-sync/docs" class="text-sm text-muted-foreground hover:underline hover:text-foreground">Documentation</a> <a href="https://github.com/rolldone/make-sync" class="text-sm text-muted-foreground hover:underline hover:text-foreground" target="_blank" rel="noreferrer">GitHub</a> </div> <div> <div id="theme-toggle-placeholder"></div> </div> </nav> </div> <!-- Mobile navigation menu (includes theme toggle) --> <div id="mobile-menu" class="hidden sm:hidden border-t bg-background"> <nav class="px-4 py-4 space-y-3"> <a href="/make-sync/" class="block text-sm text-muted-foreground hover:text-foreground">Home</a> <a href="/make-sync/docs" class="block text-sm text-muted-foreground hover:text-foreground">Documentation</a> <a href="https://github.com/rolldone/make-sync" class="block text-sm text-muted-foreground hover:text-foreground" target="_blank" rel="noreferrer">GitHub</a> <div class="pt-2 border-t"> <div class="flex items-center justify-between"> <span class="text-sm text-muted-foreground">Theme</span> <div id="theme-toggle-placeholder-mobile"></div> </div> </div> </nav> </div> </header> <main class="p-4 sm:p-6" data-astro-cid-sckkx6r4>  <h1>Contact</h1> <p>For inquiries, email: <a href="mailto:info@example.com">info@example.com</a></p>  </main> <!-- Theme toggle + mobile menu client script --> <script type="module">
 			(function() {
 			  const STORAGE_KEY = 'makeSync:theme';
-			  const elId = 'theme-toggle-placeholder';
 
 			  function applyTheme(theme) {
 			    const doc = document.documentElement;
@@ -15,14 +14,15 @@
 
 			  const stored = getStored(); if (stored) applyTheme(stored);
 
-			  function mount() {
-			    const mountPoint = document.getElementById(elId); if (!mountPoint) return;
-			    if (mountPoint.dataset.mounted) return; mountPoint.dataset.mounted = '1';
+			  function mountThemeToggle(mountPointId) {
+			    const mountPoint = document.getElementById(mountPointId);
+			    if (!mountPoint || mountPoint.dataset.mounted) return;
+			    mountPoint.dataset.mounted = '1';
 
 			    const btn = document.createElement('button');
 			    btn.type = 'button';
 			    btn.setAttribute('aria-label', 'Toggle color theme');
-			    btn.className = 'inline-flex items-center justify-center h-8 w-8 rounded-md border bg-transparent border-input text-sm';
+			    btn.className = 'inline-flex items-center justify-center h-8 w-8 rounded-md border bg-transparent border-input text-sm hover:bg-muted';
 
 			    function updateButton() { const isDark = document.documentElement.classList.contains('dark'); btn.textContent = isDark ? '🌙' : '☀️'; }
 
@@ -36,6 +36,23 @@
 			    updateButton(); mountPoint.appendChild(btn);
 			  }
 
-			  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', mount); } else { mount(); }
+			  function setupMobileMenu() {
+			    const mobileMenuButton = document.getElementById('mobile-menu-button');
+			    const mobileMenu = document.getElementById('mobile-menu');
+			    
+			    if (mobileMenuButton && mobileMenu) {
+			      mobileMenuButton.addEventListener('click', () => {
+			        mobileMenu.classList.toggle('hidden');
+			      });
+			    }
+			  }
+
+			  function init() {
+			    mountThemeToggle('theme-toggle-placeholder');
+			    mountThemeToggle('theme-toggle-placeholder-mobile');
+			    setupMobileMenu();
+			  }
+
+			  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
 			})();
 		</script> </body> </html> 
