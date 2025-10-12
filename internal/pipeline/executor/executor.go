@@ -1,12 +1,15 @@
 package executor
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"make-sync/internal/config"
@@ -604,7 +607,7 @@ func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string
 	return e.runCommandWithTimeout(client, fullCmd, timeoutSeconds)
 }
 
-// runCommandWithTimeout runs a command with timeout support
+// runCommandWithTimeout runs a command with timeout support and real-time output
 func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string, timeoutSeconds int) (string, error) {
 	type result struct {
 		output string
@@ -613,9 +616,9 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 
 	resultChan := make(chan result, 1)
 
-	// Run command in goroutine
+	// Run command in goroutine with real-time output streaming
 	go func() {
-		output, err := client.RunCommandWithOutput(cmd)
+		output, err := e.runCommandWithStreaming(client, cmd)
 		resultChan <- result{output: output, err: err}
 	}()
 
@@ -626,12 +629,71 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 		if res.err != nil {
 			return "", res.err
 		}
-		// Print output for visibility
-		fmt.Printf("Command output: %s\n", strings.TrimSpace(res.output))
 		return res.output, nil
 	case <-time.After(timeout):
 		return "", fmt.Errorf("command timed out after %d seconds", timeoutSeconds)
 	}
+}
+
+// runCommandWithStreaming runs a command and streams output in real-time
+func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd string) (string, error) {
+	// Create a new session like RunCommandWithOutput does
+	session, err := client.CreateSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %v", err)
+	}
+	defer session.Close()
+
+	// Get stdout and stderr pipes for real-time streaming
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
+
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
+
+	// Start the command
+	if err := session.Start(cmd); err != nil {
+		return "", fmt.Errorf("failed to start command: %v", err)
+	}
+
+	// Read output in real-time
+	var outputBuf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Read stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Printf("Command output: %s\n", line)
+			outputBuf.WriteString(line + "\n")
+		}
+	}()
+
+	// Read stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Printf("Command output: %s\n", line)
+			outputBuf.WriteString(line + "\n")
+		}
+	}()
+
+	// Wait for command to complete
+	wg.Wait()
+	if err := session.Wait(); err != nil {
+		return outputBuf.String(), fmt.Errorf("command failed: %v", err)
+	}
+
+	return outputBuf.String(), nil
 }
 
 // interpolateString replaces {{var}} with values in a string

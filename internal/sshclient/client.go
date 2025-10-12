@@ -2,6 +2,7 @@ package sshclient
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"make-sync/internal/util"
@@ -326,6 +327,11 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	return nil
 }
 
+// SyncFile is an alias for UploadFile for backward compatibility
+func (c *SSHClient) SyncFile(localPath, remotePath string) error {
+	return c.UploadFile(localPath, remotePath)
+}
+
 // RunCommand executes a command on the remote server
 func (c *SSHClient) RunCommand(cmd string) error {
 	session, err := c.client.NewSession()
@@ -352,9 +358,60 @@ func (c *SSHClient) RunCommandWithOutput(cmd string) (string, error) {
 	return string(output), nil
 }
 
-// SyncFile syncs a single file from local to remote
-func (c *SSHClient) SyncFile(localPath, remotePath string) error {
-	return c.UploadFile(localPath, remotePath)
+// RunCommandWithStreaming executes a command and streams output in real-time
+func (c *SSHClient) RunCommandWithStreaming(cmd string, outputCallback func(string)) (string, error) {
+	session, err := c.client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %v", err)
+	}
+	defer session.Close()
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
+
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
+
+	if err := session.Start(cmd); err != nil {
+		return "", fmt.Errorf("failed to start command: %v", err)
+	}
+
+	var outputBuf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Read stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputCallback(line)
+			outputBuf.WriteString(line + "\n")
+		}
+	}()
+
+	// Read stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputCallback(line)
+			outputBuf.WriteString(line + "\n")
+		}
+	}()
+
+	wg.Wait()
+	if err := session.Wait(); err != nil {
+		return outputBuf.String(), fmt.Errorf("command failed: %v", err)
+	}
+
+	return outputBuf.String(), nil
 }
 
 // DownloadFile downloads a remote file to localPath using scp -f protocol
@@ -709,6 +766,11 @@ func (c *SSHClient) IsPersistent() bool {
 // GetSession returns the current persistent session (for advanced usage)
 func (c *SSHClient) GetSession() *ssh.Session {
 	return c.session
+}
+
+// CreateSession creates a new SSH session for command execution
+func (c *SSHClient) CreateSession() (*ssh.Session, error) {
+	return c.client.NewSession()
 }
 
 // CreatePTYSession creates a new SSH session configured for PTY usage
