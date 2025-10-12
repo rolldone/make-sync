@@ -485,7 +485,12 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 	if renderCount > 0 {
 		printer.Printf("✅ Template rendering completed: %d references resolved\n", renderCount)
 	} else {
-		printer.Println("ℹ️  No template references found in configuration")
+		// Only show "no template references" message if this is NOT a pipeline context
+		// Pipeline executions use a different variable system (vars.yaml, execution.variables)
+		// so template references are not relevant for them
+		if len(renderedCfg.DirectAccess.Executions) == 0 {
+			printer.Println("ℹ️  No template references found in configuration")
+		}
 	}
 
 	return &renderedCfg, nil

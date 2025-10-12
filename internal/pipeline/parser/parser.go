@@ -17,9 +17,28 @@ func ParsePipeline(filePath string) (*types.Pipeline, error) {
 		return nil, fmt.Errorf("failed to read pipeline file: %v", err)
 	}
 
-	var pipeline types.Pipeline
-	if err := yaml.Unmarshal(data, &pipeline); err != nil {
+	// First, unmarshal to a map to handle the "pipeline:" wrapper
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse pipeline YAML: %v", err)
+	}
+
+	// Extract the pipeline content
+	pipelineData, ok := raw["pipeline"]
+	if !ok {
+		// If no "pipeline" wrapper, assume the whole file is the pipeline
+		pipelineData = raw
+	}
+
+	// Convert back to YAML bytes for unmarshaling to Pipeline struct
+	pipelineBytes, err := yaml.Marshal(pipelineData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal pipeline data: %v", err)
+	}
+
+	var pipeline types.Pipeline
+	if err := yaml.Unmarshal(pipelineBytes, &pipeline); err != nil {
+		return nil, fmt.Errorf("failed to parse pipeline struct: %v", err)
 	}
 
 	// Initialize context variables map

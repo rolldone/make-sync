@@ -3,6 +3,7 @@ package executor
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -71,10 +72,13 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 			return err
 		}
 
-		err = e.runJobFromStep(job, jobName, 0, sshConfigs, vars, pipeline)
+		err = e.runJobFromStep(job, jobName, 0, sshConfigs, vars, pipeline, currentJobIndex == 0)
 		if err != nil {
 			return err
 		}
+
+		// Add visual separation between jobs
+		fmt.Println()
 
 		currentJobIndex++
 	}
@@ -136,11 +140,16 @@ func (e *Executor) findJob(pipeline *types.Pipeline, name string) (*types.Job, e
 
 // runJob runs a job on all hosts
 func (e *Executor) runJob(job *types.Job, jobName string, configs []map[string]interface{}, vars types.Vars) error {
-	return e.runJobFromStep(job, jobName, 0, configs, vars, nil)
+	return e.runJobFromStep(job, jobName, 0, configs, vars, nil, false)
 }
 
 // runJobFromStep runs a job starting from a specific step index
-func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx int, configs []map[string]interface{}, vars types.Vars, pipeline *types.Pipeline) error {
+func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx int, configs []map[string]interface{}, vars types.Vars, pipeline *types.Pipeline, isHead bool) error {
+	if isHead {
+		fmt.Printf("▶️  EXECUTING JOB: %s (HEAD)\n", jobName)
+	} else {
+		fmt.Printf("▶️  EXECUTING JOB: %s\n", jobName)
+	}
 	stepIndex := startStepIdx
 	executedGotoTarget := false
 	gotoTarget := ""
@@ -196,7 +205,7 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 			if err != nil {
 				return fmt.Errorf("goto_job target '%s' not found: %v", targetStep, err)
 			}
-			err = e.runJobFromStep(targetJob, targetStep, 0, configs, vars, pipeline)
+			err = e.runJobFromStep(targetJob, targetStep, 0, configs, vars, pipeline, false)
 			if err != nil {
 				return fmt.Errorf("subroutine job '%s' failed: %v", targetStep, err)
 			}
@@ -214,6 +223,7 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 
 		stepIndex++
 	}
+	fmt.Printf("✅ Completed job: %s\n", jobName)
 	return nil
 }
 
@@ -233,6 +243,7 @@ func (e *Executor) runStep(step *types.Step, config map[string]interface{}, vars
 
 // runCommandStep runs a command step on a host with conditional and interactive support
 func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{}, vars types.Vars) (string, string, error) {
+	fmt.Printf("📋 Executing step: %s\n", step.Name)
 	// Interpolate vars in commands
 	commands := e.interpolateVars(step.Commands, vars)
 
@@ -248,6 +259,11 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 	}
 	privateKey, _ := config["IdentityFile"].(string)
 	password, _ := config["Password"].(string)
+
+	// For localhost testing, use local execution instead of SSH
+	if host == "localhost" || host == "127.0.0.1" {
+		return e.runCommandStepLocal(step, commands, vars)
+	}
 
 	// Create SSH client
 	client, err := sshclient.NewPersistentSSHClient(user, privateKey, password, host, port)
@@ -611,7 +627,7 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 			return "", res.err
 		}
 		// Print output for visibility
-		fmt.Printf("Command output: %s\n", res.output)
+		fmt.Printf("Command output: %s\n", strings.TrimSpace(res.output))
 		return res.output, nil
 	case <-time.After(timeout):
 		return "", fmt.Errorf("command timed out after %d seconds", timeoutSeconds)
@@ -661,4 +677,65 @@ func (e *Executor) interpolateString(s string, vars types.Vars) string {
 	}
 
 	return result
+}
+
+// runCommandStepLocal runs commands locally for testing
+func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars types.Vars) (string, string, error) {
+	// Determine working directory
+	workingDir := step.WorkingDir
+	if workingDir == "" {
+		// Use working_dir from vars if step doesn't specify one
+		if wd, ok := vars["working_dir"].(string); ok {
+			workingDir = wd
+		}
+	}
+
+	var lastOutput string
+	for _, cmd := range commands {
+		// Prepend cd command if working directory is specified
+		fullCmd := cmd
+		if workingDir != "" {
+			fullCmd = fmt.Sprintf("cd %s && %s", workingDir, cmd)
+		}
+
+		fmt.Printf("Running locally: %s\n", fullCmd)
+
+		// Run command locally
+		output, err := e.runCommandLocal(fullCmd)
+		if err != nil {
+			return "", "", fmt.Errorf("command failed: %v", err)
+		}
+
+		// Display command output for user visibility
+		if strings.TrimSpace(output) != "" {
+			fmt.Printf("Output: %s\n", strings.TrimSpace(output))
+		} else {
+			fmt.Printf("Output: (empty)\n")
+		}
+
+		lastOutput = output // Save for potential output saving
+
+		// Check conditions on output
+		action, targetStep, err := e.checkConditions(step.Conditions, output, step.Name)
+		if err != nil {
+			return "", "", err
+		}
+		if action != "" {
+			return action, targetStep, nil
+		}
+	}
+
+	// Save output to context variable if requested
+	if step.SaveOutput != "" && e.pipeline != nil {
+		e.pipeline.ContextVariables[step.SaveOutput] = strings.TrimSpace(lastOutput)
+	}
+
+	return "", "", nil
+}
+
+// runCommandLocal runs a command locally
+func (e *Executor) runCommandLocal(cmd string) (string, error) {
+	// Use os/exec to run command locally
+	output, err := exec.Command("bash", "-c", cmd).CombinedOutput()
+	return string(output), err
 }
