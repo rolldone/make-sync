@@ -648,15 +648,32 @@ func newPipelineRunCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			// Load vars
-			varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
-			vars, err := parser.ParseVars(varsPath, execution.Var)
-			if err != nil {
-				fmt.Printf("❌ Failed to parse vars: %v\n", err)
-				os.Exit(1)
+			// Load vars with priority system:
+			// 1. Start with empty vars
+			vars := make(types.Vars)
+
+			// 2. Load from vars.yaml if execution.Var is specified (lowest priority)
+			if execution.Var != "" {
+				varsPath := parser.ResolveVarsPath(cfg.DirectAccess.PipelineDir)
+				fileVars, err := parser.ParseVarsSafe(varsPath, execution.Var)
+				if err != nil {
+					fmt.Printf("❌ Failed to parse vars: %v\n", err)
+					os.Exit(1)
+				}
+				// Merge fileVars into vars
+				for k, v := range fileVars {
+					vars[k] = v
+				}
 			}
 
-			// Apply overrides
+			// 3. Merge execution.Variables (higher priority than vars.yaml)
+			if execution.Variables != nil {
+				for k, v := range execution.Variables {
+					vars[k] = v
+				}
+			}
+
+			// 4. Apply CLI overrides (highest priority)
 			for k, v := range varOverrides {
 				vars[k] = v
 			}

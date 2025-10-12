@@ -48,6 +48,29 @@ func ParseVars(filePath, key string) (types.Vars, error) {
 	return vars, nil
 }
 
+// ParseVarsSafe parses a vars YAML file and returns vars for a specific key
+// Returns empty map if file doesn't exist or key not found (safe for optional usage)
+func ParseVarsSafe(filePath, key string) (types.Vars, error) {
+	data, err := ioutil.ReadFile(filePath)
+	if err != nil {
+		// File doesn't exist, return empty vars
+		return make(types.Vars), nil
+	}
+
+	var allVars map[string]types.Vars
+	if err := yaml.Unmarshal(data, &allVars); err != nil {
+		return nil, fmt.Errorf("failed to parse vars YAML: %v", err)
+	}
+
+	vars, exists := allVars[key]
+	if !exists {
+		// Key doesn't exist, return empty vars
+		return make(types.Vars), nil
+	}
+
+	return vars, nil
+}
+
 // LoadExecutions loads executions from config (placeholder for now)
 func LoadExecutions(configPath string) ([]types.Execution, error) {
 	// TODO: Load from make-sync.yaml direct_access.executions

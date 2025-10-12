@@ -2,12 +2,13 @@ package types
 
 // Execution represents a predefined execution profile
 type Execution struct {
-	Name     string   `yaml:"name"`
-	Key      string   `yaml:"key"`
-	Pipeline string   `yaml:"pipeline"`
-	Jobs     []string `yaml:"jobs,omitempty"`
-	Var      string   `yaml:"var"`
-	Hosts    []string `yaml:"hosts"`
+	Name      string                 `yaml:"name"`
+	Key       string                 `yaml:"key"`
+	Pipeline  string                 `yaml:"pipeline"`
+	Jobs      []string               `yaml:"jobs,omitempty"`
+	Var       string                 `yaml:"var"`                 // Reference to vars.yaml key (existing system)
+	Variables map[string]interface{} `yaml:"variables,omitempty"` // Direct variables definition (new feature)
+	Hosts     []string               `yaml:"hosts"`
 }
 
 // Pipeline represents a pipeline configuration
