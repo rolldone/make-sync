@@ -26,13 +26,7 @@ type Config struct {
 	SyncCollection SyncCollection         `yaml:"sync_collection"`
 	Var            map[string]interface{} `yaml:"var,omitempty"`
 	ProjectName    string                 `yaml:"project_name"`
-	Username       string                 `yaml:"username"`
-	PrivateKey     string                 `yaml:"privateKey"`
-	Password       string                 `yaml:"password,omitempty"`
-	Host           string                 `yaml:"host"`
-	Port           string                 `yaml:"port"`
 	LocalPath      string                 `yaml:"localPath"`
-	RemotePath     string                 `yaml:"remotePath"`
 	Devsync        Devsync                `yaml:"devsync"`
 	DirectAccess   DirectAccess           `yaml:"direct_access"`
 }
@@ -104,31 +98,29 @@ func ValidateConfig(cfg *Config) error {
 		validationErrors = append(validationErrors, "project_name cannot be empty")
 	}
 
-	if strings.TrimSpace(cfg.Username) == "" {
-		validationErrors = append(validationErrors, "username cannot be empty")
+	// Validate auth configuration in devsync.auth
+	devsyncAuth := cfg.Devsync.Auth
+	if strings.TrimSpace(devsyncAuth.Username) == "" {
+		validationErrors = append(validationErrors, "devsync.auth.username cannot be empty")
 	}
-
-	if strings.TrimSpace(cfg.Host) == "" {
-		validationErrors = append(validationErrors, "host cannot be empty")
+	if strings.TrimSpace(devsyncAuth.Host) == "" {
+		validationErrors = append(validationErrors, "devsync.auth.host cannot be empty")
 	}
-
-	if strings.TrimSpace(cfg.Port) == "" {
-		validationErrors = append(validationErrors, "port cannot be empty")
+	if strings.TrimSpace(devsyncAuth.Port) == "" {
+		validationErrors = append(validationErrors, "devsync.auth.port cannot be empty")
 	} else {
 		// Validate port is a valid number
-		if port, err := strconv.Atoi(cfg.Port); err != nil || port <= 0 || port > 65535 {
-			validationErrors = append(validationErrors, "port must be a valid number between 1-65535")
+		if port, err := strconv.Atoi(devsyncAuth.Port); err != nil || port <= 0 || port > 65535 {
+			validationErrors = append(validationErrors, "devsync.auth.port must be a valid number between 1-65535")
 		}
 	}
-
-	if strings.TrimSpace(cfg.RemotePath) == "" {
-		validationErrors = append(validationErrors, "remotePath cannot be empty")
+	if strings.TrimSpace(devsyncAuth.RemotePath) == "" {
+		validationErrors = append(validationErrors, "devsync.auth.remotePath cannot be empty")
 	}
-
 	// Validate private key file exists (if not empty)
-	if strings.TrimSpace(cfg.PrivateKey) != "" {
-		if _, err := os.Stat(cfg.PrivateKey); os.IsNotExist(err) {
-			validationErrors = append(validationErrors, fmt.Sprintf("private key file does not exist: %s", cfg.PrivateKey))
+	if strings.TrimSpace(devsyncAuth.PrivateKey) != "" {
+		if _, err := os.Stat(devsyncAuth.PrivateKey); os.IsNotExist(err) {
+			validationErrors = append(validationErrors, fmt.Sprintf("devsync.auth.privateKey file does not exist: %s", devsyncAuth.PrivateKey))
 		}
 	}
 
@@ -288,16 +280,36 @@ func RenderTemplateVariables(cfg *Config) error {
 	// Convert to string for processing
 	configText := string(data)
 
-	// Create a map of template variables
+	// Create a map of template variables using var system
 	templateVars := map[string]string{
-		"username":     cfg.Username,
-		"host":         cfg.Host,
-		"port":         cfg.Port,
-		"privateKey":   cfg.PrivateKey,
-		"password":     cfg.Password,
-		"remotePath":   cfg.RemotePath,
 		"localPath":    cfg.LocalPath,
 		"project_name": cfg.ProjectName,
+	}
+
+	// Add auth variables from var system if available
+	if cfg.Var != nil {
+		if authVars, hasAuth := cfg.Var["auth"]; hasAuth {
+			if authMap, ok := authVars.(map[interface{}]interface{}); ok {
+				if username, exists := authMap["username"]; exists {
+					templateVars["username"] = fmt.Sprintf("%v", username)
+				}
+				if host, exists := authMap["host"]; exists {
+					templateVars["host"] = fmt.Sprintf("%v", host)
+				}
+				if port, exists := authMap["port"]; exists {
+					templateVars["port"] = fmt.Sprintf("%v", port)
+				}
+				if privateKey, exists := authMap["privateKey"]; exists {
+					templateVars["privateKey"] = fmt.Sprintf("%v", privateKey)
+				}
+				if password, exists := authMap["password"]; exists {
+					templateVars["password"] = fmt.Sprintf("%v", password)
+				}
+				if remotePath, exists := authMap["remotePath"]; exists {
+					templateVars["remotePath"] = fmt.Sprintf("%v", remotePath)
+				}
+			}
+		}
 	}
 
 	// Replace all template variables

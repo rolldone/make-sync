@@ -53,9 +53,6 @@ var execCmd = &cobra.Command{
 
 		// Determine remote working directory
 		remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemotePath)
-		if remotePath == "" {
-			remotePath = strings.TrimSpace(cfg.RemotePath)
-		}
 
 		// Build raw command to execute
 		rawCmd := strings.Join(args, " ")

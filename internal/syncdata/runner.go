@@ -415,9 +415,6 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIg
 
 	// determine remote base path
 	remotePath := cfg.Devsync.Auth.RemotePath
-	if remotePath == "" {
-		remotePath = cfg.RemotePath
-	}
 	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
 	var remoteSyncTemp string
 	if remotePath == "" {
@@ -473,9 +470,6 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIg
 func DownloadIndexDB(cfg *config.Config, localDestFolder string) (string, error) {
 	// determine remote base path
 	remotePath := cfg.Devsync.Auth.RemotePath
-	if remotePath == "" {
-		remotePath = cfg.RemotePath
-	}
 	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
 	var remoteSyncTemp string
 	if remotePath == "" {
@@ -708,9 +702,6 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 // buildRemotePath constructs an absolute remote path for a given rel using cfg
 func buildRemotePath(cfg *config.Config, rel string) string {
 	remoteBase := cfg.Devsync.Auth.RemotePath
-	if remoteBase == "" {
-		remoteBase = cfg.RemotePath
-	}
 	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
 	if strings.Contains(osTarget, "win") {
 		// prefer backslashes on windows remote
