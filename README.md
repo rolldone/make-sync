@@ -250,16 +250,14 @@ executions:
   - name: "Development Build"
     key: "dev"
     pipeline: "my-app.yaml"
+    var: "dev"                    # Reference ke vars.yaml
     hosts: ["localhost"]
-    variables:
-      DOCKER_TAG: "dev-$(date +%Y%m%d-%H%M%S)"
 
   - name: "Production Deploy"
     key: "prod"
     pipeline: "my-app.yaml"
+    var: "prod"                   # Reference ke vars.yaml
     hosts: ["prod-server-01", "prod-server-02"]
-    variables:
-      DOCKER_TAG: "$(git rev-parse --short HEAD)"
 ```
 
 ### Menjalankan Pipeline
@@ -271,15 +269,165 @@ make-sync pipeline list
 # Run specific execution
 make-sync pipeline run dev
 make-sync pipeline run prod
+
+# Override variables via CLI
+make-sync pipeline run prod --var DOCKER_TAG=v1.2.3
+make-sync pipeline run dev --var DOCKER_TAG=dev-test --var BUILD_ENV=development
+
+# Dynamic variables untuk CI/CD
+make-sync pipeline run prod --var DOCKER_TAG=$(git rev-parse --short HEAD)
+make-sync pipeline run dev --var DOCKER_TAG=dev-$(date +%Y%m%d-%H%M%S)
+```
+
+### Variable Override CLI
+
+Pipeline mendukung variable override langsung dari command line menggunakan flag `--var`:
+
+#### Syntax
+```bash
+# Single variable
+make-sync pipeline run [execution_key] --var KEY=value
+
+# Multiple variables
+make-sync pipeline run [execution_key] --var KEY1=value1 --var KEY2=value2
+```
+
+#### Contoh Penggunaan
+```bash
+# Override DOCKER_TAG untuk production
+make-sync pipeline run prod --var DOCKER_TAG=v1.2.3
+
+# Override multiple variables
+make-sync pipeline run dev --var DOCKER_TAG=dev-test --var BUILD_ENV=development
+
+# Dynamic values untuk CI/CD
+make-sync pipeline run prod --var DOCKER_TAG=$(git rev-parse --short HEAD)
+make-sync pipeline run staging --var DOCKER_TAG=staging-$(date +%Y%m%d-%H%M%S)
+
+# Useful untuk testing
+make-sync pipeline run dev --var DEBUG=true --var LOG_LEVEL=debug
 ```
 
 ### Variable Interpolation
 
 Pipeline mendukung variable interpolation dengan format `{{VAR_NAME}}` atau `${{VAR_NAME}}`:
 
+- **CLI Overrides**: Variables dari `--var` flag (prioritas tertinggi)
+- **Vars File**: Variables dari `vars.yaml` berdasarkan `execution.var` key
 - **Global Variables**: Didefinisikan di `pipeline.variables`
-- **Execution Variables**: Override per execution di `executions[].variables`
 - **Runtime Variables**: Disimpan menggunakan `save_output` dari command
+
+### Variables File System (vars.yaml)
+
+Pipeline menggunakan sistem vars.yaml untuk mengelola variables per environment. Sistem ini bekerja dengan field `var` di executions.
+
+#### Struktur vars.yaml
+```yaml
+# File: .sync_pipelines/vars.yaml
+global:
+  username: donny
+  host: 192.168.1.100
+
+dev:
+  DOCKER_TAG: "dev-$(date +%Y%m%d-%H%M%S)"
+  BUILD_ENV: "development"
+  DEBUG: "true"
+
+staging:
+  DOCKER_TAG: "staging-latest"
+  BUILD_ENV: "staging"
+  DEBUG: "false"
+
+prod:
+  DOCKER_TAG: "$(git rev-parse --short HEAD)"
+  BUILD_ENV: "production"
+  DEBUG: "false"
+```
+
+#### Penggunaan dengan Executions
+```yaml
+# Di make-sync.yaml
+executions:
+  - name: "Development Build"
+    key: "dev"
+    pipeline: "my-app.yaml"
+    var: "dev"                    # Menggunakan variables dari key "dev" di vars.yaml
+    hosts: ["localhost"]
+
+  - name: "Staging Deploy"
+    key: "staging"
+    pipeline: "my-app.yaml"
+    var: "staging"                # Menggunakan variables dari key "staging"
+    hosts: ["staging-server"]
+```
+
+#### Priority Variables
+Ketika menjalankan pipeline, variables akan di-merge dengan priority:
+1. **CLI Overrides** (`--var KEY=value`) - Tertinggi
+2. **Execution Variables** (`execution.variables` - fitur baru)
+3. **vars.yaml** (berdasarkan `execution.var`)
+4. **Global pipeline variables**
+5. **Runtime variables** (dari `save_output`)
+
+### Direct Variables (execution.variables)
+
+Selain sistem vars.yaml, Anda juga bisa mendefinisikan variables langsung di execution menggunakan field `variables`. Fitur ini memberikan fleksibilitas lebih tanpa perlu membuat file vars.yaml terpisah.
+
+#### Syntax
+```yaml
+executions:
+  - name: "Development Build"
+    key: "dev"
+    pipeline: "my-app.yaml"
+    variables:                    # Direct variables definition
+      DOCKER_TAG: "dev-$(date +%Y%m%d-%H%M%S)"
+      BUILD_ENV: "development"
+      DEBUG: "true"
+    hosts: ["localhost"]
+```
+
+#### Semua Pendekatan Variables
+
+**1. Menggunakan vars.yaml (sistem lama - tetap didukung)**
+```yaml
+executions:
+  - name: "Development Build"
+    key: "dev"
+    pipeline: "my-app.yaml"
+    var: "dev"                    # Reference ke vars.yaml
+    hosts: ["localhost"]
+```
+
+**2. Menggunakan variables langsung (fitur baru)**
+```yaml
+executions:
+  - name: "Development Build"
+    key: "dev"
+    pipeline: "my-app.yaml"
+    variables:                    # Direct definition
+      DOCKER_TAG: "dev-$(date +%Y%m%d-%H%M%S)"
+      BUILD_ENV: "development"
+    hosts: ["localhost"]
+```
+
+**3. Hybrid approach (kombinasi keduanya)**
+```yaml
+executions:
+  - name: "Development Build"
+    key: "dev"
+    pipeline: "my-app.yaml"
+    var: "dev"                    # Base variables dari vars.yaml
+    variables:                    # Override specific variables
+      DOCKER_TAG: "custom-dev-tag"
+      NEW_FEATURE: "enabled"
+    hosts: ["localhost"]
+```
+
+#### Use Cases
+
+- **vars.yaml**: Ideal untuk shared variables antar executions dan secret management
+- **variables**: Ideal untuk execution-specific overrides dan simple configurations
+- **hybrid**: Ideal untuk complex setups dengan base + customization
 
 ### Advanced Features
 
