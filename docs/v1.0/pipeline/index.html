@@ -14,10 +14,13 @@ Lihat semua versi
 <li><strong>Variable Persistence</strong>: simpan output perintah ke variabel untuk job selanjutnya.</li>
 <li><strong>Conditional Execution</strong>: jalankan job berdasarkan sukses/gagal job sebelumnya.</li>
 <li><strong>SSH Execution</strong>: eksekusi perintah di remote via SSH.</li>
+<li><strong>Real-time Output Streaming</strong>: tampilkan output command secara real-time saat eksekusi.</li>
+<li><strong>Silent Mode</strong>: kontrol tampilan output per step untuk output yang lebih bersih.</li>
 <li><strong>Subroutine Calls</strong>: gunakan <code>goto_job</code> untuk error handling.</li>
 <li><strong>Template Generation</strong>: buat template pipeline Docker-focused.</li>
 <li><strong>Variable Override</strong>: override variables via CLI dengan flag <code>--var</code>.</li>
 <li><strong>Multi-Environment</strong>: support multiple environment dengan vars.yaml.</li>
+<li><strong>Job Execution Tracking</strong>: visual indicators dengan HEAD markers untuk tracking progress.</li>
 </ul>
 <h2 id="membuat-pipeline-baru">Membuat Pipeline Baru</h2>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6A737D"># Buat pipeline baru dengan template</span></span>
@@ -63,6 +66,150 @@ Lihat semua versi
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span>
 <span class="line"><span style="color:#85E89D">      condition</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"success"</span><span style="color:#E1E4E8"> </span></span>
 <span class="line"><span style="color:#85E89D">      when</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"test"</span></span></code></pre>
+<h2 id="step-configuration">Step Configuration</h2>
+<p>Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail:</p>
+<h3 id="basic-step-structure">Basic Step Structure</h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build-app"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"npm run build"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">    description</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"Build the application"</span></span></code></pre>
+<h3 id="advanced-step-configuration">Advanced Step Configuration</h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"ping-test"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"ping -c 5 google.com"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">    description</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"Test network connectivity"</span></span>
+<span class="line"><span style="color:#85E89D">    silent</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">true</span><span style="color:#6A737D">                    # Suppress real-time output display</span></span>
+<span class="line"><span style="color:#85E89D">    timeout</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">30</span><span style="color:#6A737D">                     # Timeout in seconds (default: 100)</span></span>
+<span class="line"><span style="color:#85E89D">    working_dir</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/app"</span><span style="color:#6A737D">             # Override working directory</span></span>
+<span class="line"><span style="color:#85E89D">    save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"ping_result"</span><span style="color:#6A737D">      # Save command output to variable</span></span>
+<span class="line"><span style="color:#85E89D">    conditions</span><span style="color:#E1E4E8">:                     </span><span style="color:#6A737D"># Conditional execution</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"5 packets"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"continue"</span></span></code></pre>
+<h3 id="step-configuration-fields">Step Configuration Fields</h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>string</td><td>-</td><td>Unique step identifier</td></tr><tr><td><code>type</code></td><td>string</td><td>-</td><td>Step type: <code>command</code>, <code>file_transfer</code>, <code>script</code></td></tr><tr><td><code>commands</code></td><td>[]string</td><td>-</td><td>Commands to execute (for <code>command</code> type)</td></tr><tr><td><code>file</code></td><td>string</td><td>-</td><td>Script file path (for <code>script</code> type)</td></tr><tr><td><code>source</code></td><td>string</td><td>-</td><td>Source path (for <code>file_transfer</code> type)</td></tr><tr><td><code>destination</code></td><td>string</td><td>-</td><td>Destination path (for <code>file_transfer</code> type)</td></tr><tr><td><code>direction</code></td><td>string</td><td>”upload”</td><td>Transfer direction: <code>upload</code> or <code>download</code></td></tr><tr><td><code>description</code></td><td>string</td><td>-</td><td>Human-readable description</td></tr><tr><td><code>silent</code></td><td>bool</td><td>false</td><td>Suppress real-time output display</td></tr><tr><td><code>timeout</code></td><td>int</td><td>100</td><td>Command timeout in seconds</td></tr><tr><td><code>working_dir</code></td><td>string</td><td>-</td><td>Override working directory for this step</td></tr><tr><td><code>save_output</code></td><td>string</td><td>-</td><td>Save command output to context variable</td></tr><tr><td><code>conditions</code></td><td>[]Condition</td><td>-</td><td>Conditional execution based on output</td></tr><tr><td><code>expect</code></td><td>[]Expect</td><td>-</td><td>Interactive prompt responses</td></tr></tbody></table>
+<h3 id="silent-mode">Silent Mode</h3>
+<p><code>silent: true</code> menonaktifkan tampilan output real-time per baris, namun output tetap tersimpan dan bisa ditampilkan di step berikutnya:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">jobs</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"test"</span></span>
+<span class="line"><span style="color:#85E89D">    steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"run-tests"</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">        commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"npm test"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">        silent</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">true</span><span style="color:#6A737D">              # No real-time output</span></span>
+<span class="line"><span style="color:#85E89D">        save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"test_output"</span></span>
+<span class="line"><span style="color:#E1E4E8">      </span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"show-results"</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">        commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"echo 'Test Results: {{test_output}}'"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#6A737D">        # Will display the full test output at once</span></span></code></pre>
+<h3 id="output-saving--context-variables">Output Saving &#x26; Context Variables</h3>
+<p>Gunakan <code>save_output</code> untuk menyimpan hasil command ke variable yang bisa digunakan di step/job berikutnya:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"get-version"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"git rev-parse HEAD"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">    save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"commit_sha"</span></span>
+<span class="line"><span style="color:#E1E4E8">    </span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build-image"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"docker build -t myapp:{{commit_sha}} ."</span><span style="color:#E1E4E8">]</span></span></code></pre>
 <h2 id="menjalankan-pipeline">Menjalankan Pipeline</h2>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6A737D"># List available executions</span></span>
 <span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#9ECBFF"> pipeline</span><span style="color:#9ECBFF"> list</span></span>
@@ -78,6 +225,44 @@ Lihat semua versi
 <span class="line"><span style="color:#6A737D"># Dynamic variables untuk CI/CD</span></span>
 <span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#9ECBFF"> pipeline</span><span style="color:#9ECBFF"> run</span><span style="color:#9ECBFF"> prod</span><span style="color:#79B8FF"> --var</span><span style="color:#9ECBFF"> DOCKER_TAG=</span><span style="color:#E1E4E8">$(</span><span style="color:#B392F0">git</span><span style="color:#9ECBFF"> rev-parse</span><span style="color:#79B8FF"> --short</span><span style="color:#9ECBFF"> HEAD</span><span style="color:#E1E4E8">)</span></span>
 <span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#9ECBFF"> pipeline</span><span style="color:#9ECBFF"> run</span><span style="color:#9ECBFF"> dev</span><span style="color:#79B8FF"> --var</span><span style="color:#9ECBFF"> DOCKER_TAG=dev-</span><span style="color:#E1E4E8">$(</span><span style="color:#B392F0">date</span><span style="color:#9ECBFF"> +%Y%m%d-%H%M%S</span><span style="color:#E1E4E8">)</span></span></code></pre>
+<h2 id="real-time-output-streaming">Real-time Output Streaming</h2>
+<p>Pipeline menampilkan output command secara real-time saat eksekusi, memberikan visibility penuh terhadap progress command yang sedang berjalan:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span>▶️  EXECUTING JOB: deploy (HEAD)</span></span>
+<span class="line"><span>📋 Executing step: ping-check</span></span>
+<span class="line"><span>Running on 100.96.182.47: ping -c 3 google.com</span></span>
+<span class="line"><span>Command output: PING google.com (216.239.38.120) 56(84) bytes of data.</span></span>
+<span class="line"><span>Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=1 ttl=128 time=30.0 ms</span></span>
+<span class="line"><span>Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=2 ttl=128 time=30.8 ms</span></span>
+<span class="line"><span>Command output: 64 bytes from any-in-2678.1e100.net (216.239.38.120): icmp_seq=3 ttl=128 time=31.1 ms</span></span>
+<span class="line"><span>Command output: </span></span>
+<span class="line"><span>Command output: --- google.com ping statistics ---</span></span>
+<span class="line"><span>Command output: 3 packets transmitted, 3 received, 0% packet loss, time 1998ms</span></span>
+<span class="line"><span>📋 Executing step: deploy-app</span></span>
+<span class="line"><span>Running on 100.96.182.47: docker-compose up -d</span></span>
+<span class="line"><span>Command output: Creating network "myapp_default" with the default driver</span></span>
+<span class="line"><span>Command output: Creating myapp_web_1 ... done</span></span>
+<span class="line"><span>Command output: Creating myapp_db_1 ... done</span></span>
+<span class="line"><span>✅ Completed job: deploy</span></span></code></pre>
+<h3 id="silent-mode-untuk-output-bersih">Silent Mode untuk Output Bersih</h3>
+<p>Untuk command yang verbose, gunakan <code>silent: true</code> untuk menekan output real-time dan tampilkan hasil akhir saja:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"verbose-command"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"ping -c 10 google.com"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">    silent</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">true</span></span>
+<span class="line"><span style="color:#85E89D">    save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"ping_result"</span></span>
+<span class="line"><span style="color:#E1E4E8">    </span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"display-result"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"echo 'Ping completed: {{ping_result}}'"</span><span style="color:#E1E4E8">]</span></span></code></pre>
+<h3 id="job-execution-tracking">Job Execution Tracking</h3>
+<p>Pipeline menampilkan progress eksekusi dengan visual indicators:</p>
+<ul>
+<li><strong>▶️ EXECUTING JOB: [name] (HEAD)</strong>: Job sedang dieksekusi</li>
+<li><strong>📋 Executing step: [name]</strong>: Step dalam job sedang berjalan</li>
+<li><strong>✅ Completed job: [name]</strong>: Job berhasil diselesaikan</li>
+<li><strong>❌ Failed job: [name]</strong>: Job gagal</li>
+</ul>
 <h2 id="variable-system">Variable System</h2>
 <p>Pipeline mendukung 3 cara untuk mengelola variables:</p>
 <h3 id="1-variables-file-varsyaml">1. Variables File (vars.yaml)</h3>
