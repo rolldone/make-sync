@@ -353,13 +353,47 @@ Lihat semua versi
 <span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"SUCCESS"</span></span>
 <span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"goto_job"</span></span>
 <span class="line"><span style="color:#85E89D">        job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"success_handler"</span></span></code></pre>
+<h3 id="pilihan-action-pada-conditions">Pilihan action pada conditions</h3>
+<p>Field <code>action</code> menentukan tindakan yang dijalankan ketika sebuah <code>pattern</code> cocok dengan output command. Pilihan yang didukung:</p>
+<ul>
+<li><code>continue</code>: Lanjut ke step berikutnya dalam job yang sama.</li>
+<li><code>drop</code>: Hentikan eksekusi job (step berikutnya tidak dijalankan).</li>
+<li><code>goto_step</code>: Lompat ke step lain di job yang sama (gunakan field <code>step</code> untuk target).</li>
+<li><code>goto_job</code>: Lompat ke job lain di pipeline (gunakan field <code>job</code> untuk target).</li>
+<li><code>fail</code>: Tandai job sebagai gagal dan jalankan conditional/fallback yang relevan (mis. rollback).</li>
+</ul>
+<p>Contoh penggunaan:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"check-status"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"curl -s http://service/health"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">    conditions</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"OK"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"continue"</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"ERROR"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"goto_job"</span></span>
+<span class="line"><span style="color:#85E89D">        job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"handle-error"</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"TIMEOUT"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"fail"</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"RETRY"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"goto_step"</span></span>
+<span class="line"><span style="color:#85E89D">        step</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"check-status"</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"DROP"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"drop"</span></span></code></pre>
+<p>Penjelasan singkat:</p>
+<ul>
+<li>Gunakan <code>continue</code> untuk flow normal.</li>
+<li>Gunakan <code>drop</code> untuk membatalkan job saat kondisi tidak diinginkan terpenuhi.</li>
+<li>Gunakan <code>goto_step</code> / <code>goto_job</code> untuk branching, loop, atau penanganan error terstruktur.</li>
+<li>Gunakan <code>fail</code> untuk memicu fallback atau rollback otomatis.</li>
+</ul>
 <h2 id="konfigurasi">Konfigurasi</h2>
 <p>Pipeline disimpan di direktori yang dikonfigurasi:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#6A737D"># Di make-sync.yaml</span></span>
 <span class="line"><span style="color:#85E89D">direct_access</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">  pipeline_dir</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">".sync_pipelines"</span><span style="color:#6A737D">  # Default location</span></span></code></pre>
 <p><strong>⚠️ Reserved Names</strong>: Jangan gunakan nama <code>vars</code> atau <code>scripts</code> untuk pipeline.</p> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
-Terakhir diperbarui: 12/10/2025 </div>  <a href="/make-sync/docs/v1.0">
+Terakhir diperbarui: 13/10/2025 </div>  <a href="/make-sync/docs/v1.0">
 ← Kembali ke overview
 </a>  </div> </div>  </article> </main></div> </div> </div> <!-- Theme toggle + mobile menu client script --> <script type="module">
         (function() {
