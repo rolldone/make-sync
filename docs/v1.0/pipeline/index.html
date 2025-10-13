@@ -181,7 +181,13 @@ Lihat semua versi
 
 
 
-<table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>string</td><td>-</td><td>Unique step identifier</td></tr><tr><td><code>type</code></td><td>string</td><td>-</td><td>Step type: <code>command</code>, <code>file_transfer</code>, <code>script</code></td></tr><tr><td><code>commands</code></td><td>[]string</td><td>-</td><td>Commands to execute (for <code>command</code> type)</td></tr><tr><td><code>file</code></td><td>string</td><td>-</td><td>Script file path (for <code>script</code> type)</td></tr><tr><td><code>source</code></td><td>string</td><td>-</td><td>Source path (for <code>file_transfer</code> type)</td></tr><tr><td><code>destination</code></td><td>string</td><td>-</td><td>Destination path (for <code>file_transfer</code> type)</td></tr><tr><td><code>direction</code></td><td>string</td><td>”upload”</td><td>Transfer direction: <code>upload</code> or <code>download</code></td></tr><tr><td><code>description</code></td><td>string</td><td>-</td><td>Human-readable description</td></tr><tr><td><code>silent</code></td><td>bool</td><td>false</td><td>Suppress real-time output display</td></tr><tr><td><code>timeout</code></td><td>int</td><td>100</td><td>Command timeout in seconds</td></tr><tr><td><code>working_dir</code></td><td>string</td><td>-</td><td>Override working directory for this step</td></tr><tr><td><code>save_output</code></td><td>string</td><td>-</td><td>Save command output to context variable</td></tr><tr><td><code>conditions</code></td><td>[]Condition</td><td>-</td><td>Conditional execution based on output</td></tr><tr><td><code>expect</code></td><td>[]Expect</td><td>-</td><td>Interactive prompt responses</td></tr></tbody></table>
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>string</td><td>-</td><td>Unique step identifier</td></tr><tr><td><code>type</code></td><td>string</td><td>-</td><td>Step type: <code>command</code>, <code>file_transfer</code>, <code>script</code></td></tr><tr><td><code>commands</code></td><td>[]string</td><td>-</td><td>Commands to execute (for <code>command</code> type)</td></tr><tr><td><code>file</code></td><td>string</td><td>-</td><td>Script file path (for <code>script</code> type)</td></tr><tr><td><code>source</code></td><td>string</td><td>-</td><td>Source path (for <code>file_transfer</code> type)</td></tr><tr><td><code>destination</code></td><td>string</td><td>-</td><td>Destination path (for <code>file_transfer</code> type)</td></tr><tr><td><code>direction</code></td><td>string</td><td>”upload”</td><td>Transfer direction: <code>upload</code> or <code>download</code></td></tr><tr><td><code>template</code></td><td>string</td><td>-</td><td>Template rendering: <code>"enabled"</code> to render <code>{{variables}}</code> in file content</td></tr><tr><td><code>description</code></td><td>string</td><td>-</td><td>Human-readable description</td></tr><tr><td><code>silent</code></td><td>bool</td><td>false</td><td>Suppress real-time output display</td></tr><tr><td><code>timeout</code></td><td>int</td><td>100</td><td>Command timeout in seconds</td></tr><tr><td><code>working_dir</code></td><td>string</td><td>-</td><td>Override working directory for this step</td></tr><tr><td><code>save_output</code></td><td>string</td><td>-</td><td>Save command output to context variable</td></tr><tr><td><code>conditions</code></td><td>[]Condition</td><td>-</td><td>Conditional execution based on output</td></tr><tr><td><code>expect</code></td><td>[]Expect</td><td>-</td><td>Interactive prompt responses</td></tr></tbody></table>
 <h3 id="silent-mode">Silent Mode</h3>
 <p><code>silent: true</code> menonaktifkan tampilan output real-time per baris, namun output tetap tersimpan dan bisa ditampilkan di step berikutnya:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">jobs</span><span style="color:#E1E4E8">:</span></span>
@@ -208,6 +214,27 @@ Lihat semua versi
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build-image"</span></span>
 <span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
 <span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"docker build -t myapp:{{commit_sha}} ."</span><span style="color:#E1E4E8">]</span></span></code></pre>
+<h2 id="file-template-rendering">File Template Rendering</h2>
+<p>Step <code>file_transfer</code> dengan <code>template: "enabled"</code> akan merender file dengan variable substitution sebelum upload:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">jobs</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">deploy</span></span>
+<span class="line"><span style="color:#85E89D">    steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">upload_config</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">file_transfer</span></span>
+<span class="line"><span style="color:#85E89D">        source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"config.php"</span></span>
+<span class="line"><span style="color:#85E89D">        destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/var/www/config.php"</span></span>
+<span class="line"><span style="color:#85E89D">        template</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"enabled"</span></span></code></pre>
+<p><strong>File template (config.php):</strong></p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="php"><code><span class="line"><span style="color:#F97583">&#x3C;?</span><span style="color:#79B8FF">php</span></span>
+<span class="line"><span style="color:#E1E4E8">$db_host </span><span style="color:#F97583">=</span><span style="color:#9ECBFF"> "{{db_host}}"</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#E1E4E8">$db_name </span><span style="color:#F97583">=</span><span style="color:#9ECBFF"> "{{db_name}}"</span><span style="color:#E1E4E8">;</span></span></code></pre>
+<p><strong>Execution variables:</strong></p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">executions</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"Deploy Prod"</span></span>
+<span class="line"><span style="color:#85E89D">    variables</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">      db_host</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"prod-db.example.com"</span></span>
+<span class="line"><span style="color:#85E89D">      db_name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"myapp_prod"</span></span></code></pre>
+<p><strong>Hasil:</strong> File ter-render dengan nilai aktual sebelum di-upload.</p>
 <h2 id="menjalankan-pipeline">Menjalankan Pipeline</h2>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6A737D"># List available executions</span></span>
 <span class="line"><span style="color:#B392F0">make-sync</span><span style="color:#9ECBFF"> pipeline</span><span style="color:#9ECBFF"> list</span></span>
