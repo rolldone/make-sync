@@ -317,7 +317,7 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 		lastOutput = output // Save for potential output saving
 
 		// Check conditions on output
-		action, targetStep, err := e.checkConditions(step.Conditions, output, step.Name)
+		action, targetStep, err := e.checkConditions(step, output)
 		if err != nil {
 			return "", "", err
 		}
@@ -335,11 +335,11 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 }
 
 // checkConditions checks conditions against command output
-func (e *Executor) checkConditions(conditions []types.Condition, output string, stepName string) (string, string, error) {
-	for _, condition := range conditions {
+func (e *Executor) checkConditions(step *types.Step, output string) (string, string, error) {
+	for _, condition := range step.Conditions {
 		matched, err := regexp.MatchString(condition.Pattern, output)
 		if err != nil {
-			return "", "", fmt.Errorf("invalid regex pattern '%s' in step %s: %v", condition.Pattern, stepName, err)
+			return "", "", fmt.Errorf("invalid regex pattern '%s' in step %s: %v", condition.Pattern, step.Name, err)
 		}
 
 		if matched {
@@ -351,21 +351,46 @@ func (e *Executor) checkConditions(conditions []types.Condition, output string, 
 				return "drop", "", nil // Stop job execution without error
 			case "goto_step":
 				if condition.Step == "" {
-					return "", "", fmt.Errorf("goto_step action requires 'step' field in step %s", stepName)
+					return "", "", fmt.Errorf("goto_step action requires 'step' field in step %s", step.Name)
 				}
 				return "goto_step", condition.Step, nil
 			case "goto_job":
 				if condition.Job == "" {
-					return "", "", fmt.Errorf("goto_job action requires 'job' field in step %s", stepName)
+					return "", "", fmt.Errorf("goto_job action requires 'job' field in step %s", step.Name)
 				}
 				return "goto_job", condition.Job, nil
 			case "fail":
 				return "", "", fmt.Errorf("step intentionally failed due to condition match")
 			default:
-				return "", "", fmt.Errorf("unknown condition action '%s' in step %s", condition.Action, stepName)
+				return "", "", fmt.Errorf("unknown condition action '%s' in step %s", condition.Action, step.Name)
 			}
 		}
 	}
+
+	// If no conditions matched and else_action is specified, use else_action
+	if step.ElseAction != "" {
+		switch step.ElseAction {
+		case "continue":
+			return "", "", nil // Continue normally
+		case "drop":
+			return "drop", "", nil
+		case "goto_step":
+			if step.ElseStep == "" {
+				return "", "", fmt.Errorf("else goto_step action requires 'else_step' field in step %s", step.Name)
+			}
+			return "goto_step", step.ElseStep, nil
+		case "goto_job":
+			if step.ElseJob == "" {
+				return "", "", fmt.Errorf("else goto_job action requires 'else_job' field in step %s", step.Name)
+			}
+			return "goto_job", step.ElseJob, nil
+		case "fail":
+			return "", "", fmt.Errorf("step failed due to else condition")
+		default:
+			return "", "", fmt.Errorf("unknown else action '%s' in step %s", step.ElseAction, step.Name)
+		}
+	}
+
 	return "", "", nil
 }
 
@@ -789,7 +814,7 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 		lastOutput = output // Save for potential output saving
 
 		// Check conditions on output
-		action, targetStep, err := e.checkConditions(step.Conditions, output, step.Name)
+		action, targetStep, err := e.checkConditions(step, output)
 		if err != nil {
 			return "", "", err
 		}

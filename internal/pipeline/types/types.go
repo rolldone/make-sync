@@ -41,6 +41,9 @@ type Step struct {
 	Timeout     int         `yaml:"timeout,omitempty"`     // timeout in seconds (default 100)
 	SaveOutput  string      `yaml:"save_output,omitempty"` // save command output to context variable
 	Silent      bool        `yaml:"silent,omitempty"`      // suppress real-time output display
+	ElseAction  string      `yaml:"else_action,omitempty"` // action if no conditions match: "continue", "drop", "goto_step", "goto_job", "fail"
+	ElseStep    string      `yaml:"else_step,omitempty"`   // target step name for else goto_step
+	ElseJob     string      `yaml:"else_job,omitempty"`    // target job name for else goto_job
 }
 
 // Condition represents a conditional check on command output

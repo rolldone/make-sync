@@ -349,16 +349,28 @@ steps:
 - Gunakan `goto_step`/`goto_job` untuk branching/loop/error handling.
 - Gunakan `fail` untuk men-trigger fallback/rollback jika terjadi error.
 
-### Use Case
-- Validasi hasil command (misal: ping, test, health check)
-- Branching logic otomatis tanpa scripting manual
-- Error handling yang lebih fleksibel
+### Else Condition
 
-Field lain yang relevan:
-- `pattern`: string/regex yang dicari di output
-- `action`: aksi yang dijalankan jika pattern cocok
-- `step`: target step (untuk `goto_step`)
-- `job`: target job (untuk `goto_job`)
+Jika tidak ada `conditions` yang match dengan output command, Anda bisa menentukan `else_action` yang akan dijalankan:
+
+```yaml
+steps:
+  - name: "check-status"
+    type: "command"
+    commands: ["curl -s http://service/health"]
+    conditions:
+      - pattern: "OK"
+        action: "continue"
+      - pattern: "ERROR"
+        action: "fail"
+    else_action: "goto_job"    # Dijalankan jika tidak OK dan tidak ERROR
+    else_job: "handle-unknown" # Target job untuk else_action
+```
+
+**Field Else:**
+- `else_action`: Action jika tidak ada conditions yang match ("continue", "drop", "goto_step", "goto_job", "fail")
+- `else_step`: Target step untuk `else_action: "goto_step"`
+- `else_job`: Target job untuk `else_action: "goto_job"`
 
 Untuk workflow CI/CD yang kompleks, fitur ini sangat powerful dan memudahkan automation tanpa perlu scripting tambahan.
 
