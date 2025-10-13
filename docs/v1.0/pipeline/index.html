@@ -387,6 +387,73 @@ Lihat semua versi
 <li>Gunakan <code>goto_step</code> / <code>goto_job</code> untuk branching, loop, atau penanganan error terstruktur.</li>
 <li>Gunakan <code>fail</code> untuk memicu fallback atau rollback otomatis.</li>
 </ul>
+<h2 id="penjelasan-mendalam-tentang-conditionals">Penjelasan Mendalam tentang Conditionals</h2>
+<p>Bagian ini menjelaskan secara rinci bagaimana engine memproses <code>conditions</code> setelah sebuah step selesai menjalankan command. Tujuannya agar user paham urutan pengecekan, bentuk pencocokan pola, dan efek samping seperti loop atau branching.</p>
+<ol>
+<li>Urutan evaluasi</li>
+</ol>
+<ul>
+<li>Setelah sebuah step selesai, seluruh output command (stdout + stderr digabung) disatukan menjadi satu string buffer.</li>
+<li>Engine mengevaluasi daftar <code>conditions</code> secara berurutan seperti ditulis di YAML. Pencocokan berhenti pada kecocokan pertama kecuali action yang memerintahkan loop (<code>goto_step</code> ke step yang sama) atau eksplisit lain.</li>
+</ul>
+<ol start="2">
+<li>Tipe pencocokan</li>
+</ol>
+<ul>
+<li><code>pattern</code> bisa berupa string biasa atau regular expression. Jika dimulai dan diakhiri dengan <code>/</code> (mis. <code>/error|fail/</code>), engine menganggapnya regex dan melakukan pencocokan regex; selain itu dilakukan pencocokan substring (case-sensitive).</li>
+<li>Untuk mencocokkan case-insensitive, gunakan konstruksi regex dengan flag (?i), mis. <code>/(?i)error/</code>.</li>
+</ul>
+<ol start="3">
+<li>Capture groups dan variabel</li>
+</ol>
+<ul>
+<li>Jika pattern berupa regex dan ada grup tangkapan (capture groups), engine menyimpan grup tersebut ke variable lokal step (mis. <code>{{__match_1}}</code>, <code>{{__match_2}}</code>) serta memasukkan keseluruhan match ke <code>{{__match}}</code>.</li>
+<li>Untuk reuse yang lebih aman, gunakan <code>save_output</code> untuk menyimpan output penuh, lalu lakukan parsing di step selanjutnya.</li>
+</ul>
+<ol start="4">
+<li>Behaviour action</li>
+</ol>
+<ul>
+<li><code>continue</code>: lanjut ke step berikutnya seperti biasa.</li>
+<li><code>drop</code>: hentikan job saat ini (engine menandai job selesai tanpa error) — berguna untuk bail-out yang sah.</li>
+<li><code>goto_step</code>: lompat ke step target. Jika target sama dengan step saat ini, ini membuat loop — engine membatasi loop berulang secara default (lihat bagian Troubleshooting).</li>
+<li><code>goto_job</code>: lompat ke job target. Jika job target berada di luar <code>executions.jobs</code> (jika ditentukan), engine akan mengabaikannya dan menampilkan peringatan.</li>
+<li><code>fail</code>: tandai job sebagai gagal; ini memicu evaluasi <code>conditionals</code> top‑level pipeline (mis. rollback yang didefinisikan di <code>conditionals</code>).</li>
+</ul>
+<ol start="5">
+<li>Edge cases &#x26; safety</li>
+</ol>
+<ul>
+<li>Jika beberapa kondisi cocok, hanya kondisi pertama (berdasarkan urutan YAML) yang dipakai — ini menghindari ambiguitas.</li>
+<li>Loop detection: engine menghitung lompat (goto_step ke langkah yang sama) dan jika ambang (default 10) terlampaui, engine akan memicu <code>fail</code> untuk menghindari infinite loop.</li>
+<li>Jika <code>goto_job</code> menunjuk job yang tidak ada, engine menandai job saat ini sebagai <code>fail</code> dan menampilkan error yang jelas.</li>
+</ul>
+<ol start="6">
+<li>Debugging tips</li>
+</ol>
+<ul>
+<li>Untuk melihat teks lengkap yang dicocokkan, aktifkan step tanpa <code>silent</code> untuk melihat streaming atau tambahkan <code>save_output</code> lalu <code>echo</code> di step berikutnya.</li>
+<li>Gunakan pattern regex eksplisit (<code>/pattern/</code>) ketika output lebih kompleks atau multiline.</li>
+<li>Jika sebuah <code>goto_job</code> tampak tidak berjalan saat execution memakai <code>executions.jobs</code>, pastikan target job termasuk dalam daftar <code>jobs</code> untuk execution tersebut.</li>
+</ul>
+<p>Contoh lanjutan:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"health-check"</span></span>
+<span class="line"><span style="color:#85E89D">   type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">   commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"curl -sS http://localhost:8080/health || true"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">   save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"health_out"</span></span>
+<span class="line"><span style="color:#85E89D">   conditions</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/UP|OK/"</span></span>
+<span class="line"><span style="color:#85E89D">      action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"continue"</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/DOWN|UNHEALTHY/"</span></span>
+<span class="line"><span style="color:#85E89D">      action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"goto_job"</span></span>
+<span class="line"><span style="color:#85E89D">      job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"handle-unhealthy"</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/timeout/i"</span></span>
+<span class="line"><span style="color:#85E89D">      action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"fail"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"display-health"</span></span>
+<span class="line"><span style="color:#85E89D">   type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">   commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"echo '{{health_out}}'"</span><span style="color:#E1E4E8">]</span></span></code></pre>
 <h2 id="konfigurasi">Konfigurasi</h2>
 <p>Pipeline disimpan di direktori yang dikonfigurasi:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#6A737D"># Di make-sync.yaml</span></span>
