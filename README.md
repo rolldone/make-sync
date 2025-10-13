@@ -301,6 +301,7 @@ steps:
 | `source` | string | - | Source path (for `file_transfer` type) |
 | `destination` | string | - | Destination path (for `file_transfer` type) |
 | `direction` | string | "upload" | Transfer direction: `upload` or `download` |
+| `template` | string | - | Template rendering: `"enabled"` to render `{{variables}}` in file content |
 | `description` | string | - | Human-readable description |
 | `silent` | bool | false | Suppress real-time output display |
 | `timeout` | int | 100 | Command timeout in seconds |
@@ -347,6 +348,62 @@ steps:
 - Gunakan `continue` untuk flow normal.
 - Gunakan `drop` untuk menghentikan job jika output tidak sesuai.
 - Gunakan `goto_step`/`goto_job` untuk branching/loop/error handling.
+
+## Step Field: template (File Template Rendering)
+
+Field `template` pada step `file_transfer` mengontrol apakah file akan di-render dengan variable substitution sebelum di-upload.
+
+### Cara Kerja
+- Jika `template: "enabled"`, maka `{{variable}}` di dalam file content akan di-replace dengan nilai variable
+- Jika field `template` tidak didefine, file akan di-upload as-is tanpa rendering
+- Variable berasal dari execution variables, context variables, atau config variables
+
+### Contoh Penggunaan
+
+**File template (config.php):**
+```php
+<?php
+$db_host = "{{db_host}}";
+$db_name = "{{db_name}}";
+$env = "{{environment}}";
+```
+
+**Pipeline step:**
+```yaml
+jobs:
+  - name: deploy
+    steps:
+      - name: upload_config
+        type: file_transfer
+        source: "config.php"
+        destination: "/var/www/config.php"
+        template: "enabled"  # ← Enable template rendering
+```
+
+**Execution variables:**
+```yaml
+executions:
+  - name: "Deploy Production"
+    key: deploy-prod
+    pipeline: deploy.yaml
+    variables:
+      db_host: "prod-db.example.com"
+      db_name: "myapp_prod"
+      environment: "production"
+```
+
+**Hasil file yang di-upload:**
+```php
+<?php
+$db_host = "prod-db.example.com";
+$db_name = "myapp_prod";
+$env = "production";
+```
+
+### Catatan
+- Template rendering aman dan hanya mengganti text `{{variable}}` dengan nilai
+- Jika variable tidak ditemukan, text `{{variable}}` tetap tidak berubah
+- Untuk file binary (images, JAR, dll), jangan set `template: "enabled"`
 - Gunakan `fail` untuk men-trigger fallback/rollback jika terjadi error.
 
 ### Else Condition

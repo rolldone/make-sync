@@ -441,30 +441,39 @@ func (e *Executor) runFileTransferStep(step *types.Step, config map[string]inter
 			return fmt.Errorf("failed to download file: %v", err)
 		}
 	} else {
-		// Upload: Read source file and interpolate content
-		content, err := os.ReadFile(source)
-		if err != nil {
-			return fmt.Errorf("failed to read source file %s: %v", source, err)
-		}
-		interpolatedContent := e.interpolateString(string(content), vars)
+		// Upload: Check if template rendering is enabled
+		if step.Template == "enabled" {
+			// Render content with variables
+			content, err := os.ReadFile(source)
+			if err != nil {
+				return fmt.Errorf("failed to read source file %s: %v", source, err)
+			}
+			interpolatedContent := e.interpolateString(string(content), vars)
 
-		// Create temporary file with interpolated content
-		tempFile, err := os.CreateTemp("", "pipeline-upload-*")
-		if err != nil {
-			return fmt.Errorf("failed to create temp file: %v", err)
-		}
-		defer os.Remove(tempFile.Name())
-		defer tempFile.Close()
+			// Create temporary file with interpolated content
+			tempFile, err := os.CreateTemp("", "pipeline-upload-*")
+			if err != nil {
+				return fmt.Errorf("failed to create temp file: %v", err)
+			}
+			defer os.Remove(tempFile.Name())
+			defer tempFile.Close()
 
-		if _, err := tempFile.WriteString(interpolatedContent); err != nil {
-			return fmt.Errorf("failed to write temp file: %v", err)
-		}
-		tempFile.Close()
+			if _, err := tempFile.WriteString(interpolatedContent); err != nil {
+				return fmt.Errorf("failed to write temp file: %v", err)
+			}
+			tempFile.Close()
 
-		// Upload interpolated temp file using SCP
-		fmt.Printf("Uploading %s to %s:%s\n", source, host, destination)
-		if err := client.UploadFile(tempFile.Name(), destination); err != nil {
-			return fmt.Errorf("failed to upload file: %v", err)
+			// Upload interpolated temp file using SCP
+			fmt.Printf("Uploading %s (rendered) to %s:%s\n", source, host, destination)
+			if err := client.UploadFile(tempFile.Name(), destination); err != nil {
+				return fmt.Errorf("failed to upload file: %v", err)
+			}
+		} else {
+			// Upload file as-is without rendering
+			fmt.Printf("Uploading %s (as-is) to %s:%s\n", source, host, destination)
+			if err := client.UploadFile(source, destination); err != nil {
+				return fmt.Errorf("failed to upload file: %v", err)
+			}
 		}
 	}
 	return nil

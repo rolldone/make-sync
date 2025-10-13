@@ -35,6 +35,7 @@ type Step struct {
 	Source      string      `yaml:"source,omitempty"`      // for file_transfer
 	Destination string      `yaml:"destination,omitempty"` // for file_transfer
 	Direction   string      `yaml:"direction,omitempty"`   // "upload" (default) or "download" for file_transfer
+	Template    string      `yaml:"template,omitempty"`    // "enabled" to render {{variables}} in file content
 	Conditions  []Condition `yaml:"conditions,omitempty"`  // conditional execution based on output
 	Expect      []Expect    `yaml:"expect,omitempty"`      // interactive prompt responses
 	WorkingDir  string      `yaml:"working_dir,omitempty"` // override working directory for this step
