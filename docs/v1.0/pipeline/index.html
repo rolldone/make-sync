@@ -71,19 +71,20 @@ Lihat semua versi
 <span class="line"></span>
 <span class="line"><span style="color:#E1E4E8">- </span><span style="color:#85E89D">Baris di atas berarti</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"Jika job `test` selesai dengan sukses, jalankan job `deploy`."</span><span style="color:#9ECBFF"> Dengan kata lain, `deploy` hanya dipicu bila `test` berhasil.</span></span>
 <span class="line"></span>
+<span class="line"></span>
 <span class="line"><span style="color:#85E89D">Visual sederhana (urutan eksekusi)</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">prepare</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">build</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">test</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#9ECBFF">jika test == success → deploy</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#9ECBFF">jika deploy == failure → rollback</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#85E89D">Catatan</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">- `</span><span style="color:#9ECBFF">conditionals` dievaluasi setelah job sumber selesai; mereka menambahkan aturan pemicu berdasarkan hasil job tersebut.</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">Jika Anda menggunakan `executions.jobs` pada `make-sync.yaml`, pastikan job yang dapat dipicu (`deploy`, `rollback`, dll.) juga termasuk di daftar `jobs` untuk execution tersebut agar tidak terlewat.</span></span>
 <span class="line"></span></code></pre>
-<p>prepare -> build -> test
-|
-+— if test == success —> deploy
-|
-+— if deploy == failure —> rollback</p>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span></span></span>
-<span class="line"><span>Catatan:</span></span>
-<span class="line"><span></span></span>
-<span class="line"><span>- `conditionals` dievaluasi setelah job sumber selesai; mereka menambahkan aturan pemicu berdasarkan hasil job tersebut.</span></span>
-<span class="line"><span>- Jika Anda menggunakan `executions.jobs` pada `make-sync.yaml`, pastikan job yang dapat dipicu (`deploy`, `rollback`, dll.) juga termasuk di daftar `jobs` untuk execution tersebut agar tidak terlewat.</span></span>
-<span class="line"><span></span></span></code></pre>
 <h2 id="step-configuration">Step Configuration</h2>
 <p>Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail:</p>
 <h3 id="basic-step-structure">Basic Step Structure</h3>
