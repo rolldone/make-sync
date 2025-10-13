@@ -12,7 +12,6 @@ Lihat semua versi
 <ul>
 <li><strong>Job Dependencies</strong>: definisikan dependensi antar job untuk eksekusi berurutan.</li>
 <li><strong>Variable Persistence</strong>: simpan output perintah ke variabel untuk job selanjutnya.</li>
-<li><strong>Conditional Execution</strong>: jalankan job berdasarkan sukses/gagal job sebelumnya.</li>
 <li><strong>SSH Execution</strong>: eksekusi perintah di remote via SSH.</li>
 <li><strong>Real-time Output Streaming</strong>: tampilkan output command secara real-time saat eksekusi.</li>
 <li><strong>Silent Mode</strong>: kontrol tampilan output per step untuk output yang lebih bersih.</li>
@@ -32,7 +31,7 @@ Lihat semua versi
 <ul>
 <li><strong>Docker Integration</strong>: Build, test, dan deploy aplikasi container</li>
 <li><strong>Variable Management</strong>: Variables untuk tracking build info</li>
-<li><strong>Error Handling</strong>: Conditional rollback pada failure</li>
+<li><strong>Error Handling</strong>: Rollback pada failure</li>
 <li><strong>SSH Deployment</strong>: Multi-host deployment support</li>
 </ul>
 <h2 id="struktur-pipeline">Struktur Pipeline</h2>
@@ -62,41 +61,13 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">          commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"docker build -t {{DOCKER_REGISTRY}}/{{DOCKER_REPO}}:{{DOCKER_TAG}} ."</span><span style="color:#E1E4E8">]</span></span>
 <span class="line"><span style="color:#85E89D">          save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"image_id"</span></span>
 <span class="line"></span>
-<span class="line"><span style="color:#85E89D">  conditionals</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span>
-<span class="line"><span style="color:#85E89D">      condition</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"success"</span><span style="color:#E1E4E8"> </span></span>
-<span class="line"><span style="color:#85E89D">      when</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"test"</span></span>
-<span class="line"></span></code></pre>
-<p>Penjelasan singkat (bahasa sehari-hari):</p>
-<blockquote>
-<p><strong>Penjelasan singkat (bahasa sehari-hari)</strong></p>
-<ul>
-<li>Baris di atas berarti: “Jika job <code>test</code> selesai dengan sukses, jalankan job <code>deploy</code>.” Dengan kata lain, <code>deploy</code> hanya dipicu bila <code>test</code> berhasil.</li>
-</ul>
-<p><strong>Visual sederhana (urutan eksekusi)</strong></p>
-<ul>
-<li>prepare</li>
-<li>build</li>
-<li>test
-<ul>
-<li>jika test == success → deploy
-<ul>
-<li>jika deploy == failure → rollback</li>
-</ul>
-</li>
-</ul>
-</li>
-</ul>
-<p><strong>Catatan</strong></p>
-<ul>
-<li><code>conditionals</code> dievaluasi setelah job sumber selesai; mereka menambahkan aturan pemicu berdasarkan hasil job tersebut.</li>
-<li>Jika Anda menggunakan <code>executions.jobs</code> pada <code>make-sync.yaml</code>, pastikan job yang dapat dipicu (<code>deploy</code>, <code>rollback</code>, dll.) juga termasuk di daftar <code>jobs</code> untuk execution tersebut agar tidak terlewat.</li>
-</ul>
-</blockquote>
-<h2 id="step-configuration">Step Configuration</h2>
-<p>Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail:</p>
-<h3 id="basic-step-structure">Basic Step Structure</h3>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#6A737D">## Step Configuration</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#85E89D">Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">### Basic Step Structure</span></span>
+<span class="line"><span style="color:#E1E4E8">```</span><span style="color:#9ECBFF">yaml</span></span>
+<span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build-app"</span></span>
 <span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
 <span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"npm run build"</span><span style="color:#E1E4E8">]</span></span>
@@ -363,15 +334,6 @@ Lihat semua versi
 <span class="line"></span>
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span>
 <span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"echo 'Deploying {{app_version}}'"</span><span style="color:#E1E4E8">]</span></span></code></pre>
-<h3 id="conditional-execution">Conditional Execution</h3>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">conditionals</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span>
-<span class="line"><span style="color:#85E89D">    condition</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"success"</span></span>
-<span class="line"><span style="color:#85E89D">    when</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"test"</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"rollback"</span></span>
-<span class="line"><span style="color:#85E89D">    condition</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"failure"</span><span style="color:#E1E4E8"> </span></span>
-<span class="line"><span style="color:#85E89D">    when</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span></code></pre>
 <h3 id="subroutine-calls">Subroutine Calls</h3>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"check-condition"</span></span>
@@ -384,10 +346,10 @@ Lihat semua versi
 <p>Field <code>action</code> menentukan tindakan yang dijalankan ketika sebuah <code>pattern</code> cocok dengan output command. Pilihan yang didukung:</p>
 <ul>
 <li><code>continue</code>: Lanjut ke step berikutnya dalam job yang sama.</li>
-<li><code>drop</code>: Hentikan eksekusi job (step berikutnya tidak dijalankan).</li>
+<li><code>drop</code>: Hentikan eksekusi job (step berikutnya tidak dijalankan, job dianggap selesai tanpa error).</li>
 <li><code>goto_step</code>: Lompat ke step lain di job yang sama (gunakan field <code>step</code> untuk target).</li>
 <li><code>goto_job</code>: Lompat ke job lain di pipeline (gunakan field <code>job</code> untuk target).</li>
-<li><code>fail</code>: Tandai job sebagai gagal dan jalankan conditional/fallback yang relevan (mis. rollback).</li>
+<li><code>fail</code>: Tandai job sebagai gagal.</li>
 </ul>
 <p>Contoh penggunaan:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
@@ -414,73 +376,6 @@ Lihat semua versi
 <li>Gunakan <code>goto_step</code> / <code>goto_job</code> untuk branching, loop, atau penanganan error terstruktur.</li>
 <li>Gunakan <code>fail</code> untuk memicu fallback atau rollback otomatis.</li>
 </ul>
-<h2 id="penjelasan-mendalam-tentang-conditionals">Penjelasan Mendalam tentang Conditionals</h2>
-<p>Bagian ini menjelaskan secara rinci bagaimana engine memproses <code>conditions</code> setelah sebuah step selesai menjalankan command. Tujuannya agar user paham urutan pengecekan, bentuk pencocokan pola, dan efek samping seperti loop atau branching.</p>
-<ol>
-<li>Urutan evaluasi</li>
-</ol>
-<ul>
-<li>Setelah sebuah step selesai, seluruh output command (stdout + stderr digabung) disatukan menjadi satu string buffer.</li>
-<li>Engine mengevaluasi daftar <code>conditions</code> secara berurutan seperti ditulis di YAML. Pencocokan berhenti pada kecocokan pertama kecuali action yang memerintahkan loop (<code>goto_step</code> ke step yang sama) atau eksplisit lain.</li>
-</ul>
-<ol start="2">
-<li>Tipe pencocokan</li>
-</ol>
-<ul>
-<li><code>pattern</code> bisa berupa string biasa atau regular expression. Jika dimulai dan diakhiri dengan <code>/</code> (mis. <code>/error|fail/</code>), engine menganggapnya regex dan melakukan pencocokan regex; selain itu dilakukan pencocokan substring (case-sensitive).</li>
-<li>Untuk mencocokkan case-insensitive, gunakan konstruksi regex dengan flag (?i), mis. <code>/(?i)error/</code>.</li>
-</ul>
-<ol start="3">
-<li>Capture groups dan variabel</li>
-</ol>
-<ul>
-<li>Jika pattern berupa regex dan ada grup tangkapan (capture groups), engine menyimpan grup tersebut ke variable lokal step (mis. <code>{{__match_1}}</code>, <code>{{__match_2}}</code>) serta memasukkan keseluruhan match ke <code>{{__match}}</code>.</li>
-<li>Untuk reuse yang lebih aman, gunakan <code>save_output</code> untuk menyimpan output penuh, lalu lakukan parsing di step selanjutnya.</li>
-</ul>
-<ol start="4">
-<li>Behaviour action</li>
-</ol>
-<ul>
-<li><code>continue</code>: lanjut ke step berikutnya seperti biasa.</li>
-<li><code>drop</code>: hentikan job saat ini (engine menandai job selesai tanpa error) — berguna untuk bail-out yang sah.</li>
-<li><code>goto_step</code>: lompat ke step target. Jika target sama dengan step saat ini, ini membuat loop — engine membatasi loop berulang secara default (lihat bagian Troubleshooting).</li>
-<li><code>goto_job</code>: lompat ke job target. Jika job target berada di luar <code>executions.jobs</code> (jika ditentukan), engine akan mengabaikannya dan menampilkan peringatan.</li>
-<li><code>fail</code>: tandai job sebagai gagal; ini memicu evaluasi <code>conditionals</code> top‑level pipeline (mis. rollback yang didefinisikan di <code>conditionals</code>).</li>
-</ul>
-<ol start="5">
-<li>Edge cases &#x26; safety</li>
-</ol>
-<ul>
-<li>Jika beberapa kondisi cocok, hanya kondisi pertama (berdasarkan urutan YAML) yang dipakai — ini menghindari ambiguitas.</li>
-<li>Loop detection: engine menghitung lompat (goto_step ke langkah yang sama) dan jika ambang (default 10) terlampaui, engine akan memicu <code>fail</code> untuk menghindari infinite loop.</li>
-<li>Jika <code>goto_job</code> menunjuk job yang tidak ada, engine menandai job saat ini sebagai <code>fail</code> dan menampilkan error yang jelas.</li>
-</ul>
-<ol start="6">
-<li>Debugging tips</li>
-</ol>
-<ul>
-<li>Untuk melihat teks lengkap yang dicocokkan, aktifkan step tanpa <code>silent</code> untuk melihat streaming atau tambahkan <code>save_output</code> lalu <code>echo</code> di step berikutnya.</li>
-<li>Gunakan pattern regex eksplisit (<code>/pattern/</code>) ketika output lebih kompleks atau multiline.</li>
-<li>Jika sebuah <code>goto_job</code> tampak tidak berjalan saat execution memakai <code>executions.jobs</code>, pastikan target job termasuk dalam daftar <code>jobs</code> untuk execution tersebut.</li>
-</ul>
-<p>Contoh lanjutan:</p>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"health-check"</span></span>
-<span class="line"><span style="color:#85E89D">   type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
-<span class="line"><span style="color:#85E89D">   commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"curl -sS http://localhost:8080/health || true"</span><span style="color:#E1E4E8">]</span></span>
-<span class="line"><span style="color:#85E89D">   save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"health_out"</span></span>
-<span class="line"><span style="color:#85E89D">   conditions</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/UP|OK/"</span></span>
-<span class="line"><span style="color:#85E89D">      action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"continue"</span></span>
-<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/DOWN|UNHEALTHY/"</span></span>
-<span class="line"><span style="color:#85E89D">      action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"goto_job"</span></span>
-<span class="line"><span style="color:#85E89D">      job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"handle-unhealthy"</span></span>
-<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/timeout/i"</span></span>
-<span class="line"><span style="color:#85E89D">      action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"fail"</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"display-health"</span></span>
-<span class="line"><span style="color:#85E89D">   type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
-<span class="line"><span style="color:#85E89D">   commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"echo '{{health_out}}'"</span><span style="color:#E1E4E8">]</span></span></code></pre>
 <h2 id="konfigurasi">Konfigurasi</h2>
 <p>Pipeline disimpan di direktori yang dikonfigurasi:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#6A737D"># Di make-sync.yaml</span></span>
