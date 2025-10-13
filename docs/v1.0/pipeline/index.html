@@ -66,25 +66,33 @@ Lihat semua versi
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span>
 <span class="line"><span style="color:#85E89D">      condition</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"success"</span><span style="color:#E1E4E8"> </span></span>
 <span class="line"><span style="color:#85E89D">      when</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"test"</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#85E89D">Penjelasan singkat (bahasa sehari-hari)</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#85E89D">Baris di atas berarti</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"Jika job `test` selesai dengan sukses, jalankan job `deploy`."</span><span style="color:#9ECBFF"> Dengan kata lain, `deploy` hanya dipicu bila `test` berhasil.</span></span>
-<span class="line"></span>
-<span class="line"></span>
-<span class="line"><span style="color:#85E89D">Visual sederhana (urutan eksekusi)</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">prepare</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">build</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">test</span></span>
-<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#9ECBFF">jika test == success → deploy</span></span>
-<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#9ECBFF">jika deploy == failure → rollback</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#85E89D">Catatan</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#E1E4E8">- `</span><span style="color:#9ECBFF">conditionals` dievaluasi setelah job sumber selesai; mereka menambahkan aturan pemicu berdasarkan hasil job tersebut.</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#9ECBFF">Jika Anda menggunakan `executions.jobs` pada `make-sync.yaml`, pastikan job yang dapat dipicu (`deploy`, `rollback`, dll.) juga termasuk di daftar `jobs` untuk execution tersebut agar tidak terlewat.</span></span>
 <span class="line"></span></code></pre>
+<p>Penjelasan singkat (bahasa sehari-hari):</p>
+<blockquote>
+<p><strong>Penjelasan singkat (bahasa sehari-hari)</strong></p>
+<ul>
+<li>Baris di atas berarti: “Jika job <code>test</code> selesai dengan sukses, jalankan job <code>deploy</code>.” Dengan kata lain, <code>deploy</code> hanya dipicu bila <code>test</code> berhasil.</li>
+</ul>
+<p><strong>Visual sederhana (urutan eksekusi)</strong></p>
+<ul>
+<li>prepare</li>
+<li>build</li>
+<li>test
+<ul>
+<li>jika test == success → deploy
+<ul>
+<li>jika deploy == failure → rollback</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p><strong>Catatan</strong></p>
+<ul>
+<li><code>conditionals</code> dievaluasi setelah job sumber selesai; mereka menambahkan aturan pemicu berdasarkan hasil job tersebut.</li>
+<li>Jika Anda menggunakan <code>executions.jobs</code> pada <code>make-sync.yaml</code>, pastikan job yang dapat dipicu (<code>deploy</code>, <code>rollback</code>, dll.) juga termasuk di daftar <code>jobs</code> untuk execution tersebut agar tidak terlewat.</li>
+</ul>
+</blockquote>
 <h2 id="step-configuration">Step Configuration</h2>
 <p>Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail:</p>
 <h3 id="basic-step-structure">Basic Step Structure</h3>
