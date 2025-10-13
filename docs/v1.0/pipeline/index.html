@@ -352,6 +352,65 @@ Lihat semua versi
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span>
 <span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span><span style="color:#E1E4E8"> </span></span>
 <span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"echo 'Deploying image {{image_id}}'"</span><span style="color:#E1E4E8">]</span></span></code></pre>
+<h3 id="fields-supporting-variable-interpolation">Fields Supporting Variable Interpolation</h3>
+<p>Variable interpolation dengan format <code>{{VAR_NAME}}</code> didukung di field-field berikut:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code>commands</code></td><td>[]string</td><td>Command yang akan dieksekusi</td></tr><tr><td><code>file</code></td><td>string</td><td>Path file script (untuk <code>script</code> type)</td></tr><tr><td><code>source</code></td><td>string</td><td>Source path (untuk <code>file_transfer</code> type)</td></tr><tr><td><code>destination</code></td><td>string</td><td>Destination path (untuk <code>file_transfer</code> type)</td></tr><tr><td><code>working_dir</code></td><td>string</td><td>Working directory untuk step</td></tr><tr><td><code>conditions[].pattern</code></td><td>string</td><td>Regex pattern untuk conditional matching</td></tr><tr><td><code>expect[].response</code></td><td>string</td><td>Response untuk interactive prompts</td></tr></tbody></table>
+<p>Contoh penggunaan di berbagai field:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"run-script"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"script"</span></span>
+<span class="line"><span style="color:#85E89D">    file</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"scripts/{{SCRIPT_NAME}}.sh"</span><span style="color:#6A737D">  # Variable di file path</span></span>
+<span class="line"><span style="color:#85E89D">    working_dir</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"{{WORKSPACE_PATH}}"</span><span style="color:#6A737D">   # Variable di working directory</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"upload-config"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"file_transfer"</span></span>
+<span class="line"><span style="color:#85E89D">    source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"config/{{ENV}}.yaml"</span><span style="color:#6A737D">       # Variable di source path</span></span>
+<span class="line"><span style="color:#85E89D">    destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/etc/app/{{ENV}}.yaml"</span><span style="color:#6A737D"> # Variable di destination path</span></span></code></pre>
 <h2 id="advanced-features">Advanced Features</h2>
 <h3 id="variable-persistence">Variable Persistence</h3>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
