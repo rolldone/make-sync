@@ -376,6 +376,24 @@ Lihat semua versi
 <li>Gunakan <code>goto_step</code> / <code>goto_job</code> untuk branching, loop, atau penanganan error terstruktur.</li>
 <li>Gunakan <code>fail</code> untuk memicu fallback atau rollback otomatis.</li>
 </ul>
+<h3 id="else-condition">Else Condition</h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"check-status"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"curl -s http://service/health"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">    conditions</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"OK"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"continue"</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">pattern</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"ERROR"</span></span>
+<span class="line"><span style="color:#85E89D">        action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"fail"</span></span>
+<span class="line"><span style="color:#85E89D">    else_action</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"goto_job"</span></span>
+<span class="line"><span style="color:#85E89D">    else_job</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"handle-unknown"</span></span></code></pre>
+<p><strong>Field Else:</strong></p>
+<ul>
+<li><code>else_action</code>: Action jika tidak ada conditions yang match</li>
+<li><code>else_step</code>: Target step untuk <code>goto_step</code></li>
+<li><code>else_job</code>: Target job untuk <code>goto_job</code></li>
+</ul>
 <h2 id="konfigurasi">Konfigurasi</h2>
 <p>Pipeline disimpan di direktori yang dikonfigurasi:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#6A737D"># Di make-sync.yaml</span></span>
