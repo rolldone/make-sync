@@ -317,7 +317,7 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 		lastOutput = output // Save for potential output saving
 
 		// Check conditions on output
-		action, targetStep, err := e.checkConditions(step, output)
+		action, targetStep, err := e.checkConditions(step, output, vars)
 		if err != nil {
 			return "", "", err
 		}
@@ -335,14 +335,20 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 }
 
 // checkConditions checks conditions against command output
-func (e *Executor) checkConditions(step *types.Step, output string) (string, string, error) {
+func (e *Executor) checkConditions(step *types.Step, output string, vars types.Vars) (string, string, error) {
+	conditionMatched := false
+
 	for _, condition := range step.Conditions {
-		matched, err := regexp.MatchString(condition.Pattern, output)
+		// Interpolate pattern with vars
+		pattern := e.interpolateString(condition.Pattern, vars)
+
+		matched, err := regexp.MatchString(pattern, output)
 		if err != nil {
-			return "", "", fmt.Errorf("invalid regex pattern '%s' in step %s: %v", condition.Pattern, step.Name, err)
+			return "", "", fmt.Errorf("invalid regex pattern '%s' in step %s: %v", pattern, step.Name, err)
 		}
 
 		if matched {
+			conditionMatched = true
 			switch condition.Action {
 			case "continue":
 				// Continue to next step (no action needed)
@@ -368,7 +374,7 @@ func (e *Executor) checkConditions(step *types.Step, output string) (string, str
 	}
 
 	// If no conditions matched and else_action is specified, use else_action
-	if step.ElseAction != "" {
+	if !conditionMatched && step.ElseAction != "" {
 		switch step.ElseAction {
 		case "continue":
 			return "", "", nil // Continue normally
@@ -814,7 +820,7 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 		lastOutput = output // Save for potential output saving
 
 		// Check conditions on output
-		action, targetStep, err := e.checkConditions(step, output)
+		action, targetStep, err := e.checkConditions(step, output, vars)
 		if err != nil {
 			return "", "", err
 		}
