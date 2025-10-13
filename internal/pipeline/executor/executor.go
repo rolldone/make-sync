@@ -284,7 +284,7 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 	defer client.Close()
 
 	// Determine working directory
-	workingDir := step.WorkingDir
+	workingDir := e.interpolateString(step.WorkingDir, vars)
 	if workingDir == "" {
 		// Use working_dir from vars if step doesn't specify one
 		if wd, ok := vars["working_dir"].(string); ok {
@@ -481,8 +481,11 @@ func (e *Executor) runFileTransferStep(step *types.Step, config map[string]inter
 
 // runScriptStep loads and executes a script file
 func (e *Executor) runScriptStep(step *types.Step, config map[string]interface{}, vars types.Vars) error {
+	// Interpolate vars in file path
+	scriptFile := e.interpolateString(step.File, vars)
+
 	// Load script file
-	scriptPath := filepath.Join(".sync_pipelines", "scripts", step.File)
+	scriptPath := filepath.Join(".sync_pipelines", "scripts", scriptFile)
 	scriptContent, err := os.ReadFile(scriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to read script file %s: %v", scriptPath, err)
@@ -795,7 +798,7 @@ func (e *Executor) interpolateString(s string, vars types.Vars) string {
 // runCommandStepLocal runs commands locally for testing
 func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars types.Vars) (string, string, error) {
 	// Determine working directory
-	workingDir := step.WorkingDir
+	workingDir := e.interpolateString(step.WorkingDir, vars)
 	if workingDir == "" {
 		// Use working_dir from vars if step doesn't specify one
 		if wd, ok := vars["working_dir"].(string); ok {

@@ -569,7 +569,19 @@ Pipeline mendukung variable interpolation dengan format `{{VAR_NAME}}` atau `${{
 - **Global Variables**: Didefinisikan di `pipeline.variables`
 - **Runtime Variables**: Disimpan menggunakan `save_output` dari command
 
-### Direct Variables (execution.variables)
+#### Fields Supporting Variable Interpolation
+
+Variable interpolation didukung di field-field berikut:
+
+- `commands` - Command yang akan dieksekusi
+- `file` - Path file script (untuk `script` type)
+- `source` - Source path (untuk `file_transfer` type)
+- `destination` - Destination path (untuk `file_transfer` type)
+- `working_dir` - Working directory untuk step
+- `conditions[].pattern` - Regex pattern untuk conditional matching
+- `expect[].response` - Response untuk interactive prompts
+
+#### Direct Variables (execution.variables)
 
 Selain sistem vars.yaml, Anda juga bisa mendefinisikan variables langsung di execution menggunakan field `variables`. Fitur ini memberikan fleksibilitas lebih tanpa perlu membuat file vars.yaml terpisah.
 
