@@ -46,7 +46,7 @@ type Step struct {
 // Condition represents a conditional check on command output
 type Condition struct {
 	Pattern string `yaml:"pattern"`        // regex pattern to match in output
-	Action  string `yaml:"action"`         // "continue", "drop", "goto_step", "goto_job"
+	Action  string `yaml:"action"`         // "continue", "drop", "goto_step", "goto_job", "fail"
 	Step    string `yaml:"step,omitempty"` // target step name for goto_step
 	Job     string `yaml:"job,omitempty"`  // target job name for goto_job
 }

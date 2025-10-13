@@ -185,7 +185,8 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 				targetStep = stepTarget
 				break // Break host loop to switch job
 			} else if stepAction == "drop" {
-				return fmt.Errorf("execution dropped at step %s", step.Name)
+				action = stepAction
+				break // Break host loop to stop job execution
 			}
 			// For "continue" or no action, continue to next host
 		}
@@ -217,6 +218,10 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 			// Continue with next step in current job
 			stepIndex++
 			continue
+		} else if action == "drop" {
+			// Stop job execution without error
+			fmt.Printf("🛑 Job execution dropped at step: %s\n", step.Name)
+			break
 		}
 
 		// If we've executed a goto target, stop after executing it
@@ -343,7 +348,7 @@ func (e *Executor) checkConditions(conditions []types.Condition, output string, 
 				// Continue to next step (no action needed)
 				continue
 			case "drop":
-				return "drop", "", nil
+				return "drop", "", nil // Stop job execution without error
 			case "goto_step":
 				if condition.Step == "" {
 					return "", "", fmt.Errorf("goto_step action requires 'step' field in step %s", stepName)
@@ -354,6 +359,8 @@ func (e *Executor) checkConditions(conditions []types.Condition, output string, 
 					return "", "", fmt.Errorf("goto_job action requires 'job' field in step %s", stepName)
 				}
 				return "goto_job", condition.Job, nil
+			case "fail":
+				return "", "", fmt.Errorf("step intentionally failed due to condition match")
 			default:
 				return "", "", fmt.Errorf("unknown condition action '%s' in step %s", condition.Action, stepName)
 			}

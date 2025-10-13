@@ -241,35 +241,6 @@ pipeline:
           commands: ["docker build -t {{DOCKER_REGISTRY}}/{{DOCKER_REPO}}:{{DOCKER_TAG}} ."]
           save_output: "image_id"
 
-  conditionals:
-    - job: "deploy"
-      condition: "success"
-      when: "test"
-    - job: "rollback"
-      condition: "failure"
-      when: "deploy"
-
-Penjelasan singkat (bahasa sehari-hari):
-
-> **Penjelasan singkat (bahasa sehari-hari)**
->
-> - Baris pertama: "Jika job `test` selesai dengan sukses, jalankan job `deploy`." Jadi `deploy` otomatis dijalankan hanya bila `test` sukses.
-> - Baris kedua: "Jika job `deploy` gagal, jalankan job `rollback`." `rollback` adalah fallback otomatis saat `deploy` bermasalah.
->
-> **Visual sederhana (urutan eksekusi)**
->
-> - prepare
-> - build
-> - test
->   - jika test == success → deploy
->     - jika deploy == failure → rollback
->
-> **Catatan penting**
->
-> - `conditionals` di level pipeline dievaluasi setelah job sumber selesai. Mereka tidak menggantikan dependensi eksplisit (`depends_on`), melainkan menambahkan aturan pemicu berdasarkan hasil.
-> - Jika Anda memakai `executions.jobs` di `make-sync.yaml`, engine hanya akan mempertimbangkan job yang tercantum di daftar tersebut. Pastikan job yang bisa dipicu oleh `conditionals` (mis. `deploy`, `rollback`) termasuk di `executions.jobs` agar tidak ter-skip.
-> - Untuk debugging: sementara tes, jalankan execution tanpa `executions.jobs` atau sertakan semua job supaya tidak ada job yang tidak sengaja di-skip.
-
 executions:
   - name: "Development Build"
     key: "dev"
@@ -281,43 +252,13 @@ executions:
     key: "prod"
     pipeline: "my-app.yaml"
     var: "prod"                   # Reference ke vars.yaml
-    hosts: ["prod-server-01", "prod-server-02"]
+        hosts: ["prod-server-01", "prod-server-02"]
 ```
 
-### Execution registration & jobs checklist
-
-Saat mendaftarkan sebuah `execution` di `make-sync.yaml`, pastikan fields berikut tercantum agar pipeline dan `conditionals` bekerja dengan benar:
-
-- `name` — nama yang mudah dibaca (mis. "Production Deploy").
-- `key` — kunci singkat yang dipakai untuk menjalankan execution: `make-sync pipeline run <key>`.
-- `pipeline` — nama file pipeline YAML (mis. `deploy_pipeline.yaml`) yang memuat definisi job/step/conditionals.
-- `hosts` — daftar host/target untuk execution ini (dibutuhkan untuk SSH execution).
-- `var` atau `variables` (opsional) — environment / overrides yang diperlukan oleh pipeline.
-- `jobs` (opsional tetapi penting saat menggunakan `conditionals`) — daftar job yang ingin dijalankan untuk execution ini.
-
-Kenapa `jobs` penting untuk `conditionals`:
-- Jika `executions` menyertakan `jobs: [...]`, engine hanya akan mempertimbangkan job yang ada di daftar tersebut.
-- Oleh karena itu, jika ada `conditionals` yang dapat memicu job lain (mis. `deploy` atau `rollback`), pastikan job target tersebut juga termasuk di `jobs` list.
-
-Checklist praktis sebelum menjalankan execution:
-- [ ] File `pipeline` ada dan path benar.
-- [ ] Semua job yang direferensikan di `conditionals` ada di pipeline.
-- [ ] Jika memakai `executions.jobs`, pastikan job target conditional termasuk di daftar itu.
-- [ ] Job names unik dan ejaan tepat (case‑sensitive).
-- [ ] Variables & hosts siap (SSH/auth) agar job dapat berjalan.
-
-Contoh execution yang aman untuk flow build→test→deploy→rollback:
-
-```yaml
-executions:
-  - name: "Production Deploy"
-    key: "prod"
-    pipeline: "deploy_pipeline.yaml"
-    hosts: ["prod-server-01"]
-    variables:
-      SOME_FLAG: "on"
-    jobs: [prepare, build, test, deploy, rollback, notify]  # include all possible targets
+### Step Configuration
 ```
+
+### Step Configuration
 
 
 ### Step Configuration
@@ -376,10 +317,10 @@ Field `conditions` pada step pipeline memungkinkan branching atau aksi khusus be
 - Setelah command dijalankan, outputnya dicek terhadap pola (regex atau string match) di `conditions`.
 - Jika pola cocok, aksi (`action`) dijalankan, misal:
   - `continue`: lanjut ke step berikutnya
-  - `drop`: hentikan eksekusi job/step
+  - `drop`: hentikan eksekusi job (step berikutnya tidak dijalankan, job dianggap selesai tanpa error)
   - `goto_step`: lompat ke step tertentu
   - `goto_job`: lompat ke job tertentu
-  - `fail`: tandai job sebagai gagal dan lanjut ke conditional/fallback (misal rollback).
+  - `fail`: tandai job sebagai gagal.
 
 ### Contoh YAML
 ```yaml
@@ -407,62 +348,6 @@ steps:
 - Gunakan `drop` untuk menghentikan job jika output tidak sesuai.
 - Gunakan `goto_step`/`goto_job` untuk branching/loop/error handling.
 - Gunakan `fail` untuk men-trigger fallback/rollback jika terjadi error.
-
-## Penjelasan Mendalam tentang Conditionals
-
-Bagian ini menjelaskan secara rinci bagaimana engine memproses `conditions` setelah sebuah step selesai menjalankan command. Tujuannya agar user paham urutan pengecekan, bentuk pencocokan pola, dan efek samping seperti loop atau branching.
-
-1. Urutan evaluasi
-  - Setelah sebuah step selesai, seluruh output command (stdout + stderr digabung) disatukan menjadi satu string buffer.
-  - Engine mengevaluasi daftar `conditions` secara berurutan seperti ditulis di YAML. Pencocokan berhenti pada kecocokan pertama kecuali action yang memerintahkan loop (`goto_step` ke step yang sama) atau eksplisit lain.
-
-2. Tipe pencocokan
-  - `pattern` bisa berupa string biasa atau regular expression. Jika dimulai dan diakhiri dengan `/` (mis. `/error|fail/`), engine menganggapnya regex dan melakukan pencocokan regex; selain itu dilakukan pencocokan substring (case-sensitive).
-  - Untuk mencocokkan case-insensitive, gunakan konstruksi regex dengan flag (?i), mis. `/(?i)error/`.
-
-3. Capture groups dan variabel
-  - Jika pattern berupa regex dan ada grup tangkapan (capture groups), engine menyimpan grup tersebut ke variable lokal step (mis. `{{__match_1}}`, `{{__match_2}}`) serta memasukkan keseluruhan match ke `{{__match}}`.
-  - Untuk reuse yang lebih aman, gunakan `save_output` untuk menyimpan output penuh, lalu lakukan parsing di step selanjutnya.
-
-4. Behaviour action
-  - `continue`: lanjut ke step berikutnya seperti biasa.
-  - `drop`: hentikan job saat ini (engine menandai job selesai tanpa error) — berguna untuk bail-out yang sah.
-  - `goto_step`: lompat ke step target. Jika target sama dengan step saat ini, ini membuat loop — engine membatasi loop berulang secara default (lihat bagian Troubleshooting).
-  - `goto_job`: lompat ke job target. Jika job target berada di luar `executions.jobs` (jika ditentukan), engine akan mengabaikannya dan menampilkan peringatan.
-  - `fail`: tandai job sebagai gagal; ini memicu evaluasi `conditionals` top‑level pipeline (mis. rollback yang didefinisikan di `conditionals`).
-
-5. Edge cases & safety
-  - Jika beberapa kondisi cocok, hanya kondisi pertama (berdasarkan urutan YAML) yang dipakai — ini menghindari ambiguitas.
-  - Loop detection: engine menghitung lompat (goto_step ke langkah yang sama) dan jika ambang (default 10) terlampaui, engine akan memicu `fail` untuk menghindari infinite loop.
-  - Jika `goto_job` menunjuk job yang tidak ada, engine menandai job saat ini sebagai `fail` dan menampilkan error yang jelas.
-
-6. Debugging tips
-  - Untuk melihat teks lengkap yang dicocokkan, aktifkan step tanpa `silent` untuk melihat streaming atau tambahkan `save_output` lalu `echo` di step berikutnya.
-  - Gunakan pattern regex eksplisit (`/pattern/`) ketika output lebih kompleks atau multiline.
-  - Jika sebuah `goto_job` tampak tidak berjalan saat execution memakai `executions.jobs`, pastikan target job termasuk dalam daftar `jobs` untuk execution tersebut.
-
-Contoh lanjutan:
-
-```yaml
-steps:
-  - name: "health-check"
-   type: "command"
-   commands: ["curl -sS http://localhost:8080/health || true"]
-   save_output: "health_out"
-   conditions:
-    - pattern: "/UP|OK/"
-      action: "continue"
-    - pattern: "/DOWN|UNHEALTHY/"
-      action: "goto_job"
-      job: "handle-unhealthy"
-    - pattern: "/timeout/i"
-      action: "fail"
-
-  - name: "display-health"
-   type: "command"
-   commands: ["echo '{{health_out}}'"]
-```
-
 
 ### Use Case
 - Validasi hasil command (misal: ping, test, health check)
@@ -688,19 +573,6 @@ steps:
   - name: "deploy"
     type: "command"
     commands: ["echo 'Deploying version {{app_version}}'"]  # Gunakan variable
-```
-
-#### Conditional Execution
-```yaml
-conditionals:
-  - job: "deploy"
-    condition: "success"
-    when: "test"        # Jalankan deploy jika test sukses
-
-  - job: "rollback"
-    condition: "failure"
-    when: "deploy"      # Jalankan rollback jika deploy gagal
-```
 
 #### Subroutine Calls
 ```yaml
