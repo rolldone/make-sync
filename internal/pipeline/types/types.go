@@ -30,22 +30,23 @@ type Job struct {
 // Step represents a step within a job
 type Step struct {
 	Name        string      `yaml:"name"`
-	Type        string      `yaml:"type,omitempty"`        // "command" (default), "file_transfer", "script"
-	Commands    []string    `yaml:"commands,omitempty"`    // for command type
-	File        string      `yaml:"file,omitempty"`        // for script/file_transfer
-	Source      string      `yaml:"source,omitempty"`      // for file_transfer
-	Destination string      `yaml:"destination,omitempty"` // for file_transfer
-	Direction   string      `yaml:"direction,omitempty"`   // "upload" (default) or "download" for file_transfer
-	Template    string      `yaml:"template,omitempty"`    // "enabled" to render {{variables}} in file content
-	Conditions  []Condition `yaml:"conditions,omitempty"`  // conditional execution based on output
-	Expect      []Expect    `yaml:"expect,omitempty"`      // interactive prompt responses
-	WorkingDir  string      `yaml:"working_dir,omitempty"` // override working directory for this step
-	Timeout     int         `yaml:"timeout,omitempty"`     // timeout in seconds (default 100)
-	SaveOutput  string      `yaml:"save_output,omitempty"` // save command output to context variable
-	Silent      bool        `yaml:"silent,omitempty"`      // suppress real-time output display
-	ElseAction  string      `yaml:"else_action,omitempty"` // action if no conditions match: "continue", "drop", "goto_step", "goto_job", "fail"
-	ElseStep    string      `yaml:"else_step,omitempty"`   // target step name for else goto_step
-	ElseJob     string      `yaml:"else_job,omitempty"`    // target job name for else goto_job
+	Type        string      `yaml:"type,omitempty"`         // "command" (default), "file_transfer", "script"
+	Commands    []string    `yaml:"commands,omitempty"`     // for command type
+	File        string      `yaml:"file,omitempty"`         // for script/file_transfer
+	Source      string      `yaml:"source,omitempty"`       // for file_transfer
+	Destination string      `yaml:"destination,omitempty"`  // for file_transfer
+	Direction   string      `yaml:"direction,omitempty"`    // "upload" (default) or "download" for file_transfer
+	Template    string      `yaml:"template,omitempty"`     // "enabled" to render {{variables}} in file content
+	Conditions  []Condition `yaml:"conditions,omitempty"`   // conditional execution based on output
+	Expect      []Expect    `yaml:"expect,omitempty"`       // interactive prompt responses
+	WorkingDir  string      `yaml:"working_dir,omitempty"`  // override working directory for this step
+	Timeout     int         `yaml:"timeout,omitempty"`      // timeout in seconds (default 0 = unlimited)
+	IdleTimeout int         `yaml:"idle_timeout,omitempty"` // idle timeout in seconds (default 600 = 10 minutes)
+	SaveOutput  string      `yaml:"save_output,omitempty"`  // save command output to context variable
+	Silent      bool        `yaml:"silent,omitempty"`       // suppress real-time output display
+	ElseAction  string      `yaml:"else_action,omitempty"`  // action if no conditions match: "continue", "drop", "goto_step", "goto_job", "fail"
+	ElseStep    string      `yaml:"else_step,omitempty"`    // target step name for else goto_step
+	ElseJob     string      `yaml:"else_job,omitempty"`     // target job name for else goto_job
 }
 
 // Condition represents a conditional check on command output

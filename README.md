@@ -191,6 +191,7 @@ make-sync menyediakan sistem pipeline yang powerful untuk menjalankan workflow o
 - **SSH Execution**: Jalankan command di remote server via SSH
 - **Real-time Output Streaming**: Tampilkan output command secara real-time saat eksekusi
 - **Silent Mode**: Kontrol tampilan output per step untuk output yang lebih bersih
+- **Timeout Control**: Dual timeout system (idle + total) untuk kontrol eksekusi yang lebih cerdas
 - **Subroutine Calls**: Panggil job tertentu menggunakan `goto_job` untuk error handling
 - **Template Generation**: Buat pipeline template Docker-focused dengan mudah
 - **Job Execution Tracking**: Visual indicators dengan HEAD markers untuk tracking progress
@@ -344,7 +345,8 @@ steps:
     commands: ["ping -c 5 google.com"]
     description: "Test network connectivity"
     silent: true                    # Suppress real-time output display
-    timeout: 30                     # Timeout in seconds (default: 100)
+    timeout: 30                     # Total timeout in seconds (default: 0 = unlimited)
+    idle_timeout: 300               # Idle timeout in seconds (default: 600 = 10 minutes)
     working_dir: "/app"             # Override working directory
     save_output: "ping_result"      # Save command output to variable
     conditions:                     # Conditional execution
@@ -366,11 +368,46 @@ steps:
 | `template` | string | - | Template rendering: `"enabled"` to render `{{variables}}` in file content |
 | `description` | string | - | Human-readable description |
 | `silent` | bool | false | Suppress real-time output display |
-| `timeout` | int | 100 | Command timeout in seconds |
+| `timeout` | int | 0 | Total timeout in seconds (0 = unlimited) |
+| `idle_timeout` | int | 600 | Idle timeout in seconds (10 minutes) - resets on output activity |
 | `working_dir` | string | - | Override working directory for this step |
 | `save_output` | string | - | Save command output to context variable |
 | `conditions` | []Condition | - | Conditional execution based on output |
 | `expect` | []Expect | - | Interactive prompt responses |
+
+### Timeout Configuration
+
+Pipeline mendukung dua jenis timeout untuk kontrol eksekusi yang lebih fleksibel:
+
+#### Total Timeout (`timeout`)
+- **Default**: 0 (unlimited)
+- **Behavior**: Total waktu maksimal eksekusi command
+- **Use case**: Mencegah command yang benar-benar stuck berjalan terlalu lama
+
+#### Idle Timeout (`idle_timeout`) 
+- **Default**: 600 seconds (10 minutes)
+- **Behavior**: Waktu maksimal tanpa aktivitas output - timer reset setiap ada output baru
+- **Use case**: Ideal untuk command yang memberikan progress feedback (download, build, dll)
+
+```yaml
+steps:
+  - name: "download-large-file"
+    type: "command"
+    commands: ["wget https://example.com/large-file.zip"]
+    timeout: 3600        # Total timeout: 1 hour max
+    idle_timeout: 300   # Idle timeout: 5 minutes (resets on download progress)
+    
+  - name: "compile-project"
+    type: "command" 
+    commands: ["make all"]
+    timeout: 0           # No total timeout limit
+    idle_timeout: 600    # 10 minutes idle timeout (resets on compiler output)
+```
+
+**Timeout Logic**:
+- Command akan timeout jika melebihi **total timeout** ATAU tidak ada output selama **idle timeout**
+- Timer idle otomatis reset setiap kali command menghasilkan output
+- Total timeout 0 = unlimited (hanya idle timeout yang berlaku)
 
 ## Step Field: conditions (Conditional Execution)
 

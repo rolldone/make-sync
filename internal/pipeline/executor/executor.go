@@ -298,10 +298,16 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		}
 	}
 
-	// Determine timeout (default 100 seconds if not specified)
+	// Determine timeout (default 0 = unlimited if not specified)
 	timeout := step.Timeout
-	if timeout == 0 {
-		timeout = 100
+	if timeout == 0 && step.IdleTimeout == 0 {
+		timeout = 100 // Legacy default only if no idle timeout
+	}
+
+	// Determine idle timeout (default 600 seconds = 10 minutes)
+	idleTimeout := step.IdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = 600
 	}
 
 	var lastOutput string
@@ -315,7 +321,7 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		fmt.Printf("Running on %s: %s\n", host, fullCmd)
 
 		// Run command with interactive support and timeout
-		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, step.Silent)
+		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent)
 		if err != nil {
 			return "", "", fmt.Errorf("command failed: %v", err)
 		}
@@ -648,10 +654,10 @@ func (e *Executor) interpolateVars(commands []string, vars types.Vars) []string 
 }
 
 // runCommandInteractive runs a command with interactive prompt support and timeout
-func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string, expects []types.Expect, vars types.Vars, timeoutSeconds int, silent bool) (string, error) {
+func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string, expects []types.Expect, vars types.Vars, timeoutSeconds int, idleTimeoutSeconds int, silent bool) (string, error) {
 	if len(expects) == 0 {
 		// No expects, run normally with timeout
-		return e.runCommandWithTimeout(client, cmd, timeoutSeconds, silent)
+		return e.runCommandWithTimeout(client, cmd, timeoutSeconds, idleTimeoutSeconds, silent)
 	}
 
 	// For interactive commands, try to pipe responses
@@ -670,34 +676,67 @@ func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string
 	fullCmd := echoCmd + " | " + cmd
 
 	// Use RunCommandWithOutput to capture and display output with timeout
-	return e.runCommandWithTimeout(client, fullCmd, timeoutSeconds, silent)
+	return e.runCommandWithTimeout(client, fullCmd, timeoutSeconds, idleTimeoutSeconds, silent)
 }
 
 // runCommandWithTimeout runs a command with timeout support and real-time output
-func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string, timeoutSeconds int, silent bool) (string, error) {
+func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string, timeoutSeconds int, idleTimeoutSeconds int, silent bool) (string, error) {
 	type result struct {
 		output string
 		err    error
 	}
 
 	resultChan := make(chan result, 1)
+	outputChan := make(chan string, 100) // Channel for monitoring output
 
-	// Run command in goroutine with real-time output streaming
+	// Run command in goroutine with output streaming
 	go func() {
-		output, err := e.runCommandWithStreaming(client, cmd, silent)
+		output, err := e.runCommandWithStreamingAndChannel(client, cmd, silent, outputChan)
 		resultChan <- result{output: output, err: err}
 	}()
 
-	// Wait for result or timeout
-	timeout := time.Duration(timeoutSeconds) * time.Second
-	select {
-	case res := <-resultChan:
-		if res.err != nil {
-			return "", res.err
+	// Setup timers
+	totalTimeout := time.Duration(timeoutSeconds) * time.Second
+	if timeoutSeconds == 0 {
+		totalTimeout = 365 * 24 * time.Hour // ~1 year for unlimited
+	}
+	idleTimeout := time.Duration(idleTimeoutSeconds) * time.Second
+
+	totalTimer := time.NewTimer(totalTimeout)
+	idleTimer := time.NewTimer(idleTimeout)
+	defer totalTimer.Stop()
+	defer idleTimer.Stop()
+
+	for {
+		select {
+		case <-outputChan:
+			// Reset idle timer on any output
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
+
+		case res := <-resultChan:
+			// Command completed successfully
+			if res.err != nil {
+				return "", res.err
+			}
+			return res.output, nil
+
+		case <-idleTimer.C:
+			// Idle timeout - command has been silent too long
+			return "", fmt.Errorf("command idle timeout: no output for %d seconds", idleTimeoutSeconds)
+
+		case <-totalTimer.C:
+			// Total timeout
+			if timeoutSeconds == 0 {
+				continue // Unlimited, ignore total timeout
+			}
+			return "", fmt.Errorf("command timed out after %d seconds", timeoutSeconds)
 		}
-		return res.output, nil
-	case <-time.After(timeout):
-		return "", fmt.Errorf("command timed out after %d seconds", timeoutSeconds)
 	}
 }
 
@@ -754,6 +793,82 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
+		}
+	}()
+
+	// Wait for command to complete
+	wg.Wait()
+	if err := session.Wait(); err != nil {
+		return outputBuf.String(), fmt.Errorf("command failed: %v", err)
+	}
+
+	return outputBuf.String(), nil
+}
+
+func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient, cmd string, silent bool, outputChan chan<- string) (string, error) {
+	// Create a new session like RunCommandWithOutput does
+	session, err := client.CreateSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %v", err)
+	}
+	defer session.Close()
+
+	// Get stdout and stderr pipes for real-time streaming
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
+
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
+
+	// Start the command
+	if err := session.Start(cmd); err != nil {
+		return "", fmt.Errorf("failed to start command: %v", err)
+	}
+
+	// Read output in real-time
+	var outputBuf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Read stdout
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !silent {
+				fmt.Printf("Command output: %s\n", line)
+			}
+			outputBuf.WriteString(line + "\n")
+			// Send line to channel for idle timeout monitoring
+			select {
+			case outputChan <- line:
+			default:
+				// Channel is full, skip to avoid blocking
+			}
+		}
+	}()
+
+	// Read stderr
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !silent {
+				fmt.Printf("Command output: %s\n", line)
+			}
+			outputBuf.WriteString(line + "\n")
+			// Send line to channel for idle timeout monitoring
+			select {
+			case outputChan <- line:
+			default:
+				// Channel is full, skip to avoid blocking
+			}
 		}
 	}()
 
