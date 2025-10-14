@@ -73,39 +73,63 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">          destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/var/www/app/"</span></span>
 <span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"restart-service"</span></span>
 <span class="line"><span style="color:#85E89D">          type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
-<span class="line"><span style="color:#85E89D">          commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"systemctl restart myapp"</span><span style="color:#E1E4E8">]</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#6A737D">## Job Configuration</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#9ECBFF">Jobs dalam pipeline dapat dikonfigurasi dengan mode eksekusi untuk menentukan apakah step dijalankan lokal atau remote.</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#6A737D">### Job Configuration Fields</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> Field | Type | Default | Description |</span></span>
-<span class="line"><span style="color:#F97583">|-</span><span style="color:#FDAEB7;font-style:italic">------|------|---------|-------------|</span></span>
-<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `name` | string | - | Unique job identifier |</span></span>
-<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `depends_on` | []string | - | Jobs that must complete before this job runs |</span></span>
-<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `mode` | string | "remote" | Execution mode: `"local"` or `"remote"` |</span></span>
-<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `steps` | []Step | - | Steps to execute in this job |</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#6A737D">### Job Execution Modes</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#6A737D">#### Local Mode (`mode: "local"`)</span></span>
-<span class="line"><span style="color:#85E89D">Semua step dalam job dijalankan secara lokal di mesin yang menjalankan make-sync</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Command </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Jalankan command di local shell</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*File </span><span style="color:#85E89D">transfer steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Copy file/directory lokal (bukan upload via SCP)</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Script </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Jalankan script lokal</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#6A737D">#### Remote Mode (`mode: "remote"`) - Default</span></span>
-<span class="line"><span style="color:#85E89D">Semua step dalam job dijalankan via SSH ke remote host</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Command </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Jalankan command via SSH</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*File </span><span style="color:#85E89D">transfer steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Upload/download via SCP</span></span>
-<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Script </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Upload script ke remote dan jalankan via SSH</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#6A737D">### Example Usage</span></span>
-<span class="line"></span>
-<span class="line"><span style="color:#E1E4E8">```</span><span style="color:#9ECBFF">yaml</span></span>
-<span class="line"><span style="color:#85E89D">jobs</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">          commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"systemctl restart myapp"</span><span style="color:#E1E4E8">]</span></span></code></pre>
+<h2 id="job-configuration">Job Configuration</h2>
+<p>Jobs dalam pipeline dapat dikonfigurasi dengan mode eksekusi untuk menentukan apakah step dijalankan lokal atau remote.</p>
+<h3 id="job-configuration-fields">Job Configuration Fields</h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>name</code></td><td>string</td><td>-</td><td>Unique job identifier</td></tr><tr><td><code>depends_on</code></td><td>[]string</td><td>-</td><td>Jobs that must complete before this job runs</td></tr><tr><td><code>mode</code></td><td>string</td><td>”remote”</td><td>Execution mode: <code>"local"</code> or <code>"remote"</code></td></tr><tr><td><code>steps</code></td><td>[]Step</td><td>-</td><td>Steps to execute in this job</td></tr></tbody></table>
+<h3 id="job-execution-modes">Job Execution Modes</h3>
+<h4 id="local-mode-mode-local">Local Mode (<code>mode: "local"</code>)</h4>
+<p>Semua step dalam job dijalankan secara lokal di mesin yang menjalankan make-sync:</p>
+<ul>
+<li><strong>Command steps</strong>: Jalankan command di local shell</li>
+<li><strong>File transfer steps</strong>: Copy file/directory lokal (bukan upload via SCP)</li>
+<li><strong>Script steps</strong>: Jalankan script lokal</li>
+</ul>
+<h4 id="remote-mode-mode-remote---default">Remote Mode (<code>mode: "remote"</code>) - Default</h4>
+<p>Semua step dalam job dijalankan via SSH ke remote host:</p>
+<ul>
+<li><strong>Command steps</strong>: Jalankan command via SSH</li>
+<li><strong>File transfer steps</strong>: Upload/download via SCP</li>
+<li><strong>Script steps</strong>: Upload script ke remote dan jalankan via SSH</li>
+</ul>
+<h3 id="example-usage">Example Usage</h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">jobs</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"local-development"</span></span>
 <span class="line"><span style="color:#85E89D">    mode</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"local"</span></span>
 <span class="line"><span style="color:#85E89D">    steps</span><span style="color:#E1E4E8">:</span></span>
