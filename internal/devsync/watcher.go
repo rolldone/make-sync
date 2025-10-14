@@ -1055,6 +1055,7 @@ func (w *Watcher) safeStatus(format string, a ...interface{}) {
 func (w *Watcher) safeStatusln(format string, a ...interface{}) {
 	// Use PrintBlock to atomically clear the line and print the status with newline
 	util.Default.PrintBlock(fmt.Sprintf(format, a...), true)
+	util.Default.ClearLine()
 }
 
 // hideCursor hides the terminal cursor (thread-safe)
