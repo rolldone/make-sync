@@ -228,18 +228,32 @@ pipeline:
 
   jobs:
     - name: "prepare"
+      mode: "local"        # Run steps locally (no SSH)
       steps:
         - name: "check-docker"
           type: "command"
           commands: ["docker --version"]
 
     - name: "build"
+      mode: "local"        # Run steps locally
       depends_on: ["prepare"]
       steps:
         - name: "build-image"
           type: "command"
           commands: ["docker build -t {{DOCKER_REGISTRY}}/{{DOCKER_REPO}}:{{DOCKER_TAG}} ."]
           save_output: "image_id"
+
+    - name: "deploy"
+      mode: "remote"       # Run steps via SSH (default)
+      depends_on: ["build"]
+      steps:
+        - name: "upload-files"
+          type: "file_transfer"
+          source: "dist/"
+          destination: "/var/www/app/"
+        - name: "restart-service"
+          type: "command"
+          commands: ["systemctl restart myapp"]
 
 executions:
   - name: "Development Build"
@@ -253,6 +267,54 @@ executions:
     pipeline: "my-app.yaml"
     var: "prod"                   # Reference ke vars.yaml
         hosts: ["prod-server-01", "prod-server-02"]
+
+### Job Configuration
+
+Jobs dalam pipeline dapat dikonfigurasi dengan mode eksekusi:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | - | Unique job identifier |
+| `depends_on` | []string | - | Jobs that must complete before this job runs |
+| `mode` | string | "remote" | Execution mode: `"local"` or `"remote"` |
+| `steps` | []Step | - | Steps to execute in this job |
+
+#### Job Execution Modes
+
+- **`local`**: Semua step dijalankan secara lokal tanpa SSH
+  - Command steps: Jalankan di mesin lokal
+  - File transfer steps: Copy file lokal (bukan upload via SCP)
+  - Script steps: Jalankan script lokal
+
+- **`remote`** (default): Semua step dijalankan via SSH ke remote host
+  - Command steps: Jalankan via SSH
+  - File transfer steps: Upload/download via SCP
+  - Script steps: Upload dan jalankan script via SSH
+
+#### Example Usage
+
+```yaml
+jobs:
+  - name: "local-build"
+    mode: "local"
+    steps:
+      - name: "install-deps"
+        commands: ["npm install"]
+      - name: "copy-assets"
+        type: "file_transfer"
+        source: "src/assets/"
+        destination: "dist/assets/"
+
+  - name: "remote-deploy"
+    mode: "remote"
+    steps:
+      - name: "upload-app"
+        type: "file_transfer"
+        source: "dist/"
+        destination: "/var/www/app/"
+```
+
+### Step Configuration
 ```
 
 ### Step Configuration

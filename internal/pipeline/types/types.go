@@ -23,6 +23,7 @@ type Pipeline struct {
 type Job struct {
 	Name      string   `yaml:"name"`
 	DependsOn []string `yaml:"depends_on,omitempty"`
+	Mode      string   `yaml:"mode,omitempty"` // "local" or "remote" (default: "remote")
 	Steps     []Step   `yaml:"steps"`
 }
 

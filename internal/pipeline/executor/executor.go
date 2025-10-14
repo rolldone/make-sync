@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -170,7 +171,7 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 		targetStep := ""
 
 		for _, config := range configs {
-			stepAction, stepTarget, err := e.runStep(step, config, vars)
+			stepAction, stepTarget, err := e.runStep(step, job, config, vars)
 			if err != nil {
 				return err
 			}
@@ -236,25 +237,35 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 }
 
 // runStep runs a step on a host
-func (e *Executor) runStep(step *types.Step, config map[string]interface{}, vars types.Vars) (string, string, error) {
+func (e *Executor) runStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) (string, string, error) {
 	switch step.Type {
 	case "file_transfer":
-		err := e.runFileTransferStep(step, config, vars)
+		err := e.runFileTransferStep(step, job, config, vars)
 		return "", "", err
 	case "script":
-		err := e.runScriptStep(step, config, vars)
+		err := e.runScriptStep(step, job, config, vars)
 		return "", "", err
 	default: // "command" or empty
-		return e.runCommandStep(step, config, vars)
+		return e.runCommandStep(step, job, config, vars)
 	}
 }
 
 // runCommandStep runs a command step on a host with conditional and interactive support
-func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{}, vars types.Vars) (string, string, error) {
+func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) (string, string, error) {
 	fmt.Printf("📋 Executing step: %s\n", step.Name)
 	// Interpolate vars in commands
 	commands := e.interpolateVars(step.Commands, vars)
 
+	// Check if job is in local mode (default to "remote" for backward compatibility)
+	jobMode := job.Mode
+	if jobMode == "" {
+		jobMode = "remote"
+	}
+	if jobMode == "local" {
+		return e.runCommandStepLocal(step, commands, vars)
+	}
+
+	// Remote mode - use SSH execution
 	// Extract SSH params from config
 	host, _ := config["HostName"].(string)
 	if host == "" {
@@ -267,11 +278,6 @@ func (e *Executor) runCommandStep(step *types.Step, config map[string]interface{
 	}
 	privateKey, _ := config["IdentityFile"].(string)
 	password, _ := config["Password"].(string)
-
-	// For localhost testing, use local execution instead of SSH
-	if host == "localhost" || host == "127.0.0.1" {
-		return e.runCommandStepLocal(step, commands, vars)
-	}
 
 	// Create SSH client
 	client, err := sshclient.NewPersistentSSHClient(user, privateKey, password, host, port)
@@ -400,8 +406,18 @@ func (e *Executor) checkConditions(step *types.Step, output string, vars types.V
 	return "", "", nil
 }
 
-// runFileTransferStep uploads/downloads files to/from remote host
-func (e *Executor) runFileTransferStep(step *types.Step, config map[string]interface{}, vars types.Vars) error {
+// runFileTransferStep uploads/downloads files to/from remote host or copies locally
+func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) error {
+	// Handle local mode - no SSH, just local file operations
+	jobMode := job.Mode
+	if jobMode == "" {
+		jobMode = "remote"
+	}
+	if jobMode == "local" {
+		return e.runLocalFileTransfer(step, vars)
+	}
+
+	// Remote mode (default) - use SSH
 	// Interpolate vars in paths
 	source := e.interpolateString(step.Source, vars)
 	destination := e.interpolateString(step.Destination, vars)
@@ -480,7 +496,7 @@ func (e *Executor) runFileTransferStep(step *types.Step, config map[string]inter
 }
 
 // runScriptStep loads and executes a script file
-func (e *Executor) runScriptStep(step *types.Step, config map[string]interface{}, vars types.Vars) error {
+func (e *Executor) runScriptStep(step *types.Step, job *types.Job, config map[string]interface{}, vars types.Vars) error {
 	// Interpolate vars in file path
 	scriptFile := e.interpolateString(step.File, vars)
 
@@ -504,7 +520,7 @@ func (e *Executor) runScriptStep(step *types.Step, config map[string]interface{}
 		WorkingDir: step.WorkingDir,
 		Timeout:    step.Timeout,
 	}
-	action, _, err := e.runCommandStep(tempStep, config, vars)
+	action, _, err := e.runCommandStep(tempStep, job, config, vars)
 	if err != nil {
 		return err
 	}
@@ -854,4 +870,151 @@ func (e *Executor) runCommandLocal(cmd string) (string, error) {
 	// Use os/exec to run command locally
 	output, err := exec.Command("bash", "-c", cmd).CombinedOutput()
 	return string(output), err
+}
+
+// runLocalFileTransfer copies files locally (no SSH)
+func (e *Executor) runLocalFileTransfer(step *types.Step, vars types.Vars) error {
+	// Interpolate vars in paths
+	source := e.interpolateString(step.Source, vars)
+	destination := e.interpolateString(step.Destination, vars)
+
+	fmt.Printf("📁 Local file transfer: %s → %s\n", source, destination)
+
+	// Check if template rendering is enabled
+	if step.Template == "enabled" {
+		return e.runLocalFileTransferWithTemplate(source, destination, vars)
+	}
+
+	// Regular file copy without template rendering
+	return e.copyLocalPath(source, destination)
+}
+
+// runLocalFileTransferWithTemplate handles file transfer with template rendering
+func (e *Executor) runLocalFileTransferWithTemplate(source, destination string, vars types.Vars) error {
+	// Read source file
+	content, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("failed to read source file %s: %v", source, err)
+	}
+
+	// Render template with variables
+	renderedContent := e.interpolateString(string(content), vars)
+
+	// Ensure destination directory exists
+	destDir := filepath.Dir(destination)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory %s: %v", destDir, err)
+	}
+
+	// Write rendered content to destination
+	if err := os.WriteFile(destination, []byte(renderedContent), 0644); err != nil {
+		return fmt.Errorf("failed to write rendered file %s: %v", destination, err)
+	}
+
+	fmt.Printf("✅ Template rendered and copied: %s → %s\n", source, destination)
+	return nil
+}
+
+// copyLocalPath copies a file or directory from source to destination
+func (e *Executor) copyLocalPath(source, destination string) error {
+	// Check if source is a glob pattern
+	if strings.Contains(source, "*") {
+		return e.copyGlobPattern(source, destination)
+	}
+
+	// Get source info
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("failed to stat source %s: %v", source, err)
+	}
+
+	if info.IsDir() {
+		return e.copyDirectory(source, destination)
+	} else {
+		return e.copyFile(source, destination)
+	}
+}
+
+// copyFile copies a single file
+func (e *Executor) copyFile(source, destination string) error {
+	// Ensure destination directory exists
+	destDir := filepath.Dir(destination)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory %s: %v", destDir, err)
+	}
+
+	// Copy file
+	srcFile, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("failed to open source file %s: %v", source, err)
+	}
+	defer srcFile.Close()
+
+	destFile, err := os.Create(destination)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file %s: %v", destination, err)
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, srcFile)
+	if err != nil {
+		return fmt.Errorf("failed to copy file %s to %s: %v", source, destination, err)
+	}
+
+	fmt.Printf("✅ File copied: %s → %s\n", source, destination)
+	return nil
+}
+
+// copyDirectory copies a directory recursively
+func (e *Executor) copyDirectory(source, destination string) error {
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Calculate relative path from source
+		relPath, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+
+		// Construct destination path
+		destPath := filepath.Join(destination, relPath)
+
+		if info.IsDir() {
+			// Create directory
+			return os.MkdirAll(destPath, info.Mode())
+		} else {
+			// Copy file
+			return e.copyFile(path, destPath)
+		}
+	})
+}
+
+// copyGlobPattern handles glob patterns like src/**/*.js
+func (e *Executor) copyGlobPattern(pattern, destination string) error {
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("invalid glob pattern %s: %v", pattern, err)
+	}
+
+	if len(matches) == 0 {
+		return fmt.Errorf("no files match pattern %s", pattern)
+	}
+
+	for _, match := range matches {
+		// Calculate relative path for destination
+		relPath, err := filepath.Rel(filepath.Dir(pattern), match)
+		if err != nil {
+			relPath = filepath.Base(match)
+		}
+
+		destPath := filepath.Join(destination, relPath)
+		if err := e.copyFile(match, destPath); err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("✅ Glob pattern copied: %s → %s (%d files)\n", pattern, destination, len(matches))
+	return nil
 }
