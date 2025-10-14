@@ -48,12 +48,14 @@ Lihat semua versi
 <span class="line"></span>
 <span class="line"><span style="color:#85E89D">  jobs</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"prepare"</span></span>
+<span class="line"><span style="color:#85E89D">      mode</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"local"</span><span style="color:#6A737D">        # Run locally</span></span>
 <span class="line"><span style="color:#85E89D">      steps</span><span style="color:#E1E4E8">:</span></span>
-<span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"check-docker"</span></span>
+<span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"check-tools"</span></span>
 <span class="line"><span style="color:#85E89D">          type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
 <span class="line"><span style="color:#85E89D">          commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"docker --version"</span><span style="color:#E1E4E8">]</span></span>
 <span class="line"></span>
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build"</span></span>
+<span class="line"><span style="color:#85E89D">      mode</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"local"</span><span style="color:#6A737D">        # Run locally</span></span>
 <span class="line"><span style="color:#85E89D">      depends_on</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"prepare"</span><span style="color:#E1E4E8">]</span></span>
 <span class="line"><span style="color:#85E89D">      steps</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build-image"</span></span>
@@ -61,13 +63,74 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">          commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"docker build -t {{DOCKER_REGISTRY}}/{{DOCKER_REPO}}:{{DOCKER_TAG}} ."</span><span style="color:#E1E4E8">]</span></span>
 <span class="line"><span style="color:#85E89D">          save_output</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"image_id"</span></span>
 <span class="line"></span>
-<span class="line"><span style="color:#6A737D">## Step Configuration</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy"</span></span>
+<span class="line"><span style="color:#85E89D">      mode</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"remote"</span><span style="color:#6A737D">       # Run via SSH (default)</span></span>
+<span class="line"><span style="color:#85E89D">      depends_on</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"build"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">      steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"upload-files"</span></span>
+<span class="line"><span style="color:#85E89D">          type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"file_transfer"</span></span>
+<span class="line"><span style="color:#85E89D">          source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"dist/"</span></span>
+<span class="line"><span style="color:#85E89D">          destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/var/www/app/"</span></span>
+<span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"restart-service"</span></span>
+<span class="line"><span style="color:#85E89D">          type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">          commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"systemctl restart myapp"</span><span style="color:#E1E4E8">]</span></span>
 <span class="line"></span>
-<span class="line"><span style="color:#85E89D">Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#6A737D">## Job Configuration</span></span>
 <span class="line"></span>
-<span class="line"><span style="color:#6A737D">### Basic Step Structure</span></span>
+<span class="line"><span style="color:#9ECBFF">Jobs dalam pipeline dapat dikonfigurasi dengan mode eksekusi untuk menentukan apakah step dijalankan lokal atau remote.</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">### Job Configuration Fields</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> Field | Type | Default | Description |</span></span>
+<span class="line"><span style="color:#F97583">|-</span><span style="color:#FDAEB7;font-style:italic">------|------|---------|-------------|</span></span>
+<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `name` | string | - | Unique job identifier |</span></span>
+<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `depends_on` | []string | - | Jobs that must complete before this job runs |</span></span>
+<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `mode` | string | "remote" | Execution mode: `"local"` or `"remote"` |</span></span>
+<span class="line"><span style="color:#F97583">|</span><span style="color:#FDAEB7;font-style:italic"> `steps` | []Step | - | Steps to execute in this job |</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">### Job Execution Modes</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">#### Local Mode (`mode: "local"`)</span></span>
+<span class="line"><span style="color:#85E89D">Semua step dalam job dijalankan secara lokal di mesin yang menjalankan make-sync</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Command </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Jalankan command di local shell</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*File </span><span style="color:#85E89D">transfer steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Copy file/directory lokal (bukan upload via SCP)</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Script </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Jalankan script lokal</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">#### Remote Mode (`mode: "remote"`) - Default</span></span>
+<span class="line"><span style="color:#85E89D">Semua step dalam job dijalankan via SSH ke remote host</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Command </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Jalankan command via SSH</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*File </span><span style="color:#85E89D">transfer steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Upload/download via SCP</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">*Script </span><span style="color:#85E89D">steps**</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Upload script ke remote dan jalankan via SSH</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">### Example Usage</span></span>
+<span class="line"></span>
 <span class="line"><span style="color:#E1E4E8">```</span><span style="color:#9ECBFF">yaml</span></span>
-<span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">jobs</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"local-development"</span></span>
+<span class="line"><span style="color:#85E89D">    mode</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"local"</span></span>
+<span class="line"><span style="color:#85E89D">    steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"install-deps"</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">        commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"npm install"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"copy-config"</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"file_transfer"</span></span>
+<span class="line"><span style="color:#85E89D">        source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"config/dev.yaml"</span></span>
+<span class="line"><span style="color:#85E89D">        destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"dist/config.yaml"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"remote-production"</span></span>
+<span class="line"><span style="color:#85E89D">    mode</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"remote"</span></span>
+<span class="line"><span style="color:#85E89D">    steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"deploy-app"</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"file_transfer"</span></span>
+<span class="line"><span style="color:#85E89D">        source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"dist/"</span></span>
+<span class="line"><span style="color:#85E89D">        destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/var/www/app/"</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"restart-services"</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">        commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"systemctl restart nginx"</span><span style="color:#E1E4E8">, </span><span style="color:#9ECBFF">"systemctl restart app"</span><span style="color:#E1E4E8">]</span></span></code></pre>
+<h2 id="step-configuration">Step Configuration</h2>
+<p>Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail:</p>
+<h3 id="basic-step-structure">Basic Step Structure</h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build-app"</span></span>
 <span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
 <span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"npm run build"</span><span style="color:#E1E4E8">]</span></span>
@@ -486,7 +549,7 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">direct_access</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">  pipeline_dir</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">".sync_pipelines"</span><span style="color:#6A737D">  # Default location</span></span></code></pre>
 <p><strong>⚠️ Reserved Names</strong>: Jangan gunakan nama <code>vars</code> atau <code>scripts</code> untuk pipeline.</p> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
-Terakhir diperbarui: 13/10/2025 </div>  <a href="/make-sync/docs/v1.0">
+Terakhir diperbarui: 14/10/2025 </div>  <a href="/make-sync/docs/v1.0">
 ← Kembali ke overview
 </a>  </div> </div>  </article> </main></div> </div> </div> <!-- Theme toggle + mobile menu client script --> <script type="module">
         (function() {
