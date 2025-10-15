@@ -1049,6 +1049,12 @@ func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
+			// record into history unconditionally
+			e.historyMu.Lock()
+			if e.outputHistory != nil {
+				e.outputHistory.Add(line)
+			}
+			e.historyMu.Unlock()
 			if e.shouldLogOutput(step, job) {
 				e.writeLog(line)
 			}
@@ -1071,6 +1077,12 @@ func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
+			// record into history unconditionally
+			e.historyMu.Lock()
+			if e.outputHistory != nil {
+				e.outputHistory.Add(line)
+			}
+			e.historyMu.Unlock()
 			if e.shouldLogOutput(step, job) {
 				e.writeLog(line)
 			}
