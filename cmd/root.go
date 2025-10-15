@@ -34,32 +34,42 @@ Supports SSH connections, file sync operations, and interactive configuration ma
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := cmd.Context()
 		cwd, _ := os.Getwd()
-		fmt.Printf("You are in: %s\n", cwd)
-		fmt.Println("Initialize Bootstrap Is Done!")
-		fmt.Printf("process.execPath :: %s\n", os.Args[0])
-		fmt.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
-		fmt.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
+		util.Default.Printf("You are in: %s\n", cwd)
+		util.Default.ClearLine()
+		util.Default.Println("Initialize Bootstrap Is Done!")
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath :: %s\n", os.Args[0])
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
+		util.Default.ClearLine()
 
 		if config.ConfigExists() {
 			cfg, err := config.LoadAndRenderConfig()
 			if err != nil {
-				fmt.Printf("❌ Configuration validation/rendering failed:\n%v\n", err)
-				fmt.Println("💡 Please fix the configuration issues or run 'make-sync init' to recreate the config")
+				util.Default.Printf("❌ Configuration validation/rendering failed:\n%v\n", err)
+				util.Default.ClearLine()
+				util.Default.Println("💡 Please fix the configuration issues or run 'make-sync init' to recreate the config")
+				util.Default.ClearLine()
 				return
 			}
-			fmt.Println("✅ Configuration is valid and rendered!")
+			util.Default.Println("✅ Configuration is valid and rendered!")
+			util.Default.ClearLine()
 
 			// Ensure local config exists with agent name (will be created automatically when needed)
 			_, err = config.GetOrCreateLocalConfig()
 			if err != nil {
-				fmt.Printf("⚠️  Failed to initialize local config: %v\n", err)
+				util.Default.Printf("⚠️  Failed to initialize local config: %v\n", err)
+				util.Default.ClearLine()
 			}
 
 			// Main menu loop - return to menu after SSH sessions
 			for {
 				select {
 				case <-ctx.Done():
-					fmt.Println("⏹ Cancelled")
+					util.Default.Println("⏹ Cancelled")
+					util.Default.ClearLine()
 					return
 				default:
 				}
@@ -85,11 +95,16 @@ var initCmd = &cobra.Command{
 	Long:  `Generate a default make-sync.yaml config file in the current directory.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		cwd, _ := os.Getwd()
-		fmt.Printf("You are in: %s\n", cwd)
-		fmt.Println("Initialize Bootstrap Is Done!")
-		fmt.Printf("process.execPath :: %s\n", os.Args[0])
-		fmt.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
-		fmt.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
+		util.Default.Printf("You are in: %s\n", cwd)
+		util.Default.ClearLine()
+		util.Default.Println("Initialize Bootstrap Is Done!")
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath :: %s\n", os.Args[0])
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
+		util.Default.ClearLine()
 
 		// Find make-sync-sample.yaml in project root
 		var sampleFile string
@@ -105,14 +120,19 @@ var initCmd = &cobra.Command{
 		}
 
 		if !foundSample {
-			fmt.Println("❌ Error: make-sync-sample.yaml not found in project root")
-			fmt.Println("📝 Please ensure make-sync-sample.yaml exists in the project root directory")
-			fmt.Println("💡 You can copy from an existing make-sync.yaml:")
-			fmt.Println("   cp make-sync.yaml make-sync-sample.yaml")
+			util.Default.Println("❌ Error: make-sync-sample.yaml not found in project root")
+			util.Default.ClearLine()
+			util.Default.Println("📝 Please ensure make-sync-sample.yaml exists in the project root directory")
+			util.Default.ClearLine()
+			util.Default.Println("💡 You can copy from an existing make-sync.yaml:")
+			util.Default.ClearLine()
+			util.Default.Println("   cp make-sync.yaml make-sync-sample.yaml")
+			util.Default.ClearLine()
 			return
 		}
 
-		fmt.Printf("📄 Using make-sync-sample.yaml as template from: %s\n", sampleFile)
+		util.Default.Printf("📄 Using make-sync-sample.yaml as template from: %s\n", sampleFile)
+		util.Default.ClearLine()
 
 		// Generate unique filenames to avoid overwriting existing files
 		var configFileName, ignoreFileName string
@@ -132,14 +152,16 @@ var initCmd = &cobra.Command{
 
 		data, err := os.ReadFile(sampleFile)
 		if err != nil {
-			fmt.Printf("Error reading make-sync-sample.yaml: %v\n", err)
+			util.Default.Printf("Error reading make-sync-sample.yaml: %v\n", err)
+			util.Default.ClearLine()
 			return
 		}
 
 		// Parse as regular config (make-sync-sample.yaml is already in final format)
 		var cfg config.Config
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			fmt.Printf("Error parsing make-sync-sample.yaml: %v\n", err)
+			util.Default.Printf("Error parsing make-sync-sample.yaml: %v\n", err)
+			util.Default.ClearLine()
 			return
 		}
 
@@ -151,11 +173,13 @@ var initCmd = &cobra.Command{
 		}
 
 		if err := os.WriteFile(configFileName, outputData, 0644); err != nil {
-			fmt.Printf("Error writing %s: %v\n", configFileName, err)
+			util.Default.Printf("Error writing %s: %v\n", configFileName, err)
+			util.Default.ClearLine()
 			return
 		}
 
-		fmt.Printf("✅ Config created: %s\n", configFileName)
+		util.Default.Printf("✅ Config created: %s\n", configFileName)
+		util.Default.ClearLine()
 
 		// Create .sync_ignore file with unique name
 		syncIgnoreContent := `# Development files
@@ -181,15 +205,20 @@ node_modules
 .ssh`
 
 		if err := os.WriteFile(ignoreFileName, []byte(syncIgnoreContent), 0644); err != nil {
-			fmt.Printf("⚠️  Warning: Failed to create %s file: %v\n", ignoreFileName, err)
+			util.Default.Printf("⚠️  Warning: Failed to create %s file: %v\n", ignoreFileName, err)
+			util.Default.ClearLine()
 		} else {
-			fmt.Printf("✅ Ignore file created: %s\n", ignoreFileName)
+			util.Default.Printf("✅ Ignore file created: %s\n", ignoreFileName)
+			util.Default.ClearLine()
 		}
 
 		// Show usage instructions
-		fmt.Println("💡 To use this config:")
-		fmt.Printf("   cp %s make-sync.yaml\n", configFileName)
-		fmt.Printf("   cp %s .sync_ignore\n", ignoreFileName)
+		util.Default.Println("💡 To use this config:")
+		util.Default.ClearLine()
+		util.Default.Printf("   cp %s make-sync.yaml\n", configFileName)
+		util.Default.ClearLine()
+		util.Default.Printf("   cp %s .sync_ignore\n", ignoreFileName)
+		util.Default.ClearLine()
 
 		// Add to history
 		history.AddPath(cwd)
@@ -206,26 +235,37 @@ var devsyncCmd = &cobra.Command{
 		// Create .sync_temp directory if it doesn't exist
 		syncTempDir := filepath.Join(cwd, ".sync_temp")
 		if err := os.MkdirAll(syncTempDir, 0755); err != nil {
-			fmt.Printf("❌ Failed to create .sync_temp directory: %v\n", err)
+			util.Default.Printf("❌ Failed to create .sync_temp directory: %v\n", err)
+			util.Default.ClearLine()
 			return
 		}
 
-		fmt.Printf("📁 Log directory: %s\n", syncTempDir)
-		fmt.Printf("You are in: %s\n", cwd)
-		fmt.Println("Initialize Bootstrap Is Done!")
-		fmt.Printf("process.execPath :: %s\n", os.Args[0])
-		fmt.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
-		fmt.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
+		util.Default.Printf("📁 Log directory: %s\n", syncTempDir)
+		util.Default.ClearLine()
+		util.Default.Printf("You are in: %s\n", cwd)
+		util.Default.ClearLine()
+		util.Default.Println("Initialize Bootstrap Is Done!")
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath :: %s\n", os.Args[0])
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath dirname :: %s\n", filepath.Dir(os.Args[0]))
+		util.Default.ClearLine()
+		util.Default.Printf("process.execPath basename :: %s\n", filepath.Base(os.Args[0]))
+		util.Default.ClearLine()
 
 		// Validate and render configuration before proceeding
-		fmt.Println("🔍 Validating and rendering configuration...")
+		util.Default.Println("🔍 Validating and rendering configuration...")
+		util.Default.ClearLine()
 		cfg, err := config.LoadAndRenderConfig() // Use LoadAndRenderConfig to render templates
 		if err != nil {
-			fmt.Printf("❌ Configuration validation/rendering failed:\n%v\n", err)
-			fmt.Println("💡 Please fix the configuration issues or run 'make-sync init' to recreate the config")
+			util.Default.Printf("❌ Configuration validation/rendering failed:\n%v\n", err)
+			util.Default.ClearLine()
+			util.Default.Println("💡 Please fix the configuration issues or run 'make-sync init' to recreate the config")
+			util.Default.ClearLine()
 			return
 		}
-		fmt.Println("✅ Configuration is valid and rendered!")
+		util.Default.Println("✅ Configuration is valid and rendered!")
+		util.Default.ClearLine()
 
 		// Run devsync mode menu
 		devsync.ShowDevSyncModeMenu(cmd.Context(), cfg)
@@ -250,7 +290,8 @@ func init() {
 func showRecentWorkspacesMenu() {
 	paths := history.GetAllPaths()
 	if len(paths) == 0 {
-		fmt.Println("No recent workspaces found.")
+		util.Default.Println("No recent workspaces found.")
+		util.Default.ClearLine()
 		return
 	}
 
@@ -262,7 +303,8 @@ func showRecentWorkspacesMenu() {
 
 	idx, result, err := prompt.Run()
 	if err != nil {
-		fmt.Printf("Prompt failed %v\n", err)
+		util.Default.Printf("Prompt failed %v\n", err)
+		util.Default.ClearLine()
 		return
 	}
 
@@ -270,7 +312,8 @@ func showRecentWorkspacesMenu() {
 		// Search mode
 		results := history.SearchPaths(result)
 		if len(results) == 0 {
-			fmt.Printf("No workspaces found matching '%s'\n", result)
+			util.Default.Printf("No workspaces found matching '%s'\n", result)
+			util.Default.ClearLine()
 			return
 		}
 
@@ -282,7 +325,8 @@ func showRecentWorkspacesMenu() {
 
 		_, selected, err := searchPrompt.Run()
 		if err != nil {
-			fmt.Printf("Prompt failed %v\n", err)
+			util.Default.Printf("Prompt failed %v\n", err)
+			util.Default.ClearLine()
 			return
 		}
 		result = selected
@@ -751,7 +795,8 @@ func newPipelineCreateCmd() *cobra.Command {
 				outputPath = filepath.Join(cfg.DirectAccess.PipelineDir, filename)
 				// Ensure pipeline directory exists
 				if err := os.MkdirAll(cfg.DirectAccess.PipelineDir, 0755); err != nil {
-					fmt.Printf("❌ Failed to create pipeline directory: %v\n", err)
+					util.Default.Printf("❌ Failed to create pipeline directory: %v\n", err)
+					util.Default.ClearLine()
 					os.Exit(1)
 				}
 			} else {
@@ -761,8 +806,10 @@ func newPipelineCreateCmd() *cobra.Command {
 
 			// Check if file already exists
 			if _, err := os.Stat(outputPath); err == nil {
-				fmt.Printf("❌ Pipeline file '%s' already exists\n", outputPath)
-				fmt.Printf("💡 Use a different name or remove the existing file if you want to recreate it\n")
+				util.Default.Printf("❌ Pipeline file '%s' already exists\n", outputPath)
+				util.Default.ClearLine()
+				util.Default.Printf("💡 Use a different name or remove the existing file if you want to recreate it\n")
+				util.Default.ClearLine()
 				os.Exit(1)
 			}
 
@@ -771,12 +818,15 @@ func newPipelineCreateCmd() *cobra.Command {
 
 			// Write to file
 			if err := os.WriteFile(outputPath, []byte(template), 0644); err != nil {
-				fmt.Printf("❌ Failed to create pipeline file: %v\n", err)
+				util.Default.Printf("❌ Failed to create pipeline file: %v\n", err)
+				util.Default.ClearLine()
 				os.Exit(1)
 			}
 
-			fmt.Printf("✅ Created pipeline template: %s\n", outputPath)
-			fmt.Println("📝 Edit the file to customize your pipeline configuration")
+			util.Default.Printf("✅ Created pipeline template: %s\n", outputPath)
+			util.Default.ClearLine()
+			util.Default.Println("📝 Edit the file to customize your pipeline configuration")
+			util.Default.ClearLine()
 		},
 	}
 
