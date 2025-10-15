@@ -403,6 +403,39 @@ Lihat semua versi
 <span class="line"><span style="color:#E1E4E8">[</span><span style="color:#6A737D">2025-10-15</span><span style="color:#6A737D"> 12:37:04</span><span style="color:#E1E4E8">] &#x3C;captured output line </span><span style="color:#79B8FF">1</span><span style="color:#E1E4E8">></span></span>
 <span class="line"><span style="color:#E1E4E8">[</span><span style="color:#6A737D">2025-10-15</span><span style="color:#6A737D"> 12:37:04</span><span style="color:#E1E4E8">] &#x3C;captured output line </span><span style="color:#79B8FF">2</span><span style="color:#E1E4E8">></span></span>
 <span class="line"><span style="color:#E1E4E8">... (hingga keseluruhan isi buffer)</span></span></code></pre>
+<h3 id="controlling-real-time-logging-with-log_output">Controlling real-time logging with <code>log_output</code></h3>
+<p>Gunakan field <code>log_output</code> untuk mengontrol apakah output real-time dari sebuah step ditulis ke file log pipeline. Field ini bersifat opt-in dan diselesaikan dengan prioritas berikut (tinggi → rendah):</p>
+<ul>
+<li>Step-level <code>log_output</code></li>
+<li>Job-level <code>log_output</code></li>
+<li>Pipeline-level <code>log_output</code></li>
+</ul>
+<p>Contoh: jika sebuah Step memiliki <code>log_output: true</code>, maka output Step tersebut akan ditulis ke file log walaupun Job atau Pipeline menyetel <code>log_output: false</code>. Kebalikan juga berlaku: <code>log_output: false</code> di level Step akan menonaktifkan logging untuk Step itu walaupun level Job/Pipeline mengizinkan.</p>
+<p>Poin penting:</p>
+<ul>
+<li>Buffer in-memory 300 KB selalu meng-capture output, terlepas dari nilai <code>log_output</code>. Ini memungkinkan sistem menulis “error evidence” saat terjadi kegagalan meskipun file logging dinonaktifkan untuk operasi normal.</li>
+<li><code>log_output</code> hanya mengontrol penulisan output ke file log dan tampilan real-time selama eksekusi. Ia tidak mengubah perilaku <code>save_output</code> yang menyimpan output ke variable konteks.</li>
+</ul>
+<p>Contoh YAML singkat:</p>
+<p>Step-level:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"verbose-step"</span></span>
+<span class="line"><span style="color:#85E89D">    type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">    commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"make test"</span><span style="color:#E1E4E8">]</span></span>
+<span class="line"><span style="color:#85E89D">    log_output</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">true</span></span></code></pre>
+<p>Job-level:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">jobs</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"build"</span></span>
+<span class="line"><span style="color:#85E89D">    log_output</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">true</span></span>
+<span class="line"><span style="color:#85E89D">    steps</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">      - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"run-tests"</span></span>
+<span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"command"</span></span>
+<span class="line"><span style="color:#85E89D">        commands</span><span style="color:#E1E4E8">: [</span><span style="color:#9ECBFF">"npm test"</span><span style="color:#E1E4E8">]</span></span></code></pre>
+<p>Pipeline-level:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">pipeline</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">  name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"ci"</span></span>
+<span class="line"><span style="color:#85E89D">  log_output</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">false</span><span style="color:#6A737D">  # disable file logging by default; enable selectively via job/step</span></span></code></pre>
+<p>Gunakan <code>log_output</code> untuk mengurangi kebisingan log pada perintah yang sangat verbose, sambil tetap mengandalkan buffer bukti-kesalahan in-memory untuk debugging saat terjadi kegagalan.</p>
 <h3 id="use-cases">Use Cases</h3>
 <p><strong>Debugging</strong>:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6A737D"># Review output after execution</span></span>
