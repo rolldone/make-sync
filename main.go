@@ -16,13 +16,13 @@ import (
 
 func main() {
 
-	// Ensure .sync_temp directory exists for logging and other runtime files
-	if err := os.MkdirAll(".sync_temp", 0755); err != nil {
-		log.Fatalf("failed to create .sync_temp directory: %v", err)
+	// Ensure .sync_temp/logs directory exists for logging
+	if err := os.MkdirAll(".sync_temp/logs", 0755); err != nil {
+		log.Fatalf("failed to create .sync_temp/logs directory: %v", err)
 	}
 
 	// Buka file untuk menulis log (append, create kalau belum ada)
-	f, err := os.OpenFile(".sync_temp/app.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(".sync_temp/logs/watcher.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatalf("gagal buka file log: %v", err)
 	}

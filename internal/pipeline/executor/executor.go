@@ -23,6 +23,7 @@ type Executor struct {
 	tempDir              string
 	pipeline             *types.Pipeline
 	executedAsSubroutine map[string]bool
+	logFile              *os.File
 }
 
 // NewExecutor creates a new executor
@@ -31,6 +32,24 @@ func NewExecutor() *Executor {
 		tempDir:              ".sync_temp",
 		executedAsSubroutine: make(map[string]bool),
 	}
+}
+
+// writeLog writes a message to the log file (lazy initialization)
+func (e *Executor) writeLog(message string) {
+	if e.logFile != nil {
+		// Strip ANSI escape codes for clean log file
+		cleanMessage := stripAnsiCodes(message)
+		timestamp := time.Now().Format("[2006-01-02 15:04:05]")
+		e.logFile.WriteString(fmt.Sprintf("%s %s\n", timestamp, cleanMessage))
+		e.logFile.Sync()
+	}
+}
+
+// stripAnsiCodes removes ANSI escape sequences from string
+func stripAnsiCodes(str string) string {
+	// Regex pattern to match ANSI escape codes
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	return ansiRegex.ReplaceAllString(str, "")
 }
 
 // Execute runs a pipeline with given execution config
@@ -51,6 +70,28 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 	sshConfigs, err := e.resolveSSHConfigs(hosts, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to resolve SSH configs: %v", err)
+	}
+
+	// Create log file immediately after SSH configs resolved
+	logsDir := ".sync_temp/logs"
+	os.MkdirAll(logsDir, 0755)
+
+	pipelineName := "unknown"
+	if pipeline != nil && pipeline.Name != "" {
+		pipelineName = pipeline.Name
+	}
+
+	timestamp := time.Now().Format("2006-01-02-15-04-05")
+	logPath := filepath.Join(logsDir, fmt.Sprintf("%s-%s.log", pipelineName, timestamp))
+
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		e.logFile = logFile
+		defer e.logFile.Close()
+		// Write header
+		e.logFile.WriteString(fmt.Sprintf("=== Pipeline: %s ===\n", pipelineName))
+		e.logFile.WriteString(fmt.Sprintf("Started: %s\n\n", timestamp))
+		e.logFile.Sync()
 	}
 
 	// Run jobs (parallel if possible)
@@ -151,8 +192,10 @@ func (e *Executor) runJob(job *types.Job, jobName string, configs []map[string]i
 func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx int, configs []map[string]interface{}, vars types.Vars, pipeline *types.Pipeline, isHead bool) error {
 	if isHead {
 		fmt.Printf("▶️  EXECUTING JOB: %s (HEAD)\n", jobName)
+		e.writeLog(fmt.Sprintf("▶️  EXECUTING JOB: %s (HEAD)", jobName))
 	} else {
 		fmt.Printf("▶️  EXECUTING JOB: %s\n", jobName)
+		e.writeLog(fmt.Sprintf("▶️  EXECUTING JOB: %s", jobName))
 	}
 	stepIndex := startStepIdx
 	executedGotoTarget := false
@@ -780,6 +823,7 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
+			e.writeLog(line)
 		}
 	}()
 
@@ -793,6 +837,7 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
+			e.writeLog(line)
 		}
 	}()
 
@@ -844,6 +889,7 @@ func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
+			e.writeLog(line)
 			// Send line to channel for idle timeout monitoring
 			select {
 			case outputChan <- line:
@@ -863,6 +909,7 @@ func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
+			e.writeLog(line)
 			// Send line to channel for idle timeout monitoring
 			select {
 			case outputChan <- line:

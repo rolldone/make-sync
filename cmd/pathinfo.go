@@ -269,7 +269,7 @@ func runIgnorePatternsSimulation(projectRoot string) {
 		{".git/config", false, "Git config"},
 		{"src/main.go", false, "Source file"},
 		{"dist/app.js", false, "Build output"},
-		{"logs/app.log", false, "Log file"},
+		{"logs/watcher.log", false, "Log file"},
 		{".sync_temp/cache.db", false, "Sync temp file"},
 		{"test.txt", false, "Test file"},
 		{"README.md", false, "Readme file"},
