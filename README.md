@@ -190,6 +190,7 @@ make-sync menyediakan sistem pipeline yang powerful untuk menjalankan workflow o
 - **Conditional Execution**: Jalankan job berdasarkan success/failure job sebelumnya
 - **SSH Execution**: Jalankan command di remote server via SSH
 - **Real-time Output Streaming**: Tampilkan output command secara real-time saat eksekusi
+- **Pipeline Logging**: Semua output otomatis tersimpan ke log file dengan timestamp
 - **Silent Mode**: Kontrol tampilan output per step untuk output yang lebih bersih
 - **Timeout Control**: Dual timeout system (idle + total) untuk kontrol eksekusi yang lebih cerdas
 - **Subroutine Calls**: Panggil job tertentu menggunakan `goto_job` untuk error handling
@@ -629,6 +630,101 @@ Pipeline menampilkan progress eksekusi dengan visual indicators:
 - **📋 Executing step: [name]**: Step dalam job sedang berjalan
 - **✅ Completed job: [name]**: Job berhasil diselesaikan
 - **❌ Failed job: [name]**: Job gagal
+
+### Pipeline Logging
+
+Setiap eksekusi pipeline otomatis mencatat semua output ke file log untuk debugging dan audit trail.
+
+#### Log File Location
+```
+.sync_temp/
+  └── logs/
+      ├── watcher.log                           # Application/watcher logs
+      └── {pipeline-name}-{timestamp}.log       # Pipeline execution logs
+```
+
+#### Log Features
+- **Automatic**: No configuration required - logs dibuat otomatis saat pipeline run
+- **Timestamped**: Setiap baris dengan format `[YYYY-MM-DD HH:MM:SS]`
+- **Clean Output**: ANSI escape codes di-strip untuk readability
+- **Comprehensive**: Capture semua stdout/stderr dari command execution
+- **Persistent**: Logs tidak hilang setelah pipeline selesai
+
+#### Error evidence (in-memory history)
+
+make-sync menyimpan ringkasan output terbaru selama eksekusi dalam buffer in-memory berkapasitas 300 KB (307200 bytes). Buffer ini bersifat FIFO: ketika total ukuran semua baris melebihi 300 KB, baris tertua akan di-evict sampai total ukuran kembali di bawah batas. Jika sebuah step gagal (mis. timeout atau error), seluruh isi buffer (hingga batas 300 KB) akan ditulis ke file log pipeline sebagai "error evidence" untuk membantu debugging. Baris tunggal yang lebih besar dari 300 KB tidak otomatis dipotong.
+
+#### Controlling real-time logging with `log_output`
+
+You can control whether a step's real-time output is written into the persistent pipeline log file using the `log_output` boolean flag. Logging is opt-in and resolved with the following priority (highest → lowest):
+
+- Step-level `log_output`
+- Job-level `log_output`
+- Pipeline-level `log_output`
+
+That means a `log_output: true` set on a Step will enable writing that step's output to the pipeline log even if the Job or Pipeline-level flag is `false` or unset. Conversely, setting `log_output: false` on a Step will suppress writing that Step's output even if the Job or Pipeline-level flags are `true`.
+
+Important notes:
+- The in-memory 300 KB error-evidence buffer always captures command output regardless of `log_output`. This ensures we can flush recent output on errors even when file logging is disabled for normal runs.
+- `log_output` only controls whether output is written in real time to the pipeline log file and displayed during execution. It does not affect saving output to variables via `save_output`.
+
+Example YAML snippets:
+
+Step-level (enable only this step):
+
+```yaml
+steps:
+  - name: "verbose-step"
+    type: "command"
+    commands: ["make test"]
+    log_output: true
+```
+
+Job-level (enable for all steps in the job unless overridden by a step):
+
+```yaml
+jobs:
+  - name: "build"
+    log_output: true
+    steps:
+      - name: "run-tests"
+        type: "command"
+        commands: ["npm test"]
+```
+
+Pipeline-level (default for all jobs/steps in the pipeline unless overridden):
+
+```yaml
+pipeline:
+  name: "ci"
+  log_output: false  # disable file logging by default; enable selectively via job/step
+```
+
+Use `log_output` to reduce log noise for very verbose commands, while relying on the in-memory error-evidence buffer to collect recent output in case of failures.
+
+
+#### Example Log File
+```log
+=== Pipeline: deploy-app ===
+Started: 2025-10-15-08-30-00
+
+[2025-10-15 08:30:00] ▶️  EXECUTING JOB: prepare (HEAD)
+[2025-10-15 08:30:01] Docker version 20.10.7, build f0df350
+[2025-10-15 08:30:02] Building image...
+[2025-10-15 08:30:15] Successfully built abc123def456
+```
+
+#### Use Cases
+```bash
+# Review output after execution
+tail -f .sync_temp/logs/my-pipeline-*.log
+
+# Search for errors
+grep -i "error" .sync_temp/logs/deploy-*.log
+
+# Archive logs for compliance
+aws s3 cp .sync_temp/logs/ s3://bucket/pipeline-logs/ --recursive
+```
 
 ### Variable Override CLI
 

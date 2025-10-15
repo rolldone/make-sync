@@ -24,6 +24,9 @@ type Executor struct {
 	pipeline             *types.Pipeline
 	executedAsSubroutine map[string]bool
 	logFile              *os.File
+	// output history per execution (in-memory ring buffer, byte-capped)
+	outputHistory *RingBuffer
+	historyMu     sync.Mutex
 }
 
 // NewExecutor creates a new executor
@@ -45,11 +48,126 @@ func (e *Executor) writeLog(message string) {
 	}
 }
 
+// flushErrorEvidence writes the last n lines from outputHistory to the pipeline log with a header
+func (e *Executor) flushErrorEvidence(n int) {
+	if e.outputHistory == nil {
+		return
+	}
+	e.historyMu.Lock()
+	lines := e.outputHistory.LastN(n)
+	e.historyMu.Unlock()
+	if len(lines) == 0 {
+		return
+	}
+	header := fmt.Sprintf("=== ERROR EVIDENCE (last %d lines) ===", len(lines))
+	e.writeLog(header)
+	for _, l := range lines {
+		e.writeLog(l)
+	}
+}
+
+// flushErrorEvidenceAll writes the entire output history buffer (up to cap)
+// to the pipeline log as error evidence.
+func (e *Executor) flushErrorEvidenceAll() {
+	if e.outputHistory == nil {
+		return
+	}
+	e.historyMu.Lock()
+	lines := e.outputHistory.All()
+	e.historyMu.Unlock()
+	if len(lines) == 0 {
+		return
+	}
+	header := "=== ERROR EVIDENCE (buffer up to 300KB) ==="
+	e.writeLog(header)
+	for _, l := range lines {
+		e.writeLog(l)
+	}
+}
+
+// shouldLogOutput decides whether to log command output based on priority:
+// Step.LogOutput > Job.LogOutput > Pipeline.LogOutput > default(false)
+func (e *Executor) shouldLogOutput(step *types.Step, job *types.Job) bool {
+	// Step-level
+	if step != nil && step.LogOutput != nil {
+		return *step.LogOutput
+	}
+	// Job-level
+	if job != nil && job.LogOutput != nil {
+		return *job.LogOutput
+	}
+	// Pipeline-level
+	if e.pipeline != nil {
+		if e.pipeline.LogOutput != nil {
+			return *e.pipeline.LogOutput
+		}
+	}
+	// default false
+	return false
+}
+
 // stripAnsiCodes removes ANSI escape sequences from string
 func stripAnsiCodes(str string) string {
 	// Regex pattern to match ANSI escape codes
 	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	return ansiRegex.ReplaceAllString(str, "")
+}
+
+// RingBuffer stores lines with a total byte cap. FIFO when cap exceeded.
+type RingBuffer struct {
+	lines      []string
+	totalBytes int
+	capBytes   int
+}
+
+func NewRingBuffer(capBytes int) *RingBuffer {
+	return &RingBuffer{capBytes: capBytes}
+}
+
+// Add appends a line and evicts oldest lines while totalBytes > capBytes
+func (r *RingBuffer) Add(line string) {
+	if line == "" {
+		return
+	}
+	r.lines = append(r.lines, line)
+	r.totalBytes += len(line)
+	// Evict oldest until under cap
+	for r.totalBytes > r.capBytes && len(r.lines) > 0 {
+		// remove first
+		removed := r.lines[0]
+		r.lines = r.lines[1:]
+		r.totalBytes -= len(removed)
+	}
+}
+
+// LastN returns up to n last lines (copy)
+func (r *RingBuffer) LastN(n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	if len(r.lines) == 0 {
+		return nil
+	}
+	if n >= len(r.lines) {
+		// return copy
+		out := make([]string, len(r.lines))
+		copy(out, r.lines)
+		return out
+	}
+	start := len(r.lines) - n
+	out := make([]string, n)
+	copy(out, r.lines[start:])
+	return out
+}
+
+// All returns a copy of all stored lines in the buffer.
+func (r *RingBuffer) All() []string {
+	if len(r.lines) == 0 {
+		return nil
+	}
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
 }
 
 // Execute runs a pipeline with given execution config
@@ -94,6 +212,11 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 		e.logFile.Sync()
 	}
 
+	// initialize output history buffer (300 KB cap)
+	e.historyMu.Lock()
+	e.outputHistory = NewRingBuffer(307200)
+	e.historyMu.Unlock()
+
 	// Run jobs (parallel if possible)
 	levels := e.groupJobsByLevel(execution.Jobs, pipeline)
 	var sortedJobs []string
@@ -124,6 +247,9 @@ func (e *Executor) Execute(pipeline *types.Pipeline, execution *types.Execution,
 
 		// Add visual separation between jobs
 		fmt.Println()
+		if e.shouldLogOutput(nil, job) {
+			e.writeLog(fmt.Sprintf("=== job %s start ===", job.Name))
+		}
 
 		currentJobIndex++
 	}
@@ -192,10 +318,14 @@ func (e *Executor) runJob(job *types.Job, jobName string, configs []map[string]i
 func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx int, configs []map[string]interface{}, vars types.Vars, pipeline *types.Pipeline, isHead bool) error {
 	if isHead {
 		fmt.Printf("▶️  EXECUTING JOB: %s (HEAD)\n", jobName)
-		e.writeLog(fmt.Sprintf("▶️  EXECUTING JOB: %s (HEAD)", jobName))
+		if e.shouldLogOutput(nil, job) {
+			e.writeLog(fmt.Sprintf("▶️  EXECUTING JOB: %s (HEAD)", jobName))
+		}
 	} else {
 		fmt.Printf("▶️  EXECUTING JOB: %s\n", jobName)
-		e.writeLog(fmt.Sprintf("▶️  EXECUTING JOB: %s", jobName))
+		if e.shouldLogOutput(nil, job) {
+			e.writeLog(fmt.Sprintf("▶️  EXECUTING JOB: %s", jobName))
+		}
 	}
 	stepIndex := startStepIdx
 	executedGotoTarget := false
@@ -237,6 +367,9 @@ func (e *Executor) runJobFromStep(job *types.Job, jobName string, startStepIdx i
 
 		// Handle goto_step and goto_job after processing all hosts for this step
 		if action == "goto_step" && targetStep != "" {
+			if e.shouldLogOutput(step, job) {
+				e.writeLog(fmt.Sprintf("=== step %s start ===", step.Name))
+			}
 			// Find target step index
 			newIndex := e.findStepIndex(job, targetStep)
 			if newIndex == -1 {
@@ -364,8 +497,10 @@ func (e *Executor) runCommandStep(step *types.Step, job *types.Job, config map[s
 		fmt.Printf("Running on %s: %s\n", host, fullCmd)
 
 		// Run command with interactive support and timeout
-		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent)
+		output, err := e.runCommandInteractive(client, fullCmd, step.Expect, vars, timeout, idleTimeout, step.Silent, step, job)
 		if err != nil {
+			// flush evidence into pipeline log before returning
+			e.flushErrorEvidenceAll()
 			return "", "", fmt.Errorf("command failed: %v", err)
 		}
 
@@ -697,10 +832,10 @@ func (e *Executor) interpolateVars(commands []string, vars types.Vars) []string 
 }
 
 // runCommandInteractive runs a command with interactive prompt support and timeout
-func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string, expects []types.Expect, vars types.Vars, timeoutSeconds int, idleTimeoutSeconds int, silent bool) (string, error) {
+func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string, expects []types.Expect, vars types.Vars, timeoutSeconds int, idleTimeoutSeconds int, silent bool, step *types.Step, job *types.Job) (string, error) {
 	if len(expects) == 0 {
 		// No expects, run normally with timeout
-		return e.runCommandWithTimeout(client, cmd, timeoutSeconds, idleTimeoutSeconds, silent)
+		return e.runCommandWithTimeout(client, cmd, timeoutSeconds, idleTimeoutSeconds, silent, step, job)
 	}
 
 	// For interactive commands, try to pipe responses
@@ -719,11 +854,11 @@ func (e *Executor) runCommandInteractive(client *sshclient.SSHClient, cmd string
 	fullCmd := echoCmd + " | " + cmd
 
 	// Use RunCommandWithOutput to capture and display output with timeout
-	return e.runCommandWithTimeout(client, fullCmd, timeoutSeconds, idleTimeoutSeconds, silent)
+	return e.runCommandWithTimeout(client, fullCmd, timeoutSeconds, idleTimeoutSeconds, silent, step, job)
 }
 
 // runCommandWithTimeout runs a command with timeout support and real-time output
-func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string, timeoutSeconds int, idleTimeoutSeconds int, silent bool) (string, error) {
+func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string, timeoutSeconds int, idleTimeoutSeconds int, silent bool, step *types.Step, job *types.Job) (string, error) {
 	type result struct {
 		output string
 		err    error
@@ -734,7 +869,7 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 
 	// Run command in goroutine with output streaming
 	go func() {
-		output, err := e.runCommandWithStreamingAndChannel(client, cmd, silent, outputChan)
+		output, err := e.runCommandWithStreamingAndChannel(client, cmd, silent, outputChan, step, job)
 		resultChan <- result{output: output, err: err}
 	}()
 
@@ -771,6 +906,7 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 
 		case <-idleTimer.C:
 			// Idle timeout - command has been silent too long
+			e.flushErrorEvidenceAll()
 			return "", fmt.Errorf("command idle timeout: no output for %d seconds", idleTimeoutSeconds)
 
 		case <-totalTimer.C:
@@ -778,16 +914,18 @@ func (e *Executor) runCommandWithTimeout(client *sshclient.SSHClient, cmd string
 			if timeoutSeconds == 0 {
 				continue // Unlimited, ignore total timeout
 			}
+			e.flushErrorEvidenceAll()
 			return "", fmt.Errorf("command timed out after %d seconds", timeoutSeconds)
 		}
 	}
 }
 
 // runCommandWithStreaming runs a command and streams output in real-time
-func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd string, silent bool) (string, error) {
+func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd string, silent bool, step *types.Step, job *types.Job) (string, error) {
 	// Create a new session like RunCommandWithOutput does
 	session, err := client.CreateSession()
 	if err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to create session: %v", err)
 	}
 	defer session.Close()
@@ -795,16 +933,19 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 	// Get stdout and stderr pipes for real-time streaming
 	stdout, err := session.StdoutPipe()
 	if err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to get stdout pipe: %v", err)
 	}
 
 	stderr, err := session.StderrPipe()
 	if err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to get stderr pipe: %v", err)
 	}
 
 	// Start the command
 	if err := session.Start(cmd); err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to start command: %v", err)
 	}
 
@@ -823,7 +964,15 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
-			e.writeLog(line)
+			// record into history unconditionally
+			e.historyMu.Lock()
+			if e.outputHistory != nil {
+				e.outputHistory.Add(line)
+			}
+			e.historyMu.Unlock()
+			if e.shouldLogOutput(step, job) {
+				e.writeLog(line)
+			}
 		}
 	}()
 
@@ -837,7 +986,14 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
-			e.writeLog(line)
+			e.historyMu.Lock()
+			if e.outputHistory != nil {
+				e.outputHistory.Add(line)
+			}
+			e.historyMu.Unlock()
+			if e.shouldLogOutput(step, job) {
+				e.writeLog(line)
+			}
 		}
 	}()
 
@@ -850,10 +1006,11 @@ func (e *Executor) runCommandWithStreaming(client *sshclient.SSHClient, cmd stri
 	return outputBuf.String(), nil
 }
 
-func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient, cmd string, silent bool, outputChan chan<- string) (string, error) {
+func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient, cmd string, silent bool, outputChan chan<- string, step *types.Step, job *types.Job) (string, error) {
 	// Create a new session like RunCommandWithOutput does
 	session, err := client.CreateSession()
 	if err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to create session: %v", err)
 	}
 	defer session.Close()
@@ -861,16 +1018,19 @@ func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient
 	// Get stdout and stderr pipes for real-time streaming
 	stdout, err := session.StdoutPipe()
 	if err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to get stdout pipe: %v", err)
 	}
 
 	stderr, err := session.StderrPipe()
 	if err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to get stderr pipe: %v", err)
 	}
 
 	// Start the command
 	if err := session.Start(cmd); err != nil {
+		e.flushErrorEvidenceAll()
 		return "", fmt.Errorf("failed to start command: %v", err)
 	}
 
@@ -889,7 +1049,9 @@ func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
-			e.writeLog(line)
+			if e.shouldLogOutput(step, job) {
+				e.writeLog(line)
+			}
 			// Send line to channel for idle timeout monitoring
 			select {
 			case outputChan <- line:
@@ -909,7 +1071,9 @@ func (e *Executor) runCommandWithStreamingAndChannel(client *sshclient.SSHClient
 				fmt.Printf("Command output: %s\n", line)
 			}
 			outputBuf.WriteString(line + "\n")
-			e.writeLog(line)
+			if e.shouldLogOutput(step, job) {
+				e.writeLog(line)
+			}
 			// Send line to channel for idle timeout monitoring
 			select {
 			case outputChan <- line:
@@ -984,7 +1148,9 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 		}
 	}
 
+	// debug prints removed
 	var lastOutput string
+	// For local mode, implement idle and total timeout behavior similar to remote execution
 	for _, cmd := range commands {
 		// Prepend cd command if working directory is specified
 		fullCmd := cmd
@@ -994,23 +1160,142 @@ func (e *Executor) runCommandStepLocal(step *types.Step, commands []string, vars
 
 		fmt.Printf("Running locally: %s\n", fullCmd)
 
-		// Run command locally
-		output, err := e.runCommandLocal(fullCmd)
+		// Prepare command
+		execCmd := exec.Command("bash", "-c", fullCmd)
+		stdout, err := execCmd.StdoutPipe()
 		if err != nil {
-			return "", "", fmt.Errorf("command failed: %v", err)
+			e.flushErrorEvidenceAll()
+			return "", "", fmt.Errorf("failed to get stdout pipe: %v", err)
+		}
+		stderr, err := execCmd.StderrPipe()
+		if err != nil {
+			e.flushErrorEvidenceAll()
+			return "", "", fmt.Errorf("failed to get stderr pipe: %v", err)
 		}
 
-		// Display command output for user visibility
-		if strings.TrimSpace(output) != "" {
-			fmt.Printf("Output: %s\n", strings.TrimSpace(output))
+		if err := execCmd.Start(); err != nil {
+			e.flushErrorEvidenceAll()
+			return "", "", fmt.Errorf("failed to start local command: %v", err)
+		}
+
+		// Stream output and capture
+		var outputBuf bytes.Buffer
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Channels for idle detection
+		outChan := make(chan string, 100)
+
+		go func() {
+			defer wg.Done()
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				line := scanner.Text()
+				fmt.Printf("Command output: %s\n", line)
+				outputBuf.WriteString(line + "\n")
+				// record history
+				e.historyMu.Lock()
+				if e.outputHistory != nil {
+					e.outputHistory.Add(line)
+				}
+				e.historyMu.Unlock()
+				// send to idle monitor
+				select {
+				case outChan <- line:
+				default:
+				}
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				line := scanner.Text()
+				fmt.Printf("Command output: %s\n", line)
+				outputBuf.WriteString(line + "\n")
+				e.historyMu.Lock()
+				if e.outputHistory != nil {
+					e.outputHistory.Add(line)
+				}
+				e.historyMu.Unlock()
+				select {
+				case outChan <- line:
+				default:
+				}
+			}
+		}()
+
+		// Timers
+		totalTimeout := time.Duration(step.Timeout) * time.Second
+		if step.Timeout == 0 && step.IdleTimeout == 0 {
+			totalTimeout = 365 * 24 * time.Hour
+		}
+		if step.Timeout == 0 && step.IdleTimeout != 0 {
+			totalTimeout = 365 * 24 * time.Hour
+		}
+		if step.Timeout != 0 {
+			totalTimeout = time.Duration(step.Timeout) * time.Second
+		}
+		idleTimeout := time.Duration(step.IdleTimeout) * time.Second
+		if idleTimeout == 0 {
+			idleTimeout = 600 * time.Second
+		}
+
+		totalTimer := time.NewTimer(totalTimeout)
+		idleTimer := time.NewTimer(idleTimeout)
+		done := make(chan error, 1)
+
+		go func() {
+			wg.Wait()
+			done <- execCmd.Wait()
+		}()
+
+	loop:
+		for {
+			select {
+			case <-outChan:
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(idleTimeout)
+			case err := <-done:
+				if err != nil {
+					e.flushErrorEvidenceAll()
+					return "", "", fmt.Errorf("command failed: %v", err)
+				}
+				break loop
+			case <-idleTimer.C:
+				// idle timeout
+				_ = execCmd.Process.Kill()
+				e.flushErrorEvidenceAll()
+				return "", "", fmt.Errorf("command idle timeout: no output for %d seconds", step.IdleTimeout)
+			case <-totalTimer.C:
+				if step.Timeout == 0 {
+					// unlimited
+					continue
+				}
+				_ = execCmd.Process.Kill()
+				e.flushErrorEvidenceAll()
+				return "", "", fmt.Errorf("command timed out after %d seconds", step.Timeout)
+			}
+		}
+
+		// Completed
+		wg.Wait()
+		outStr := outputBuf.String()
+		if strings.TrimSpace(outStr) != "" {
+			fmt.Printf("Output: %s\n", strings.TrimSpace(outStr))
 		} else {
 			fmt.Printf("Output: (empty)\n")
 		}
-
-		lastOutput = output // Save for potential output saving
+		lastOutput = outStr
 
 		// Check conditions on output
-		action, targetStep, err := e.checkConditions(step, output, vars)
+		action, targetStep, err := e.checkConditions(step, outStr, vars)
 		if err != nil {
 			return "", "", err
 		}

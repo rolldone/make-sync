@@ -17,6 +17,7 @@ type Pipeline struct {
 	Jobs             []Job             `yaml:"jobs"`
 	StrictVariables  bool              `yaml:"strict_variables,omitempty"` // error on undefined variables if true
 	ContextVariables map[string]string `yaml:"-"`                          // runtime context variables (not serialized)
+	LogOutput        *bool             `yaml:"log_output,omitempty"`       // optional: enable logging for entire pipeline
 }
 
 // Job represents a job within a pipeline
@@ -25,6 +26,7 @@ type Job struct {
 	DependsOn []string `yaml:"depends_on,omitempty"`
 	Mode      string   `yaml:"mode,omitempty"` // "local" or "remote" (default: "remote")
 	Steps     []Step   `yaml:"steps"`
+	LogOutput *bool    `yaml:"log_output,omitempty"` // optional: enable logging for this job
 }
 
 // Step represents a step within a job
@@ -47,6 +49,7 @@ type Step struct {
 	ElseAction  string      `yaml:"else_action,omitempty"`  // action if no conditions match: "continue", "drop", "goto_step", "goto_job", "fail"
 	ElseStep    string      `yaml:"else_step,omitempty"`    // target step name for else goto_step
 	ElseJob     string      `yaml:"else_job,omitempty"`     // target job name for else goto_job
+	LogOutput   *bool       `yaml:"log_output,omitempty"`   // optional: enable logging for this step
 }
 
 // Condition represents a conditional check on command output
