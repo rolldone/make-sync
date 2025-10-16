@@ -372,12 +372,10 @@ Lihat semua versi
 <li>Jika beberapa file dispesifikasikan, <code>destination</code> harus berupa direktori (mengakhiri dengan <code>/</code> atau sudah ada sebagai direktori) — jika tidak, step akan error.</li>
 <li>Kompatibilitas mundur: bila <code>files</code> tidak disediakan, <code>source</code> / <code>sources</code> akan berfungsi seperti sebelumnya.</li>
 </ul>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span></span></span>
-<span class="line"><span>**File template (config.php):**</span></span>
-<span class="line"><span>```php</span></span>
-<span class="line"><span>&#x3C;?php</span></span>
-<span class="line"><span>$db_host = "{{db_host}}";</span></span>
-<span class="line"><span>$db_name = "{{db_name}}";</span></span></code></pre>
+<p><strong>File template (config.php):</strong></p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="php"><code><span class="line"><span style="color:#F97583">&#x3C;?</span><span style="color:#79B8FF">php</span></span>
+<span class="line"><span style="color:#E1E4E8">$db_host </span><span style="color:#F97583">=</span><span style="color:#9ECBFF"> "{{db_host}}"</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#E1E4E8">$db_name </span><span style="color:#F97583">=</span><span style="color:#9ECBFF"> "{{db_name}}"</span><span style="color:#E1E4E8">;</span></span></code></pre>
 <p><strong>Execution variables:</strong></p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">executions</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"Deploy Prod"</span></span>
