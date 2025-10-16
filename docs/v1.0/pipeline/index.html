@@ -351,11 +351,38 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">        type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">file_transfer</span></span>
 <span class="line"><span style="color:#85E89D">        source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"config.php"</span></span>
 <span class="line"><span style="color:#85E89D">        destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/var/www/config.php"</span></span>
-<span class="line"><span style="color:#85E89D">        template</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"enabled"</span></span></code></pre>
-<p><strong>File template (config.php):</strong></p>
-<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="php"><code><span class="line"><span style="color:#F97583">&#x3C;?</span><span style="color:#79B8FF">php</span></span>
-<span class="line"><span style="color:#E1E4E8">$db_host </span><span style="color:#F97583">=</span><span style="color:#9ECBFF"> "{{db_host}}"</span><span style="color:#E1E4E8">;</span></span>
-<span class="line"><span style="color:#E1E4E8">$db_name </span><span style="color:#F97583">=</span><span style="color:#9ECBFF"> "{{db_name}}"</span><span style="color:#E1E4E8">;</span></span></code></pre>
+<span class="line"><span style="color:#85E89D">        template</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"enabled"</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D">### Per-file transfers with `files` (recommended for multiple files)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#9ECBFF">When you need to upload or download multiple files with different targets, use the `files` array inside a `file_transfer` step. Each entry may contain its own `source`, optional `destination`, and optional `template` override. If `files` is present it takes precedence over `source`/`sources`.</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#85E89D">Example</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">```</span><span style="color:#9ECBFF">yaml</span></span>
+<span class="line"><span style="color:#E1E4E8">- </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"upload-files"</span></span>
+<span class="line"><span style="color:#85E89D">  type</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"file_transfer"</span></span>
+<span class="line"><span style="color:#85E89D">  files</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"xxx.txt"</span></span>
+<span class="line"><span style="color:#85E89D">      destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/xxx/xxx/xxx.txt"</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"vvv.txt"</span></span>
+<span class="line"><span style="color:#85E89D">      destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/xxx/xxx/vvv.txt"</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"dist/"</span></span>
+<span class="line"><span style="color:#85E89D">      destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/xxx/dist/"</span></span></code></pre>
+<p>Behavior:</p>
+<ul>
+<li>Per-file <code>destination</code> overrides step-level <code>destination</code>. If neither is set for a file entry an error is raised.</li>
+<li>Globs in <code>source</code> are expanded locally for uploads and each match is transferred preserving relative path under the destination directory.</li>
+<li>Per-file <code>template</code> overrides the step-level <code>template</code> setting.</li>
+<li>If multiple files are specified, the <code>destination</code> must be a directory (trailing <code>/</code> or an existing directory) — otherwise the step will error.</li>
+<li>Backwards compatibility: if <code>files</code> is not provided, <code>source</code> / <code>sources</code> continue to work as before.</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span></span></span>
+<span class="line"><span>**File template (config.php):**</span></span>
+<span class="line"><span>```php</span></span>
+<span class="line"><span>&#x3C;?php</span></span>
+<span class="line"><span>$db_host = "{{db_host}}";</span></span>
+<span class="line"><span>$db_name = "{{db_name}}";</span></span></code></pre>
 <p><strong>Execution variables:</strong></p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">executions</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">  - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"Deploy Prod"</span></span>
@@ -725,7 +752,7 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">direct_access</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#85E89D">  pipeline_dir</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">".sync_pipelines"</span><span style="color:#6A737D">  # Default location</span></span></code></pre>
 <p><strong>⚠️ Reserved Names</strong>: Jangan gunakan nama <code>vars</code> atau <code>scripts</code> untuk pipeline.</p> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
-Terakhir diperbarui: 15/10/2025 </div>  <a href="/make-sync/docs/v1.0">
+Terakhir diperbarui: 16/10/2025 </div>  <a href="/make-sync/docs/v1.0">
 ← Kembali ke overview
 </a>  </div> </div>  </article> </main></div> </div> </div> <!-- Theme toggle + mobile menu client script --> <script type="module">
         (function() {
