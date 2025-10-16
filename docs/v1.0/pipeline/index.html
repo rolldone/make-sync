@@ -353,11 +353,11 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">        destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/var/www/config.php"</span></span>
 <span class="line"><span style="color:#85E89D">        template</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"enabled"</span></span>
 <span class="line"></span>
-<span class="line"><span style="color:#6A737D">### Per-file transfers with `files` (recommended for multiple files)</span></span>
+<span class="line"><span style="color:#6A737D">### Transfer per-file dengan `files` (direkomendasikan untuk banyak file)</span></span>
 <span class="line"></span>
-<span class="line"><span style="color:#9ECBFF">When you need to upload or download multiple files with different targets, use the `files` array inside a `file_transfer` step. Each entry may contain its own `source`, optional `destination`, and optional `template` override. If `files` is present it takes precedence over `source`/`sources`.</span></span>
+<span class="line"><span style="color:#9ECBFF">Saat Anda perlu mengunggah atau mengunduh beberapa file dengan target yang berbeda, gunakan array `files` di dalam langkah bertipe `file_transfer`. Setiap entri dapat memiliki `source` sendiri, `destination` opsional, dan `template` opsional sebagai override. Jika `files` ada, maka ia memiliki prioritas atas `source`/`sources` lama.</span></span>
 <span class="line"></span>
-<span class="line"><span style="color:#85E89D">Example</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">Contoh</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"></span>
 <span class="line"><span style="color:#E1E4E8">```</span><span style="color:#9ECBFF">yaml</span></span>
 <span class="line"><span style="color:#E1E4E8">- </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"upload-files"</span></span>
@@ -369,13 +369,13 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">      destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/xxx/xxx/vvv.txt"</span></span>
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">source</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"dist/"</span></span>
 <span class="line"><span style="color:#85E89D">      destination</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">"/xxx/dist/"</span></span></code></pre>
-<p>Behavior:</p>
+<p>Perilaku:</p>
 <ul>
-<li>Per-file <code>destination</code> overrides step-level <code>destination</code>. If neither is set for a file entry an error is raised.</li>
-<li>Globs in <code>source</code> are expanded locally for uploads and each match is transferred preserving relative path under the destination directory.</li>
-<li>Per-file <code>template</code> overrides the step-level <code>template</code> setting.</li>
-<li>If multiple files are specified, the <code>destination</code> must be a directory (trailing <code>/</code> or an existing directory) — otherwise the step will error.</li>
-<li>Backwards compatibility: if <code>files</code> is not provided, <code>source</code> / <code>sources</code> continue to work as before.</li>
+<li><code>destination</code> per-file akan menimpa <code>destination</code> pada level step. Jika keduanya tidak diatur untuk sebuah entri file, step akan menghasilkan error.</li>
+<li>Pola glob di <code>source</code> diekspansi secara lokal untuk operasi unggah; tiap hasil pencocokan akan ditransfer dengan mempertahankan path relatifnya di bawah direktori tujuan.</li>
+<li><code>template</code> per-file akan menimpa pengaturan <code>template</code> pada level step.</li>
+<li>Jika beberapa file dispesifikasikan, <code>destination</code> harus berupa direktori (mengakhiri dengan <code>/</code> atau sudah ada sebagai direktori) — jika tidak, step akan error.</li>
+<li>Kompatibilitas mundur: bila <code>files</code> tidak disediakan, <code>source</code> / <code>sources</code> akan berfungsi seperti sebelumnya.</li>
 </ul>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span></span></span>
 <span class="line"><span>**File template (config.php):**</span></span>
