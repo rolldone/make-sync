@@ -1,0 +1,35 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro'
+import { getAllDocs } from '../../lib/docs'
+
+const pages = getAllDocs()
+const versions = [...new Set(pages.map((p) => p.version))].sort()
+// Attempt to find v1.0 overview specifically and render it on the docs index
+const v10 = pages.find((p) => p.version === 'v1.0' && p.category === 'index')
+let V1Overview = undefined
+if (v10 && v10.module && v10.module.default) {
+  V1Overview = v10.module.default
+}
+
+// Frontmatter: use BASE_URL for proper link prefixes
+const base = import.meta.env.BASE_URL;
+---
+
+<DocsLayout title="Index">
+  <div slot="sidebar">
+    <div class="text-sm font-medium">Versi</div>
+    <ul class="mt-2 space-y-1">
+      {versions.map((v) => (
+        <li><a href={`${base}docs/${v}/`}>{v}</a></li>
+      ))}
+    </ul>
+  </div>
+
+  <section>
+    {V1Overview ? (
+      <div class="border-t mt-6 pt-6">
+        <V1Overview />
+      </div>
+    ) : null}
+  </section>
+</DocsLayout>
