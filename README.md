@@ -317,15 +317,6 @@ jobs:
 ```
 
 ### Step Configuration
-```
-
-### Step Configuration
-```
-
-### Step Configuration
-
-
-### Step Configuration
 
 Setiap step dalam pipeline mendukung konfigurasi advanced untuk kontrol eksekusi yang lebih detail:
 
@@ -875,7 +866,7 @@ steps:
   - name: "deploy"
     type: "command"
     commands: ["echo 'Deploying version {{app_version}}'"]  # Gunakan variable
-
+```
 #### Subroutine Calls
 ```yaml
 steps:
