@@ -1406,6 +1406,7 @@ func (w *Watcher) StopNotify() {
 
 // syncFileViaSSH syncs a file to remote server via SSH
 func (w *Watcher) syncFileViaSSH(event FileEvent) {
+	util.Default.ClearLine()
 	if w.sshClient == nil {
 		w.safePrintf("❌ SSH client not available for file sync\n")
 		return

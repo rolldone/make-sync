@@ -35,8 +35,10 @@ type Step struct {
 	Type        string      `yaml:"type,omitempty"`         // "command" (default), "file_transfer", "script"
 	Commands    []string    `yaml:"commands,omitempty"`     // for command type
 	File        string      `yaml:"file,omitempty"`         // for script/file_transfer
-	Source      string      `yaml:"source,omitempty"`       // for file_transfer
+	Source      string      `yaml:"source,omitempty"`       // for file_transfer (deprecated when using `files`)
+	Sources     []string    `yaml:"sources,omitempty"`      // optional: multiple sources for file_transfer
 	Destination string      `yaml:"destination,omitempty"`  // for file_transfer
+	Files       []FileEntry `yaml:"files,omitempty"`        // per-file entries: {source,destination,template}
 	Direction   string      `yaml:"direction,omitempty"`    // "upload" (default) or "download" for file_transfer
 	Template    string      `yaml:"template,omitempty"`     // "enabled" to render {{variables}} in file content
 	Conditions  []Condition `yaml:"conditions,omitempty"`   // conditional execution based on output
@@ -50,6 +52,13 @@ type Step struct {
 	ElseStep    string      `yaml:"else_step,omitempty"`    // target step name for else goto_step
 	ElseJob     string      `yaml:"else_job,omitempty"`     // target job name for else goto_job
 	LogOutput   *bool       `yaml:"log_output,omitempty"`   // optional: enable logging for this step
+}
+
+// FileEntry represents a per-file transfer instruction inside a file_transfer step
+type FileEntry struct {
+	Source      string `yaml:"source"`
+	Destination string `yaml:"destination,omitempty"`
+	Template    string `yaml:"template,omitempty"` // optional per-file override
 }
 
 // Condition represents a conditional check on command output

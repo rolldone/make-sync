@@ -376,6 +376,32 @@ steps:
 | `conditions` | []Condition | - | Conditional execution based on output |
 | `expect` | []Expect | - | Interactive prompt responses |
 
+### Per-file transfers with `files` (new)
+
+You can provide multiple files in a single `file_transfer` step using the `files` array. Each entry can specify its own `source`, an optional per-file `destination`, and an optional `template` override. When `files` is present it takes priority over the older `source` / `sources` fields.
+
+Example:
+
+```yaml
+- name: "upload-files"
+  type: "file_transfer"
+  files:
+    - source: "xxx.txt"
+      destination: "/xxx/xxx/xxx.txt"
+    - source: "vvv.txt"
+      destination: "/xxx/xxx/vvv.txt"
+    - source: "dist/"
+      destination: "/xxx/dist/"
+```
+
+Behavior notes:
+- If `files` is present, it overrides `source` and `sources` for that step.
+- Each file entry may provide its own `destination`; if omitted, the step-level `destination` is used.
+- Globs in `source` (e.g. `dist/**/*.js`) are expanded locally and each match is transferred preserving relative paths under the destination directory.
+- `template: "enabled"` may be set per-step or per-file; per-file `template` overrides the step-level setting.
+- If multiple files are provided and the resolved destination is a directory (ends with `/` or exists as a directory), all files will be placed under that directory. If multiple files are provided but destination looks like a single file path, the step will error.
+- Backwards compatibility: existing single-file `source` usage still works if `files` is not present.
+
 ### Timeout Configuration
 
 Pipeline mendukung dua jenis timeout untuk kontrol eksekusi yang lebih fleksibel:

@@ -602,9 +602,11 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 	}
 
 	// Remote mode (default) - use SSH
-	// Interpolate vars in paths
-	source := e.interpolateString(step.Source, vars)
-	destination := e.interpolateString(step.Destination, vars)
+	// Build list of file transfer entries to process (source,destination,template)
+	entries, err := e.buildFileTransferEntries(step, vars)
+	if err != nil {
+		return err
+	}
 
 	// Extract SSH params
 	host, _ := config["HostName"].(string)
@@ -634,19 +636,34 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 		direction = "upload" // default
 	}
 
-	if direction == "download" {
-		// Download from remote source to local destination
-		fmt.Printf("Downloading %s:%s to %s\n", host, source, destination)
-		if err := client.DownloadFile(destination, source); err != nil {
-			return fmt.Errorf("failed to download file: %v", err)
+	// Process each entry sequentially
+	for _, ent := range entries {
+		src := ent.Source
+		dst := ent.Destination
+		tmpl := ent.Template
+
+		if direction == "download" {
+			// Download from remote source to local destination
+			fmt.Printf("Downloading %s:%s to %s\n", host, src, dst)
+			if err := client.DownloadFile(dst, src); err != nil {
+				return fmt.Errorf("failed to download file: %v", err)
+			}
+			continue
 		}
-	} else {
-		// Upload: Check if template rendering is enabled
-		if step.Template == "enabled" {
+
+		// Upload
+		fileTemplateEnabled := false
+		if tmpl != "" {
+			fileTemplateEnabled = (tmpl == "enabled")
+		} else if step.Template == "enabled" {
+			fileTemplateEnabled = true
+		}
+
+		if fileTemplateEnabled {
 			// Render content with variables
-			content, err := os.ReadFile(source)
+			content, err := os.ReadFile(src)
 			if err != nil {
-				return fmt.Errorf("failed to read source file %s: %v", source, err)
+				return fmt.Errorf("failed to read source file %s: %v", src, err)
 			}
 			interpolatedContent := e.interpolateString(string(content), vars)
 
@@ -664,19 +681,129 @@ func (e *Executor) runFileTransferStep(step *types.Step, job *types.Job, config 
 			tempFile.Close()
 
 			// Upload interpolated temp file using SCP
-			fmt.Printf("Uploading %s (rendered) to %s:%s\n", source, host, destination)
-			if err := client.UploadFile(tempFile.Name(), destination); err != nil {
+			fmt.Printf("Uploading %s (rendered) to %s:%s\n", src, host, dst)
+			if err := client.UploadFile(tempFile.Name(), dst); err != nil {
 				return fmt.Errorf("failed to upload file: %v", err)
 			}
 		} else {
 			// Upload file as-is without rendering
-			fmt.Printf("Uploading %s (as-is) to %s:%s\n", source, host, destination)
-			if err := client.UploadFile(source, destination); err != nil {
+			fmt.Printf("Uploading %s (as-is) to %s:%s\n", src, host, dst)
+			if err := client.UploadFile(src, dst); err != nil {
 				return fmt.Errorf("failed to upload file: %v", err)
 			}
 		}
 	}
 	return nil
+}
+
+// buildFileTransferEntries builds an expanded list of file entries from step.Files, step.Sources or step.Source
+// It expands local glob patterns and resolves per-file destinations. Returns entries with interpolated strings.
+func (e *Executor) buildFileTransferEntries(step *types.Step, vars types.Vars) ([]struct {
+	Source      string
+	Destination string
+	Template    string
+}, error) {
+	type entry struct {
+		Source      string
+		Destination string
+		Template    string
+	}
+	var results []entry
+
+	// Helper to append resolved sources (expanding globs)
+	appendResolved := func(srcPattern, dstTemplate, tmpl string) error {
+		// Interpolate both
+		srcInterp := e.interpolateString(srcPattern, vars)
+		dstInterp := e.interpolateString(dstTemplate, vars)
+
+		// If pattern contains glob characters, expand
+		if strings.ContainsAny(srcInterp, "*?[") {
+			matches, err := filepath.Glob(srcInterp)
+			if err != nil {
+				return fmt.Errorf("invalid glob pattern %s: %v", srcInterp, err)
+			}
+			if len(matches) == 0 {
+				return fmt.Errorf("no files match pattern %s", srcInterp)
+			}
+			for _, m := range matches {
+				// Determine dest path: if dstInterp ends with / treat as dir and preserve relative path
+				if strings.HasSuffix(dstInterp, string(os.PathSeparator)) || strings.HasSuffix(dstInterp, "/") {
+					rel, err := filepath.Rel(filepath.Dir(srcInterp), m)
+					if err != nil {
+						rel = filepath.Base(m)
+					}
+					dst := filepath.Join(dstInterp, rel)
+					results = append(results, entry{Source: m, Destination: dst, Template: tmpl})
+				} else {
+					// Destination is a directory if multiple matches; place files preserving base name
+					dst := filepath.Join(dstInterp, filepath.Base(m))
+					results = append(results, entry{Source: m, Destination: dst, Template: tmpl})
+				}
+			}
+			return nil
+		}
+
+		// No glob - single file
+		results = append(results, entry{Source: srcInterp, Destination: dstInterp, Template: tmpl})
+		return nil
+	}
+
+	// Priority 1: step.Files
+	if len(step.Files) > 0 {
+		for _, f := range step.Files {
+			// Destination resolution: per-file destination required or fallback to step.Destination
+			dst := f.Destination
+			if dst == "" {
+				dst = step.Destination
+			}
+			if dst == "" {
+				return nil, fmt.Errorf("file entry %s missing destination and step.destination not set", f.Source)
+			}
+			if err := appendResolved(f.Source, dst, f.Template); err != nil {
+				return nil, err
+			}
+		}
+		// Convert and return
+		out := make([]struct{ Source, Destination, Template string }, len(results))
+		for i, r := range results {
+			out[i] = struct{ Source, Destination, Template string }{r.Source, r.Destination, r.Template}
+		}
+		return out, nil
+	}
+
+	// Priority 2: step.Sources
+	if len(step.Sources) > 0 {
+		if step.Destination == "" {
+			return nil, fmt.Errorf("step 'sources' provided but step.destination is not set")
+		}
+		for _, s := range step.Sources {
+			if err := appendResolved(s, step.Destination, ""); err != nil {
+				return nil, err
+			}
+		}
+		out := make([]struct{ Source, Destination, Template string }, len(results))
+		for i, r := range results {
+			out[i] = struct{ Source, Destination, Template string }{r.Source, r.Destination, r.Template}
+		}
+		return out, nil
+	}
+
+	// Fallback: single source
+	if step.Source == "" {
+		return nil, fmt.Errorf("no source(s) specified for file_transfer step %s", step.Name)
+	}
+	dst := step.Destination
+	if dst == "" {
+		return nil, fmt.Errorf("destination not specified for single source in step %s", step.Name)
+	}
+	if err := appendResolved(step.Source, dst, ""); err != nil {
+		return nil, err
+	}
+	out := make([]struct{ Source, Destination, Template string }, len(results))
+	for i, r := range results {
+		out[i] = struct{ Source, Destination, Template string }{r.Source, r.Destination, r.Template}
+	}
+	return out, nil
 }
 
 // runScriptStep loads and executes a script file
