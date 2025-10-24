@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"make-sync/internal/pipeline/types"
 	"make-sync/internal/util"
 	"os"
 	"path/filepath"
@@ -81,7 +80,6 @@ type DirectAccess struct {
 	PipelineDir string                   `yaml:"pipeline_dir"`
 	SSHConfigs  []map[string]interface{} `yaml:"ssh_configs"`
 	SSHCommands []SSHCommand             `yaml:"ssh_commands"`
-	Executions  []types.Execution        `yaml:"executions"`
 }
 
 type SSHCommand struct {
@@ -485,12 +483,7 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 	if renderCount > 0 {
 		printer.Printf("✅ Template rendering completed: %d references resolved\n", renderCount)
 	} else {
-		// Only show "no template references" message if this is NOT a pipeline context
-		// Pipeline executions use a different variable system (vars.yaml, execution.variables)
-		// so template references are not relevant for them
-		if len(renderedCfg.DirectAccess.Executions) == 0 {
-			printer.Println("ℹ️  No template references found in configuration")
-		}
+		printer.Println("ℹ️  No template references found in configuration")
 	}
 
 	return &renderedCfg, nil
