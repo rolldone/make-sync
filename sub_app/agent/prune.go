@@ -44,6 +44,16 @@ func performPrune(config *AgentConfig, bypassIgnore bool, prefixes []string, dry
 	// Ignore/cache handling is not used here — directories that contain
 	// ignored files will NOT be removed.
 
+	// Build protected prefix set: do not remove directories that exactly match
+	// an explicit manual-transfer endpoint. Normalize prefixes to relative
+	// paths (no leading/trailing slash).
+	protected := map[string]struct{}{}
+	for _, pr := range prefixes {
+		np := stringsTrimSlashes(pr)
+		// empty normalized prefix indicates project root; root is already
+		// protected by samePath check, but add it for explicitness.
+		protected[np] = struct{}{}
+	}
 	// collect directories to consider
 	dirSet := map[string]struct{}{}
 	for _, p := range prefixes {
@@ -111,6 +121,15 @@ func performPrune(config *AgentConfig, bypassIgnore bool, prefixes []string, dry
 		// ones matched by ignore rules), do not remove the directory. This
 		// protects user-intended ignored files and avoids surprising removals.
 		if len(entries) != 0 {
+			continue
+		}
+
+		// At this point the directory is empty. Do not remove explicit
+		// manual-transfer endpoints even if empty — protect endpoints.
+		relToRootNorm := stringsTrimSlashes(relToRoot)
+		if _, ok := protected[relToRootNorm]; ok {
+			// Skip pruning explicit endpoint even if empty. Log for audit.
+			util.Default.Printf("🔒 Skipping prune of protected endpoint: %s\n", d)
 			continue
 		}
 

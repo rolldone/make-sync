@@ -122,11 +122,11 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 		for _, pr := range prefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(strings.TrimPrefix(pr, "/"), "/")
-			// Do NOT treat an empty prefix as an explicit endpoint here. Empty prefix
-			// means "match all" for scope selection, but we should still apply
-			// ignore patterns for full-scope operations unless bypass is requested.
+			// Treat empty prefix as an explicit endpoint (protect endpoints).
+			// An empty prefix means user selected full-scope; treat it as explicit
+			// to avoid surprising deletions.
 			if normalizedPr == "" {
-				continue
+				return true
 			}
 			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
@@ -300,6 +300,16 @@ func pruneEmptyDirsLocal(absRoot string, prefixes []string, ic *IgnoreCache) int
 		prefixes = []string{""}
 	}
 
+	// Build protected prefix set: directories that are explicit endpoints and
+	// must not be removed even if empty. Normalize prefixes to relative paths
+	// (no leading/trailing slash).
+	protected := map[string]struct{}{}
+	for _, pr := range prefixes {
+		np := strings.TrimSuffix(strings.TrimPrefix(pr, "/"), "/")
+		// empty normalized prefix indicates the project root; treat specially
+		protected[np] = struct{}{}
+	}
+
 	dirs := make([]string, 0)
 	for _, pr := range prefixes {
 		pr = strings.TrimPrefix(pr, "/")
@@ -338,6 +348,10 @@ func pruneEmptyDirsLocal(absRoot string, prefixes []string, ic *IgnoreCache) int
 			continue
 		}
 		if rel == ".git" || strings.HasPrefix(rel, ".git/") || strings.Contains(rel, "/.git/") {
+			continue
+		}
+		// Do not remove explicit manual-transfer endpoints (protect them).
+		if _, ok := protected[rel]; ok {
 			continue
 		}
 		if ic != nil && ic.Match(d, true) {
@@ -693,9 +707,9 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 		for _, pr := range normPrefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(pr, "/")
-			// Do NOT treat an empty prefix as an explicit endpoint here.
+			// Treat empty prefix as an explicit endpoint (protect endpoints)
 			if normalizedPr == "" {
-				continue
+				return true
 			}
 			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
@@ -1063,9 +1077,9 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 		for _, pr := range normPrefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(pr, "/")
-			// Do NOT treat an empty prefix as an explicit endpoint here.
+			// Treat empty prefix as an explicit endpoint (protect endpoints)
 			if normalizedPr == "" {
-				continue
+				return true
 			}
 			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
@@ -1380,6 +1394,27 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 			_, checked = checkedSet[rel]
 		}
 		if !checked {
+			// Protect explicit manual-transfer endpoints from remote deletion,
+			// but only the endpoint directory itself. Files/subpaths inside the
+			// endpoint should still be considered for deletion when not checked.
+			isProtectedEndpoint := false
+			for _, pr := range normPrefixes {
+				normalizedPr := strings.TrimSuffix(pr, "/")
+				if normalizedPr == "" {
+					// empty prefix indicates project root. Protecting root here would
+					// be too aggressive; skip protection for empty prefix in deletion
+					// candidates.
+					continue
+				}
+				if rel == normalizedPr {
+					isProtectedEndpoint = true
+					break
+				}
+			}
+			if isProtectedEndpoint {
+				util.Default.Printf("🔒 Skipping remote delete (protected endpoint): %s\n", rel)
+				continue
+			}
 			toDelete = append(toDelete, rel)
 		}
 	}

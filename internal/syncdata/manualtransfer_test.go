@@ -51,9 +51,9 @@ func TestManualTransferContextAwareIgnore(t *testing.T) {
 		expected bool
 		desc     string
 	}{
-		// Empty prefix cases
-		{"any", []string{""}, false, "empty prefix does NOT count as explicit endpoint (ignore applies)"},
-		{"any/path", []string{""}, false, "empty prefix does NOT count as explicit endpoint (ignore applies)"},
+		// Empty prefix cases — now treated as explicit endpoint (protect endpoints)
+		{"any", []string{""}, true, "empty prefix counts as explicit endpoint (protect)"},
+		{"any/path", []string{""}, true, "empty prefix counts as explicit endpoint (protect)"},
 
 		// Multiple prefixes
 		{"vendor/lib.js", []string{"vendor", "src"}, true, "multiple prefixes - vendor match"},
@@ -67,12 +67,12 @@ func TestManualTransferContextAwareIgnore(t *testing.T) {
 		{"a/b/c/file.txt", []string{"x/y/z"}, false, "no match in deep nesting"},
 
 		// Root level files
-		{"file.txt", []string{""}, false, "root level file with empty prefix (ignore applies)"},
+		{"file.txt", []string{""}, true, "root level file with empty prefix (protect)"},
 		{"file.txt", []string{"file.txt"}, true, "exact file match"},
 		{"file.txt", []string{"other.txt"}, false, "root level file no match"},
 
 		// Empty and special cases
-		{"", []string{""}, false, "empty path with empty prefix (ignore applies)"},
+		{"", []string{""}, true, "empty path with empty prefix (protect)"},
 		{"", []string{"vendor"}, false, "empty path no match"},
 		{"vendor", []string{"vendor/"}, true, "trailing slash in prefix"},
 		{"vendor/file.txt", []string{"vendor/"}, true, "trailing slash matches subdirectory"},
@@ -84,9 +84,9 @@ func TestManualTransferContextAwareIgnore(t *testing.T) {
 				for _, pr := range tc.prefixes {
 					// Normalize prefix by removing trailing slash for comparison
 					normalizedPr := strings.TrimSuffix(pr, "/")
-					// Do NOT treat an empty prefix as an explicit endpoint here.
+					// Treat empty prefix as explicit endpoint (protect endpoints)
 					if normalizedPr == "" {
-						continue
+						return true
 					}
 					if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 						return true
