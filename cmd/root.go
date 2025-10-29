@@ -31,6 +31,12 @@ Supports SSH connections, file sync operations, and interactive configuration ma
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := cmd.Context()
 		cwd, _ := os.Getwd()
+
+		// Save current workspace to history if a make-sync config exists here.
+		// This ensures we only record projects that have been initialized/configured.
+		if config.ConfigExists() {
+			_ = history.AddPath(cwd) // best-effort; ignore error to avoid blocking startup
+		}
 		util.Default.Printf("You are in: %s\n", cwd)
 		util.Default.ClearLine()
 		util.Default.Println("Initialize Bootstrap Is Done!")

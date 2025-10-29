@@ -52,8 +52,8 @@ func TestManualTransferContextAwareIgnore(t *testing.T) {
 		desc     string
 	}{
 		// Empty prefix cases
-		{"any", []string{""}, true, "empty prefix matches everything"},
-		{"any/path", []string{""}, true, "empty prefix matches nested paths"},
+		{"any", []string{""}, false, "empty prefix does NOT count as explicit endpoint (ignore applies)"},
+		{"any/path", []string{""}, false, "empty prefix does NOT count as explicit endpoint (ignore applies)"},
 
 		// Multiple prefixes
 		{"vendor/lib.js", []string{"vendor", "src"}, true, "multiple prefixes - vendor match"},
@@ -67,12 +67,12 @@ func TestManualTransferContextAwareIgnore(t *testing.T) {
 		{"a/b/c/file.txt", []string{"x/y/z"}, false, "no match in deep nesting"},
 
 		// Root level files
-		{"file.txt", []string{""}, true, "root level file with empty prefix"},
+		{"file.txt", []string{""}, false, "root level file with empty prefix (ignore applies)"},
 		{"file.txt", []string{"file.txt"}, true, "exact file match"},
 		{"file.txt", []string{"other.txt"}, false, "root level file no match"},
 
 		// Empty and special cases
-		{"", []string{""}, true, "empty path with empty prefix"},
+		{"", []string{""}, false, "empty path with empty prefix (ignore applies)"},
 		{"", []string{"vendor"}, false, "empty path no match"},
 		{"vendor", []string{"vendor/"}, true, "trailing slash in prefix"},
 		{"vendor/file.txt", []string{"vendor/"}, true, "trailing slash matches subdirectory"},
@@ -84,7 +84,11 @@ func TestManualTransferContextAwareIgnore(t *testing.T) {
 				for _, pr := range tc.prefixes {
 					// Normalize prefix by removing trailing slash for comparison
 					normalizedPr := strings.TrimSuffix(pr, "/")
-					if normalizedPr == "" || relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
+					// Do NOT treat an empty prefix as an explicit endpoint here.
+					if normalizedPr == "" {
+						continue
+					}
+					if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 						return true
 					}
 				}

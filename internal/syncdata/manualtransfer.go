@@ -2,6 +2,7 @@ package syncdata
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"sync"
 
 	"make-sync/internal/config"
+	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
 
 	"github.com/cespare/xxhash/v2"
@@ -120,7 +122,13 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 		for _, pr := range prefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(strings.TrimPrefix(pr, "/"), "/")
-			if normalizedPr == "" || relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
+			// Do NOT treat an empty prefix as an explicit endpoint here. Empty prefix
+			// means "match all" for scope selection, but we should still apply
+			// ignore patterns for full-scope operations unless bypass is requested.
+			if normalizedPr == "" {
+				continue
+			}
+			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
 			}
 		}
@@ -281,6 +289,147 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 		examined, len(uploaded), skippedIgnored, skippedUpToDate, uploadErrors)
 
 	return uploaded, nil
+}
+
+// pruneEmptyDirsLocal removes empty directories under absRoot restricted to prefixes (if provided).
+// It respects the provided IgnoreCache (skips directories that match ignore rules) and
+// always skips special directories like .sync_temp and .git.
+func pruneEmptyDirsLocal(absRoot string, prefixes []string, ic *IgnoreCache) int {
+	deleted := 0
+	if len(prefixes) == 0 {
+		prefixes = []string{""}
+	}
+
+	dirs := make([]string, 0)
+	for _, pr := range prefixes {
+		pr = strings.TrimPrefix(pr, "/")
+		start := filepath.Join(absRoot, filepath.FromSlash(pr))
+		info, err := os.Stat(start)
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() {
+			start = filepath.Dir(start)
+		}
+		_ = filepath.WalkDir(start, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			dirs = append(dirs, p)
+			return nil
+		})
+	}
+
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+
+	for _, d := range dirs {
+		if d == absRoot {
+			continue
+		}
+		rel, rerr := filepath.Rel(absRoot, d)
+		if rerr != nil {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == ".sync_temp" || strings.HasPrefix(rel, ".sync_temp/") || strings.Contains(rel, "/.sync_temp/") {
+			continue
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git/") || strings.Contains(rel, "/.git/") {
+			continue
+		}
+		if ic != nil && ic.Match(d, true) {
+			continue
+		}
+		ents, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		if len(ents) == 0 {
+			if err := os.Remove(d); err == nil {
+				util.Default.Printf("🧹 Pruned empty dir: %s\n", d)
+				deleted++
+			}
+		}
+	}
+	if deleted > 0 {
+		util.Default.Printf("🧹 Prune local empty dirs: deleted=%d\n", deleted)
+	}
+	return deleted
+}
+
+// pruneRemoteEmptyDirs attempts to rmdir empty directories under remote prefixes.
+// Currently implemented for POSIX remotes only; Windows remotes are skipped.
+func pruneRemoteEmptyDirs(sshCli *sshclient.SSHClient, cfg *config.Config, prefixes []string) int {
+	// Delegate to agent-side prune (Run the agent's prune command in remote .sync_temp)
+	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	remoteBase := cfg.Devsync.Auth.RemotePath
+	if strings.TrimSpace(remoteBase) == "" {
+		util.Default.Println("⚠️  Remote base path empty; skipping remote prune")
+		return 0
+	}
+
+	// Construct remote .sync_temp path similar to runner.RunAgentIndexingFlow
+	var remoteSyncTemp string
+	if strings.Contains(strings.ToLower(osTarget), "win") {
+		remoteSyncTemp = filepath.ToSlash(filepath.Join(remoteBase, ".sync_temp"))
+	} else {
+		remoteSyncTemp = filepath.Join(remoteBase, ".sync_temp")
+	}
+
+	out, err := RemoteRunAgentPruneFn(sshCli, remoteSyncTemp, osTarget, false, prefixes, false)
+	if err != nil {
+		util.Default.Printf("⚠️  Remote prune (agent) failed: %v\n", err)
+		util.Default.Printf("🔍 Remote output: %s\n", out)
+		return 0
+	}
+	util.Default.Printf("✅ Remote prune (agent) output:\n%s\n", out)
+
+	// Try to parse the first non-empty line as JSON (agent prints a compact
+	// JSON object first). If parsing succeeds, use its counts. Otherwise
+	// fall back to the previous best-effort text parsing.
+	type pruneFailure struct {
+		Path  string `json:"path"`
+		Error string `json:"error"`
+	}
+	type pruneJSON struct {
+		Removed []string       `json:"removed"`
+		Failed  []pruneFailure `json:"failed"`
+		DryRun  bool           `json:"dry_run"`
+	}
+
+	lines := strings.Split(out, "\n")
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		var pj pruneJSON
+		if err := json.Unmarshal([]byte(ln), &pj); err == nil {
+			util.Default.Printf("🔢 Remote prune (agent) parsed: removed=%d failed=%d dryRun=%v\n", len(pj.Removed), len(pj.Failed), pj.DryRun)
+			return len(pj.Removed)
+		}
+		// if this non-empty line wasn't JSON, stop attempting further lines
+		// and fall back to best-effort text parsing below
+		break
+	}
+
+	// fallback: look for textual summary like "Prune summary: removed=%d"
+	var removedCount = 0
+	for _, ln := range lines {
+		if strings.Contains(ln, "Prune summary:") {
+			parts := strings.Split(ln, "removed=")
+			if len(parts) > 1 {
+				var num int
+				fmt.Sscanf(parts[1], "%d", &num)
+				removedCount = num
+				break
+			}
+		}
+	}
+	return removedCount
 }
 
 // CompareAndDownloadManualTransfer downloads only entries whose rel starts with
@@ -544,7 +693,11 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 		for _, pr := range normPrefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(pr, "/")
-			if normalizedPr == "" || relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
+			// Do NOT treat an empty prefix as an explicit endpoint here.
+			if normalizedPr == "" {
+				continue
+			}
+			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
 			}
 		}
@@ -848,6 +1001,9 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 
 	util.Default.Printf("🧹 Force-Delete summary: deleted=%d, errors=%d\n", deleted, deleteErrors)
 
+	// Prune empty local directories left behind by deletions (respect ignore rules)
+	_ = pruneEmptyDirsLocal(absRoot, normPrefixes, ic)
+
 	return downloaded, nil
 }
 
@@ -907,7 +1063,11 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 		for _, pr := range normPrefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(pr, "/")
-			if normalizedPr == "" || relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
+			// Do NOT treat an empty prefix as an explicit endpoint here.
+			if normalizedPr == "" {
+				continue
+			}
+			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
 			}
 		}
@@ -1249,6 +1409,9 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 	}
 
 	util.Default.Printf("🧹 Force-Upload delete summary: candidates=%d, deleted=%d, errors=%d\n", len(toDelete), deleted, deleteErrors)
+
+	// Prune empty directories on remote side for pushed prefixes (POSIX only)
+	_ = pruneRemoteEmptyDirs(sshCli, cfg, normPrefixes)
 
 	return uploaded, nil
 }

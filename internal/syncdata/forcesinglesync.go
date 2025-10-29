@@ -122,7 +122,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			}
 
 			// mode selection
-			modeChoice, err := tui.ShowMenuWithPrints([]string{"Rsync Soft Mode", "Rsync Force Mode", "Rsync Soft Mode (Bypass)", "Rsync Force Mode (Bypass)", "Back Previous / Exit"}, "? Single Sync : ["+choice+"] | Which mode :")
+			modeChoice, err := tui.ShowMenuWithPrints([]string{"Safe (no deletes)", "Force (may delete remote/local)", "Safe (Bypass)", "Force (Bypass)", "Back Previous / Exit"}, "? Single Sync : ["+choice+"] | Which mode :")
 			if err != nil {
 				util.Default.Printf("❌ Mode selection cancelled: %v\n", err)
 				continue
@@ -150,24 +150,40 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 				// If selection is "All Data Only In Your \"Sync Ignore\" File Pattern", we should use include-pattern logic
 				if folderChoice == "All Data Only In Your \"Sync Ignore\" File Pattern" {
 					neg := readNegationPatterns(localRoot)
-					if modeChoice == "Rsync Force Mode" {
+					if strings.Contains(modeChoice, "Force") {
+						// confirm destructive action
+						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
+						if cerr != nil {
+							util.Default.Printf("❌ Captcha error: %v\n", cerr)
+							continue
+						}
+						if !ok {
+							continue
+						}
 						downloaded, err = CompareAndDownloadByIgnoreIncludesForce(cfg, localRoot, neg)
 					} else {
 						downloaded, err = CompareAndDownloadByIgnoreIncludes(cfg, localRoot, neg)
 					}
 				} else {
-					if modeChoice == "Rsync Force Mode" {
-						// Force mode: rsync --delete semantics within prefixes (parallel)
+					if strings.Contains(modeChoice, "Force") {
+						// Force mode: confirm then perform rsync --delete semantics within prefixes (parallel)
+						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
+						if cerr != nil {
+							util.Default.Printf("❌ Captcha error: %v\n", cerr)
+							continue
+						}
+						if !ok {
+							continue
+						}
 						downloaded, err = CompareAndDownloadManualTransferForceParallel(cfg, localRoot, prefixes)
-					} else if modeChoice == "Rsync Soft Mode" {
-						// Soft mode: rsync semantics within prefixes (parallel)
-						downloaded, err = CompareAndDownloadManualTransferParallel(cfg, localRoot, prefixes)
-					} else if modeChoice == "Rsync Force Mode (Bypass)" {
-						// Force bypass mode: rsync --delete semantics within prefixes, bypass ignore patterns
-						downloaded, err = CompareAndDownloadManualTransferForceParallel(cfg, localRoot, prefixes)
-					} else if modeChoice == "Rsync Soft Mode (Bypass)" {
-						// Soft bypass mode: rsync semantics within prefixes, bypass ignore patterns
-						downloaded, err = CompareAndDownloadManualTransferBypassParallel(cfg, localRoot, prefixes)
+					} else if strings.Contains(modeChoice, "Safe") {
+						// Safe mode: rsync semantics within prefixes (parallel)
+						// For bypass-safe we want to bypass ignore checks; detect by 'Bypass' substring
+						if strings.Contains(modeChoice, "Bypass") {
+							downloaded, err = CompareAndDownloadManualTransferBypassParallel(cfg, localRoot, prefixes)
+						} else {
+							downloaded, err = CompareAndDownloadManualTransferParallel(cfg, localRoot, prefixes)
+						}
 					} else {
 						downloaded, err = CompareAndDownloadManualTransferParallel(cfg, localRoot, prefixes)
 					}
@@ -195,22 +211,37 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 				// If selection is "All Data Only In Your \"Sync Ignore\" File Pattern", use include-pattern Upload
 				if folderChoice == "All Data Only In Your \"Sync Ignore\" File Pattern" {
 					neg := readNegationPatterns(localRoot)
-					if modeChoice == "Rsync Force Mode" {
+					if strings.Contains(modeChoice, "Force") {
+						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
+						if cerr != nil {
+							util.Default.Printf("❌ Captcha error: %v\n", cerr)
+							continue
+						}
+						if !ok {
+							continue
+						}
 						uploaded, err = CompareAndUploadByIgnoreIncludesForce(cfg, localRoot, neg)
 					} else {
 						uploaded, err = CompareAndUploadByIgnoreIncludes(cfg, localRoot, neg)
 					}
 				} else {
-					if modeChoice == "Rsync Force Mode" {
+					if strings.Contains(modeChoice, "Force") {
+						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
+						if cerr != nil {
+							util.Default.Printf("❌ Captcha error: %v\n", cerr)
+							continue
+						}
+						if !ok {
+							continue
+						}
 						uploaded, err = CompareAndUploadManualTransferForceParallel(cfg, localRoot, prefixes)
-					} else if modeChoice == "Rsync Soft Mode" {
-						uploaded, err = CompareAndUploadManualTransfer(cfg, localRoot, prefixes)
-					} else if modeChoice == "Rsync Force Mode (Bypass)" {
-						// Force bypass mode: rsync --delete semantics within prefixes, bypass ignore patterns
-						uploaded, err = CompareAndUploadManualTransferForceParallel(cfg, localRoot, prefixes)
-					} else if modeChoice == "Rsync Soft Mode (Bypass)" {
-						// Soft bypass mode: rsync semantics within prefixes, bypass ignore patterns
-						uploaded, err = CompareAndUploadManualTransferBypassParallel(cfg, localRoot, prefixes)
+					} else if strings.Contains(modeChoice, "Safe") {
+						// Safe mode: upload within prefixes
+						if strings.Contains(modeChoice, "Bypass") {
+							uploaded, err = CompareAndUploadManualTransferBypassParallel(cfg, localRoot, prefixes)
+						} else {
+							uploaded, err = CompareAndUploadManualTransfer(cfg, localRoot, prefixes)
+						}
 					} else {
 						uploaded, err = CompareAndUploadManualTransfer(cfg, localRoot, prefixes)
 					}

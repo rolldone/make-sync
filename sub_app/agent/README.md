@@ -40,6 +40,41 @@ Perintah dan flag penting
 - --bypass-ignore
   - Jika dipasang, agent akan mengabaikan aturan `.sync_ignore` saat indexing.
 
+- prune (baru)
+  - Perintah: `sync-agent prune`
+  - Tujuan: membersihkan direktori kosong yang tersisa setelah operasi Force (atau ketika controller meminta prune). Agent melakukan traversal bottom-up dan hanya menghapus direktori yang benar-benar kosong.
+  - Flags yang didukung:
+    - `--manual-transfer prefix1,prefix2` — batasi prune ke subtree yang relevan (prefix relatif terhadap working_dir).
+    - `--dry-run` — jangan hapus, hanya tampilkan apa yang akan dihapus.
+    - `--bypass-ignore` — (opsional) menginstruksikan agent untuk mengabaikan `.sync_ignore` bila diinginkan; namun implementasi prune bersifat konservatif secara default dan akan selalu mengecualikan `.sync_temp` dan `.git`.
+  - Output:
+    - Agent mencetak satu baris JSON kompak pertama yang berisi ringkasan hasil, contoh:
+      `{"removed":["path1","path2"],"failed":[{"path":"p","error":"..."}],"dry_run":false}`
+    - Setelah JSON, agent menampilkan ringkasan manusiawi (list path yang dihapus dan kegagalan).
+  - Perilaku penting:
+    - Agent TIDAK akan memproses atau menghapus apa pun di bawah `.sync_temp` atau `.git` — direktori ini selalu dikecualikan.
+    - Agent menghapus hanya direktori yang benar-benar kosong (konservatif) — jika sebuah direktori berisi file (termasuk file yang dicocokkan oleh `.sync_ignore`), direktori tersebut tidak akan dihapus.
+    - Jika direktori hilang antara pengecekan dan penghapusan (race), ENOENT diabaikan dan tidak dilaporkan sebagai kegagalan.
+    - Gunakan `--dry-run` terlebih dahulu untuk melihat apa yang akan dihapus sebelum menjalankan prune secara nyata.
+  - Rekomendasi penggunaan:
+    - Controller/client sekarang mem-delegasikan remote-prune ke agent alih-alih menjalankan shell `find/rmdir` via SSH. Ini meningkatkan portabilitas dan mengurangi risiko quoting/shell pada remote.
+    - Jangan gunakan `--bypass-ignore` kecuali Anda paham risikonya — opsi ini dapat menyebabkan penghapusan artefak yang biasanya diabaikan.
+
+  - Contoh penggunaan:
+
+    ```bash
+    # Lihat apa yang akan dihapus di subtree src dan assets (dry-run)
+    sync-agent prune --manual-transfer src,assets --dry-run
+
+    # Jalankan prune pada seluruh working_dir (konservatif: hanya hapus direktori benar-benar kosong)
+    sync-agent prune
+
+    # (Tidak disarankan) Jalankan prune pada satu prefix dan bypass ignore
+    sync-agent prune --manual-transfer logs --bypass-ignore
+    ```
+
+    Catatan: saat controller menjalankan agent prune, controller biasanya akan membaca baris JSON pertama dari stdout untuk mengambil jumlah `removed`/`failed` secara andal.
+
 Lokasi config & working dir
 - Agent mencari `.sync_temp/config.json` di:
   1. Direktori tempat executable berada (jika executable berada di `.sync_temp`, ia akan baca di situ)

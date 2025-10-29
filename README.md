@@ -8,6 +8,7 @@ CLI untuk sinkronisasi file/devsync via SSH, dengan mode aman (safe pull/push), 
   - Download/Upload
   - Pilih folder: salah satu path terdaftar, semua yang terdaftar, atau berdasarkan pola `!` di `.sync_ignore`
   - Mode: Rsync Soft (tanpa delete) atau Rsync Force (dengan delete terbatas scope)
+  - Catatan: opsi "Bypass" telah dihapus dari menu top-level Pull/Push. Opsi bypass-ignore masih tersedia sebagai flag CLI/agent untuk pengguna lanjutan, tetapi tidak ditampilkan pada menu interaktif utama untuk mencegah penghapusan tak sengaja.
 - Force Mode (Rsync-like delete):
   - Download Force: hapus file lokal yang tidak ada di DB remote dalam scope pilihan
   - Upload Force: hapus file remote yang tidak ada di lokal (gunakan kolom `checked` di DB bila ada)
@@ -112,9 +113,10 @@ direct_access:
    - Salah satu path terdaftar (dari `devsync.manual_transfer`)
    - "All data registered in manual_sync only" (semua path terdaftar)
    - "All Data Only In Your \"Sync Ignore\" File Pattern" (berdasarkan `!patterns` dari `.sync_ignore`)
-5. Pilih mode:
-   - Rsync Soft Mode: hanya transfer file yang berubah, tanpa penghapusan
-   - Rsync Force Mode: selain transfer, juga melakukan penghapusan file yang tidak ada pada sisi lain, terbatas pada scope pilihan
+3. Pilih mode:
+  - Rsync Soft Mode: hanya transfer file yang berubah, tanpa penghapusan
+  - Rsync Force Mode: selain transfer, juga melakukan penghapusan file yang tidak ada pada sisi lain, terbatas pada scope pilihan
+  - Catatan: Mode Force sekarang dilindungi dengan konfirmasi captcha untuk operasi destruktif. Ini mencegah eksekusi Force oleh kelalaian. Jika Anda perlu menggunakan bypass-ignore, gunakan flag CLI/agent dengan kehati-hatian.
 
 Selama Download/Upload:
 - Sistem akan menjalankan indexing di remote terlebih dahulu (mirroring safe pull/push) agar DB up-to-date.
@@ -122,7 +124,7 @@ Selama Download/Upload:
 ### Navigasi Keyboard di TUI
 - Back bertahap: gunakan item menu "Back" untuk naik satu level.
 - Keluar cepat: Esc, q, atau Ctrl+C akan keluar dari seluruh flow Single/Manual Sync.
-- Catatan: Mode Force tidak menampilkan prompt konfirmasi.
+- Catatan: Mode Force sekarang dilindungi konfirmasi captcha untuk operasi destruktif; opsi bypass dihilangkan dari menu top-level. Jika Anda memerlukan bypass, gunakan flag CLI/agent secara eksplisit (akan meminta kehati-hatian).
 
 ## Detail Perilaku
 - Download Soft: unduh file remote yang belum ada atau hash berbeda, dalam scope.
@@ -137,7 +139,7 @@ Selama Download/Upload:
 ## Tips & Batasan
 - Pastikan `devsync.auth` terisi benar untuk koneksi SSH.
 - Jika build agent gagal, sistem akan mencoba fallback binary di folder `.sync_temp` sesuai target OS.
-- Force Mode tidak menampilkan prompt konfirmasi. Pastikan scope sudah tepat sebelum mengeksekusi.
+- Mode Force sekarang menggunakan konfirmasi captcha untuk operasi destruktif; opsi bypass dihilangkan dari menu top-level. Jika Anda memerlukan bypass, gunakan flag CLI/agent secara eksplisit (akan meminta kehati-hatian).
 - Untuk Windows remote, penghapusan file menggunakan `cmd.exe /C del /f /q`.
 
 ### Catatan tentang `.sync_temp` dan ignore

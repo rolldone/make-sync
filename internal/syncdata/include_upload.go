@@ -421,5 +421,9 @@ func CompareAndUploadByIgnoreIncludesForce(cfg *config.Config, localRoot string,
 	}
 
 	util.Default.Printf("🧹 Upload via !patterns (force): candidates=%d, deleted=%d, errors=%d\n", len(toDelete), deleted, deleteErrors)
+	// Prune empty remote directories left behind by remote deletions (POSIX only)
+	// Delegate to agent-side prune to handle platform differences and respect ignores.
+	_ = pruneRemoteEmptyDirs(sshCli, cfg, nil)
+
 	return uploaded, nil
 }

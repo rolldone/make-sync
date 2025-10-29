@@ -390,6 +390,105 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// RemoteRunAgentPrune runs the agent's prune command on the remote .sync_temp agent
+// remoteDir should be the remote .sync_temp directory (same as used for agent binary)
+func RemoteRunAgentPrune(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool, prefixes []string, dryRun bool) (string, error) {
+	isWin := strings.Contains(strings.ToLower(osTarget), "win")
+
+	// Get unique agent binary name from local config
+	localConfig, err := config.GetOrCreateLocalConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load local config: %v", err)
+	}
+	binaryName := localConfig.GetAgentBinaryName(osTarget)
+
+	var cmd string
+	if isWin {
+		winRemoteDir := strings.ReplaceAll(remoteDir, "/", "\\")
+		var agentPath, cdDir string
+		if strings.HasSuffix(winRemoteDir, ".sync_temp") {
+			agentPath = winRemoteDir + "\\" + binaryName
+			cdDir = winRemoteDir[:len(winRemoteDir)-len(".sync_temp")]
+			cdDir = strings.TrimSuffix(cdDir, "\\")
+			if cdDir == "" {
+				cdDir = winRemoteDir
+			}
+		} else {
+			agentPath = winRemoteDir + "\\.sync_temp\\" + binaryName
+			cdDir = winRemoteDir
+		}
+		pruneCmd := "prune"
+		if bypassIgnore {
+			pruneCmd = pruneCmd + " --bypass-ignore"
+		}
+		if dryRun {
+			pruneCmd = pruneCmd + " --dry-run"
+		}
+		if len(prefixes) > 0 {
+			joined := strings.Join(prefixes, ",")
+			pruneCmd = fmt.Sprintf("%s --manual-transfer %s", pruneCmd, joined)
+		}
+		cmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && \"%s\" %s", cdDir, agentPath, pruneCmd)
+	} else {
+		var agentPath, cdDir string
+		if strings.HasSuffix(remoteDir, ".sync_temp") {
+			agentPath = filepath.Join(remoteDir, binaryName)
+			cdDir = strings.TrimSuffix(remoteDir, ".sync_temp")
+			if cdDir == "" {
+				cdDir = remoteDir
+			}
+		} else {
+			agentPath = filepath.Join(remoteDir, ".sync_temp", binaryName)
+			cdDir = remoteDir
+		}
+		agentPath = filepath.ToSlash(agentPath)
+		cdDir = filepath.ToSlash(cdDir)
+		pruneCmd := "prune"
+		if bypassIgnore {
+			pruneCmd = pruneCmd + " --bypass-ignore"
+		}
+		if dryRun {
+			pruneCmd = pruneCmd + " --dry-run"
+		}
+		if len(prefixes) > 0 {
+			joined := strings.Join(prefixes, ",")
+			pruneCmd = fmt.Sprintf("%s --manual-transfer %s", pruneCmd, shellQuote(joined))
+		}
+		cmd = fmt.Sprintf("cd %s && %s %s", shellQuote(cdDir), shellQuote(agentPath), pruneCmd)
+	}
+
+	util.Default.Printf("🔍 DEBUG: Executing remote prune command: %s\n", cmd)
+
+	outputChan, errorChan, err := client.RunCommandWithStream(cmd, false)
+	if err != nil {
+		return "", fmt.Errorf("failed to start remote prune command: %v", err)
+	}
+
+	var output strings.Builder
+	timeout := time.After(60 * time.Second)
+	for {
+		select {
+		case out, ok := <-outputChan:
+			if !ok {
+				return output.String(), nil
+			}
+			output.WriteString(out)
+		case err := <-errorChan:
+			if err != nil {
+				return output.String(), fmt.Errorf("remote prune failed: %v", err)
+			}
+		case <-timeout:
+			return output.String(), fmt.Errorf("remote prune timed out after 60s")
+		}
+	}
+}
+
+// RemoteRunAgentPruneFn is a variable indirection for RemoteRunAgentPrune to
+// allow tests to override the remote execution logic (mocking). Production
+// code should use the real RemoteRunAgentPrune implementation, but tests can
+// replace this with a stub that returns synthetic output.
+var RemoteRunAgentPruneFn = RemoteRunAgentPrune
+
 // RunAgentIndexingFlow encapsulates the full remote indexing orchestration:
 // - locate local agent binary from provided candidates
 // - connect SSH using cfg

@@ -18,7 +18,7 @@ const (
 func ShowPostSafePullMenu() PostOperationAction {
 	for {
 		postMenuItems := []string{
-			"retry_safe_pull :: Run safe pull again",
+			"retry_last_pull :: Retry last pull",
 			"back_to_menu :: Back to main menu",
 		}
 
@@ -28,7 +28,7 @@ func ShowPostSafePullMenu() PostOperationAction {
 			return BackToMainMenu
 		}
 
-		if postResult == "retry_safe_pull" || strings.HasPrefix(postResult, "retry") {
+		if postResult == "retry_last_pull" || strings.HasPrefix(postResult, "retry") {
 			util.Default.Println("🔄 Retrying safe pull...")
 			return RetryOperation
 		} else {
@@ -42,7 +42,7 @@ func ShowPostSafePullMenu() PostOperationAction {
 func ShowPostSafePushMenu() PostOperationAction {
 	for {
 		postMenuItems := []string{
-			"retry_safe_push :: Run safe push again",
+			"retry_last_push :: Retry last push",
 			"back_to_menu :: Back to main menu",
 		}
 
@@ -52,7 +52,7 @@ func ShowPostSafePushMenu() PostOperationAction {
 			return BackToMainMenu
 		}
 
-		if postResult == "retry_safe_push" || strings.HasPrefix(postResult, "retry") {
+		if postResult == "retry_last_push" || strings.HasPrefix(postResult, "retry") {
 			util.Default.Println("🔄 Retrying safe push...")
 			return RetryOperation
 		} else {

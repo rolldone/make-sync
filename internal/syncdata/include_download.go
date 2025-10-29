@@ -200,6 +200,8 @@ func CompareAndDownloadByIgnoreIncludes(cfg *config.Config, localRoot string, ne
 
 	util.Default.Printf("🔁 Download via !patterns: examined=%d, downloaded=%d, skipped(ignored)=%d, skipped(up-to-date)=%d, errors=%d\n",
 		examined, len(downloaded), skippedIgnored, skippedUpToDate, downloadErrors)
+	// Prune empty local directories created/left behind by deletions, but respect ignore rules
+	_ = pruneEmptyDirsLocal(absRoot, nil, ic)
 
 	return downloaded, nil
 }
@@ -311,5 +313,8 @@ func CompareAndDownloadByIgnoreIncludesForce(cfg *config.Config, localRoot strin
 	})
 
 	util.Default.Printf("🧹 Download via !patterns (force): deleted=%d, errors=%d\n", deleted, deleteErrors)
+	// Prune empty local directories created/left behind by deletions, but respect ignore rules
+	_ = pruneEmptyDirsLocal(absRoot, nil, ic)
+
 	return downloaded, nil
 }

@@ -52,8 +52,8 @@ mainMenuLoop:
 
 		menuItems := []string{
 			"safe_sync :: Basic sync with file watching",
-			"safe_pull_sync :: Pull from remote then sync",
-			"soft_push_sync :: Safe push to remote then sync",
+			"Sync: Pull (from remote)",
+			"Sync: Push (to remote)",
 			"force_manual_sync :: Single file/folder transfer",
 			"remote_session :: New remote session",
 			"back :: Return to main menu",
@@ -136,9 +136,33 @@ mainMenuLoop:
 			}
 			// After watcher stops, loop back to the menu
 			continue
-		case 1: // safe_pull_sync
+		case 1: // Sync: Pull (from remote)
 			util.ResetRaw(oldStage)
-			// Connect SSH first
+
+			// Mode submenu: show fast menu first, defer SSH connect until user confirms
+			// Note: bypass options removed from top-level Pull menu (bypass remains available in other flows)
+			mode, err := tui.ShowMenuWithPrints([]string{"Safe (no deletes)", "Force (may delete remote/local)", "Back"}, "Pull — choose mode")
+			if err != nil {
+				util.Default.Printf("❌ Mode selection cancelled: %v\n", err)
+				continue
+			}
+			if mode == "Back" || mode == "cancelled" {
+				continue
+			}
+
+			// If force selected, require captcha up front (no SSH needed for captcha)
+			if strings.Contains(mode, "Force") {
+				ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
+				if cerr != nil {
+					util.Default.Printf("❌ Captcha error: %v\n", cerr)
+					continue
+				}
+				if !ok {
+					continue
+				}
+			}
+
+			// Now connect SSH (may be slower) only when we're actually going to run the operation
 			sshClient, err := createSSHClient(cfg)
 			if err != nil {
 				util.Default.Printf("❌ Failed to connect SSH: %v\n", err)
@@ -146,22 +170,52 @@ mainMenuLoop:
 			}
 			defer sshClient.Close()
 
-			result := syncdata.RunSafePull(cfg, sshClient)
-			if !result.Success {
-				util.Default.Printf("❌ Safe pull failed: %v\n", result.Error)
-				return "error"
+			// Run pull with chosen mode. Allow the user to retry the same
+			// operation from the post-operation menu without reconnecting.
+		pullLoop:
+			for {
+				result := syncdata.RunPullWithMode(cfg, sshClient, mode)
+				if !result.Success {
+					util.Default.Printf("❌ Pull failed: %v\n", result.Error)
+					return "error"
+				}
+
+				// Show post-operation menu; if user requests retry, loop again
+				action := syncdata.ShowPostSafePullMenu()
+				if action == syncdata.RetryOperation {
+					util.Default.Println("🔄 Retrying safe pull as requested by post-menu...")
+					continue pullLoop
+				}
+				break
+			}
+			// after leaving pullLoop, return to main menu
+			continue mainMenuLoop
+		case 2: // Sync: Push (to remote)
+			util.ResetRaw(oldStage)
+
+			// Mode submenu first to avoid connecting SSH until user confirms
+			// Note: bypass options removed from top-level Push menu (bypass remains available in other flows)
+			mode, err := tui.ShowMenuWithPrints([]string{"Safe (no deletes)", "Force (may delete remote/local)", "Back"}, "Push — choose mode")
+			if err != nil {
+				util.Default.Printf("❌ Mode selection cancelled: %v\n", err)
+				continue
+			}
+			if mode == "Back" || mode == "cancelled" {
+				continue
 			}
 
-			// Show post-operation menu
-			action := syncdata.ShowPostSafePullMenu()
-			if action == syncdata.RetryOperation {
-				continue // retry safe_pull (case 1)
-			} else {
-				continue mainMenuLoop // back to main menu
+			if strings.Contains(mode, "Force") {
+				ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
+				if cerr != nil {
+					util.Default.Printf("❌ Captcha error: %v\n", cerr)
+					continue
+				}
+				if !ok {
+					continue
+				}
 			}
-		case 2: // soft_push_sync -> safe_push_sync
-			util.ResetRaw(oldStage)
-			// Connect SSH first
+
+			// Connect only when needed
 			sshClient, err := createSSHClient(cfg)
 			if err != nil {
 				util.Default.Printf("❌ Failed to connect SSH: %v\n", err)
@@ -169,19 +223,24 @@ mainMenuLoop:
 			}
 			defer sshClient.Close()
 
-			result := syncdata.RunSafePush(cfg, sshClient)
-			if !result.Success {
-				util.Default.Printf("❌ Safe push failed: %v\n", result.Error)
-				return "error"
-			}
+			// Run push with chosen mode. Allow retry from the post-operation menu
+			// so user can re-run the same push without reconnecting.
+		pushLoop:
+			for {
+				result := syncdata.RunPushWithMode(cfg, sshClient, mode)
+				if !result.Success {
+					util.Default.Printf("❌ Push failed: %v\n", result.Error)
+					return "error"
+				}
 
-			// Show post-operation menu
-			action := syncdata.ShowPostSafePushMenu()
-			if action == syncdata.RetryOperation {
-				continue // retry safe_push (case 2)
-			} else {
-				continue mainMenuLoop // back to main menu
+				action := syncdata.ShowPostSafePushMenu()
+				if action == syncdata.RetryOperation {
+					util.Default.Println("🔄 Retrying safe push as requested by post-menu...")
+					continue pushLoop
+				}
+				break
 			}
+			continue mainMenuLoop
 		case 3: // force_manual_sync
 			util.ResetRaw(oldStage)
 			// Delegate interactive single-sync menu to syncdata package so devsync

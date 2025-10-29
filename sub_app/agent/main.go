@@ -179,11 +179,17 @@ func main() {
 		// manual-transfer parsing: support --manual-transfer [value]
 		var manualPrefixes []string
 		manualFlagPresent := false
+		// prune dry-run flag
+		dryRun := false
 		args := os.Args[2:]
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "--bypass-ignore" {
 				bypassOverride = true
+				continue
+			}
+			if arg == "--dry-run" {
+				dryRun = true
 				continue
 			}
 			if arg == "--manual-transfer" || arg == "--manual_transfer" {
@@ -233,6 +239,33 @@ func main() {
 				util.Default.Printf("🔄 Bypass ignore mode enabled via --bypass-ignore flag\n")
 			}
 			performIndexing(config, bypassOverride, manualFlagPresent, manualPrefixes)
+			return
+		case "prune":
+			// perform prune on agent side; supports --manual-transfer prefixes, --bypass-ignore and --dry-run
+			config, err := loadConfigAndChangeDir()
+			if err != nil {
+				util.Default.ClearLine()
+				util.Default.Printf("⚠️  Config setup failed: %v\n", err)
+				fmt.Println("❌ Cannot proceed with prune without proper config. Exiting.")
+				os.Exit(1)
+			}
+			// call performPrune (defined in prune.go)
+			res, perr := performPrune(config, bypassOverride, manualPrefixes, dryRun)
+			if perr != nil {
+				util.Default.ClearLine()
+				util.Default.Printf("❌ Prune completed with errors: %v\n", perr)
+			}
+			// Print summary JSON-like
+			util.Default.ClearLine()
+			util.Default.Printf("🧹 Prune summary: removed=%d failed=%d dryRun=%v\n", len(res.Removed), len(res.Failed), res.DryRun)
+			for _, p := range res.Removed {
+				util.Default.ClearLine()
+				util.Default.Printf(" - %s\n", p)
+			}
+			for _, f := range res.Failed {
+				util.Default.ClearLine()
+				util.Default.Printf("! failed: %s -> %v\n", f.Path, f.Error)
+			}
 			return
 		case "help":
 			fmt.Println("Sync Agent v1.0.0")
