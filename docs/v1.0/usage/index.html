@@ -57,8 +57,18 @@ Lihat semua versi
 <li><code>Back</code>: naik satu level menu</li>
 <li><code>Esc</code>, <code>q</code>, <code>Ctrl+C</code>: keluar dari flow Single/Manual Sync</li>
 <li>Force Mode menampilkan konfirmasi tambahan (captcha) untuk mencegah penghapusan tidak disengaja</li>
-</ul> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
-Terakhir diperbarui: 29/10/2025 </div>  <a href="/make-sync/docs/v1.0">
+</ul>
+<h2 id="eksekusi-perintah-remote-exec">Eksekusi Perintah Remote (<code>exec</code>)</h2>
+<p>Untuk mengeksekusi perintah singkat di remote tanpa membuka sesi interaktif, gunakan subcommand <code>exec</code>. Perilaku terbaru:</p>
+<ul>
+<li>Semua argumen setelah <code>exec</code> dikumpulkan sebagai perintah literal dan dikirim ke remote sebagai payload ter-encode (base64). Ini menghilangkan kebutuhan untuk melakukan escaping kutipan secara manual.</li>
+<li>Non-interactive only — tidak cocok untuk perintah yang membutuhkan TTY.</li>
+<li>Remote shell yang umum (bash/sh) akan digunakan; remote harus menyediakan <code>base64</code> dan <code>bash</code>/<code>sh</code>. Jika tidak tersedia, client akan mencoba fallback ke <code>cmd.exe</code> style.</li>
+</ul>
+<p>Contoh:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span>make-sync exec docker compose exec app bash -c "ping google.co.id"</span></span></code></pre>
+<p>Catatan: <code>exec</code> tidak mem-parsing flag lokal; semua token setelah <code>exec</code> akan dianggap bagian dari perintah remote.</p> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
+Terakhir diperbarui: 30/10/2025 </div>  <a href="/make-sync/docs/v1.0">
 ← Kembali ke overview
 </a>  </div> </div>  </article> </main></div> </div> </div> <!-- Theme toggle + mobile menu client script --> <script type="module">
         (function() {
