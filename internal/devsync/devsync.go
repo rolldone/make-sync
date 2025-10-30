@@ -266,6 +266,7 @@ mainMenuLoop:
 				util.Default.Printf("❌ Remote session failed: %v\n", err)
 				continue
 			}
+			FlushAllStdinNonBlocking()
 			continue
 			// After the interactive session ends, loop back to the menu
 		case 6: // local_sessions
