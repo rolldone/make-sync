@@ -1049,6 +1049,7 @@ func (w *Watcher) safePrintln(a ...interface{}) {
 func (w *Watcher) safeStatus(format string, a ...interface{}) {
 	// Print clear-line and formatted status as a single atomic block to
 	util.Default.PrintBlock(fmt.Sprintf(format, a...), true)
+	util.Default.ClearLine()
 }
 
 // safeStatusln writes a single-line status and appends a newline
