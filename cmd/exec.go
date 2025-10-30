@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"regexp"
@@ -54,16 +55,38 @@ var execCmd = &cobra.Command{
 		// Determine remote working directory
 		remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemotePath)
 
-		// Build raw command to execute
+		// Build raw command to execute (reconstruct from argv)
+		// For the POSIX/base64 path we must preserve argument literalness (quotes/backslashes).
+		// Reconstruct a POSIX-safe command by single-quoting each arg so the remote shell
+		// receives the same argument values the local shell passed to us.
+		var quotedArgs []string
+		for _, a := range args {
+			quotedArgs = append(quotedArgs, shellEscapePOSIX(a))
+		}
+		posixCmd := strings.Join(quotedArgs, " ")
+		// Keep a raw, unquoted join for Windows fallback
 		rawCmd := strings.Join(args, " ")
+
+		// We'll send the command payload as base64 to avoid quoting issues when
+		// executing on the remote shell. This is non-interactive only.
+		// Encode payload
+		// Note: base64 output contains only A-Za-z0-9+/= characters which are
+		// safe to wrap in single quotes for POSIX shells.
+		// Encode the POSIX-quoted command so that when decoded on the remote side
+		// and executed by `bash -s`, argument quoting is preserved and backslashes
+		// (e.g. psql meta-commands like `\dt`) are passed through correctly.
+		encoded := base64.StdEncoding.EncodeToString([]byte(posixCmd))
 
 		// Build both POSIX and Windows variants so we can run regardless of remote OS
 		buildPosix := func() string {
+			// echo 'BASE64' | base64 -d | bash -s
 			if remotePath != "" {
-				combined := fmt.Sprintf("cd %s && %s", shellEscapePOSIX(remotePath), rawCmd)
+				// cd into remotePath then run decoded payload; ensure remotePath and payload are shell-escaped
+				combined := fmt.Sprintf("cd %s && echo %s | base64 -d | bash -s", shellEscapePOSIX(remotePath), shellEscapePOSIX(encoded))
 				return fmt.Sprintf("bash -lc %s", shellEscapePOSIX(combined))
 			}
-			return fmt.Sprintf("bash -lc %s", shellEscapePOSIX(rawCmd))
+			combined := fmt.Sprintf("echo %s | base64 -d | bash -s", shellEscapePOSIX(encoded))
+			return fmt.Sprintf("bash -lc %s", shellEscapePOSIX(combined))
 		}
 		buildWindows := func() string {
 			if remotePath != "" {

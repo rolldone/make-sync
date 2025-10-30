@@ -70,6 +70,9 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			items := make([]string, 0, len(registered)+4)
 			items = append(items, registered...)
 			items = append(items, "----------")
+			// Add a manual refresh action so users can reload `make-sync.yaml` without
+			// restarting the app.
+			items = append(items, "Refresh sync folders")
 			items = append(items, "All data registered in manual_sync only")
 			items = append(items, "All Data Only In Your \"Sync Ignore\" File Pattern")
 			items = append(items, "Back Previous / Exit")
@@ -84,6 +87,20 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			}
 			if folderChoice == "Back Previous / Exit" {
 				break // go back to Download/Upload selection
+			}
+
+			// Handle Refresh action
+			if folderChoice == "Refresh sync folders" {
+				newCfg, cerr := config.LoadAndRenderConfig()
+				if cerr != nil {
+					util.Default.Printf("❌ Failed to reload config: %v\n", cerr)
+					continue
+				}
+				// Replace caller-provided cfg contents so subsequent operations use fresh config
+				*cfg = *newCfg
+				registered = cfg.Devsync.ManualTransfer
+				util.Default.Printf("🔁 Config reloaded — %d prefixes\n", len(registered))
+				continue
 			}
 
 			// determine prefixes list to pass to filter-based compare functions

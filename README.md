@@ -148,7 +148,7 @@ Selama Download/Upload:
 
 ## Eksekusi Perintah Remote (exec)
 
-Jalankan perintah langsung di host remote tanpa PTY. Output di-stream real-time; selesai → proses exit dengan status yang sesuai.
+Jalankan perintah langsung di host remote tanpa PTY. Output di-stream real-time; proses akan mengembalikan exit status remote.
 
 Penggunaan:
 
@@ -156,22 +156,35 @@ Penggunaan:
 make-sync exec <command...>
 ```
 
-Perilaku:
-- Bekerja dari direktori kerja remote: `devsync.auth.remote_path` (fallback `remote_path`). Jika kosong, tidak melakukan `cd`.
-- Pembungkus shell otomatis:
-  - Linux/Unix: `bash -lc 'cd <remotePath> && <command>'`
-  - Windows: `cmd.exe /C "cd /d <remotePath> && <command>"`
-- Tidak ada flag lokal untuk `exec` (DisableFlagParsing). Semua argumen setelah `exec` diteruskan apa adanya ke remote shell.
-- Non-PTY: tidak cocok untuk perintah yang butuh TTY/prompt interaktif.
-- Exit code: 0 jika sukses; non-zero jika eksekusi gagal.
+Perubahan perilaku penting (2025):
+- Perintah non-interactive sekarang dikirim ke remote dengan cara yang lebih andal untuk menghindari masalah quoting/escaping. Semua argumen setelah `exec` digabung menjadi satu command string lalu di-encode dengan base64. Di remote, payload didecode dan dijalankan oleh shell (`bash -s`) sehingga Anda tidak perlu menambah escape ekstra pada kutipan atau karakter khusus.
 
-Contoh:
+Perilaku detil:
+- Bekerja dari direktori kerja remote: `devsync.auth.remote_path` (fallback `remote_path`). Jika diisi, client akan menjalankan `cd <remotePath> && <decoded payload>` di remote.
+- Non-interactive only: pendekatan ini tidak mendukung TTY/interactive sessions (gunakan SSH langsung untuk itu).
+- Eksekusi POSIX: default mencoba menjalankan payload di `bash` via `echo '<BASE64>' | base64 -d | bash -s`.
+- Fallback Windows: jika remote tidak menyediakan POSIX shell, client mencoba menjalankan perintah dengan `cmd.exe /C` sebagai fallback.
+- Tidak ada parsing flag lokal untuk `exec`; semua token setelah `exec` dianggap bagian dari perintah remote.
+
+Kelebihan:
+- Anda dapat menulis perintah natural tanpa menambahkan escape ekstra, contoh:
+
+```
+make-sync exec docker compose exec app bash -c "ping google.co.id"
+```
+
+Keterbatasan & Prasyarat:
+- Remote harus menyediakan `base64` dan `bash`/`sh` untuk jalur POSIX agar metode ini bekerja (umum pada Linux hosts). Jika tidak ada, client akan mencoba fallback Windows `cmd.exe` style.
+- Tidak untuk perintah interaktif atau yang memerlukan TTY.
+- Jika Anda butuh behavior lain (mis. bypass quoting rules), saat ini tidak ada flag `--raw`; silakan gunakan SSH langsung.
+
+Contoh penggunaan:
 - Tampilkan file tersembunyi (Linux/Unix):
   - `make-sync exec ls -a -l`
-- Docker compose restart (semua target OS):
+- Docker compose restart (tanpa perlu escaping tambahan):
   - `make-sync exec docker compose down && docker compose up`
-- Menjalankan beberapa perintah berantai:
-  - `make-sync exec mkdir -p release && cd release && ls`
+- Menjalankan perintah dengan kutipan dan spasi:
+  - `make-sync exec bash -c "printf 'line1\nline2'"`
 
 Tips quoting:
 - Windows: operator seperti `&&`, `|`, atau path dengan spasi tetap didukung karena dibungkus `cmd.exe /C`. Jika ada karakter kutip ganda di command, pertimbangkan untuk mengutip ulang bagian terkait.

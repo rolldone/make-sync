@@ -183,7 +183,10 @@ func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
 	// Run remote indexing for full project (no prefixes)
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, strings.Contains(mode, "Bypass"), []string{""})
+	// Pass nil prefixes to indicate full indexing (avoid sending an empty
+	// --manual-transfer argument which can cause the agent to load configured
+	// manual_transfer prefixes unexpectedly).
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, strings.Contains(mode, "Bypass"), nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)
@@ -412,7 +415,10 @@ func RunPushWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
 	// Run remote indexing for full project (no prefixes)
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, strings.Contains(mode, "Bypass"), []string{""})
+	// Pass nil prefixes to indicate full indexing (avoid sending an empty
+	// --manual-transfer argument which can cause the agent to load configured
+	// manual_transfer prefixes unexpectedly).
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, strings.Contains(mode, "Bypass"), nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)
