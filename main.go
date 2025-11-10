@@ -8,11 +8,35 @@ import (
 	"time"
 
 	"make-sync/cmd"
+	"make-sync/internal/config"
 	"make-sync/internal/events"
 	"make-sync/internal/util"
 
+	"strings"
+
+	gspt "github.com/erikdubbelboer/gspt"
+
 	"golang.org/x/term"
 )
+
+// truncateToBytes truncates s to at most max bytes without splitting UTF-8 runes.
+func truncateToBytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	var b []byte
+	for _, r := range s {
+		rb := []byte(string(r))
+		if len(b)+len(rb) > max {
+			break
+		}
+		b = append(b, rb...)
+	}
+	if len(b) == 0 {
+		return s[:max]
+	}
+	return string(b)
+}
 
 func main() {
 
@@ -31,6 +55,25 @@ func main() {
 	// Arahkan standard logger ke file
 	log.SetOutput(f)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // contoh: timestamp
+
+	// Determine process title preference order:
+	// 1) project_name in make-sync.yaml via internal/config
+	// 2) PROC_TITLE env var
+	// 3) default "make-sync"
+	var procTitle string
+	if cfg, err := config.LoadAndValidateConfig(); err == nil && cfg.ProjectName != "" {
+		procTitle = cfg.ProjectName
+	} else if t := os.Getenv("PROC_TITLE"); t != "" {
+		procTitle = t
+	} else {
+		procTitle = "make-sync"
+	}
+	// Replace whitespace with single '-' (collapse multiple spaces/tabs) to make
+	// the process name friendlier and avoid spaces in ps output.
+	procTitle = strings.Join(strings.Fields(procTitle), "-")
+	// PR_SET_NAME (Linux comm) limited to 16 bytes including NUL, so keep ~15 bytes
+	procTitle = truncateToBytes(procTitle, 15)
+	gspt.SetProcTitle(procTitle)
 
 	// Capture original terminal state (if stdin is a TTY) so we can restore on forced exit.
 	var origState *term.State
