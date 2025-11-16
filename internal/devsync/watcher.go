@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -1082,8 +1083,7 @@ func (w *Watcher) buildAndDeployAgent() error {
 		return fmt.Errorf("failed to detect project root: %v", err)
 	}
 
-	// Temporary debug to verify fix
-	fmt.Printf("🔍 WATCHER DEBUG: Project Root detected as: %s\n", projectRoot)
+	// temporary debug removed
 
 	// Prepare unified deployment options
 	deployOpts := deployagent.UnifiedDeployOptions{
@@ -1266,6 +1266,13 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 		Timestamp: time.Now(),
 	}
 
+	// If this is a rename event, try to extract the old path from the notify.EventInfo
+	if eventType == EventRename {
+		if old := getOldPathFromNotify(event); old != "" {
+			fileEvent.OldPath = old
+		}
+	}
+
 	// Check for duplicate events (debouncing)
 	if w.isDuplicateEvent(fileEvent) {
 		return // Skip duplicate event
@@ -1283,6 +1290,50 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 
 	// Handle SSH sync / delete if SSH client is available
 	if w.sshClient != nil {
+		if event.EventType == EventRename {
+			// If we have an old path, attempt to delete it on remote
+			if event.OldPath != "" {
+				remoteBase := w.config.Devsync.Auth.RemotePath
+				if remoteBase == "" {
+					remoteBase = "."
+				}
+				var remoteOld string
+				if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, event.OldPath); rerr == nil {
+					remoteOld = w.joinRemotePath(remoteBase, filepath.ToSlash(rel))
+				} else {
+					rp, merr := util.LocalToRemote(w.config.Devsync.Auth.LocalPath, remoteBase, event.OldPath)
+					if merr != nil {
+						w.safePrintf("⚠️  Could not map local old path to remote: %v\n", merr)
+					} else {
+						remoteOld = rp
+					}
+				}
+
+				if remoteOld != "" {
+					if strings.Contains(remoteOld, ".sync_temp") {
+						w.safePrintf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remoteOld)
+					} else {
+						cmd := fmt.Sprintf("rm -rf '%s'", remoteOld)
+						w.safePrintf("📤 Deleting remote old path: %s\n", remoteOld)
+						if err := w.sshClient.RunCommand(cmd); err != nil {
+							w.safePrintf("❌ Failed to delete remote old path %s: %v\n", remoteOld, err)
+						} else {
+							w.safePrintf("✅ Remote old path deleted: %s\n", remoteOld)
+						}
+					}
+
+					// Remove metadata from file cache for old path
+					if w.fileCache != nil {
+						if err := w.fileCache.DeleteFileMetadata(event.OldPath); err != nil {
+							w.safePrintf("⚠️  Failed to delete metadata for old path %s: %v\n", event.OldPath, err)
+						}
+					}
+				}
+			}
+
+			// Proceed to treat the new path as a create/write for syncing
+			// fall through to normal sync below
+		}
 		if event.EventType == EventRemove {
 			// Map local path to remote path using POSIX join (preserve forward slashes)
 			remoteBase := w.config.Devsync.Auth.RemotePath
@@ -1328,6 +1379,49 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 			// For create/write events, sync file normally
 			isDifferent, err := w.fileCache.ShouldSyncFile(event.Path)
 			if err != nil {
+				// If the file no longer exists locally (common after rename/move),
+				// try to remove the corresponding remote path and clear cache metadata.
+				if os.IsNotExist(err) || strings.Contains(strings.ToLower(err.Error()), "no such file") {
+					remoteBase := w.config.Devsync.Auth.RemotePath
+					if remoteBase == "" {
+						remoteBase = "."
+					}
+					var remotePath string
+					if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, event.Path); rerr == nil {
+						remotePath = w.joinRemotePath(remoteBase, filepath.ToSlash(rel))
+					} else {
+						rp, merr := util.LocalToRemote(w.config.Devsync.Auth.LocalPath, remoteBase, event.Path)
+						if merr != nil {
+							w.safePrintf("⚠️  Could not map missing local path to remote: %v\n", merr)
+						} else {
+							remotePath = rp
+						}
+					}
+
+					if remotePath != "" {
+						if strings.Contains(remotePath, ".sync_temp") {
+							w.safePrintf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remotePath)
+						} else {
+							cmd := fmt.Sprintf("rm -rf '%s'", remotePath)
+							w.safePrintf("📤 Deleting remote path (local missing): %s\n", remotePath)
+							if derr := w.sshClient.RunCommand(cmd); derr != nil {
+								w.safePrintf("❌ Failed to delete remote path %s: %v\n", remotePath, derr)
+							} else {
+								w.safePrintf("✅ Remote delete succeeded: %s\n", remotePath)
+							}
+						}
+					}
+
+					if w.fileCache != nil {
+						if cerr := w.fileCache.DeleteFileMetadata(event.Path); cerr != nil {
+							w.safePrintf("⚠️  Failed to delete metadata for %s: %v\n", event.Path, cerr)
+						} else {
+							w.safePrintf("🗑️  Deleted cache metadata for missing local path %s\n", event.Path)
+						}
+					}
+					return
+				}
+
 				w.safePrintf("⚠️  Cache check error for %s: %v\n", event.Path, err)
 				return
 			}
@@ -1514,6 +1608,42 @@ func (w *Watcher) mapNotifyEvent(event notify.Event) EventType {
 	default:
 		return EventWrite // Default to write for unknown events
 	}
+}
+
+// getOldPathFromNotify attempts to extract an "old" path from a notify.EventInfo
+// Many notify implementations don't expose this, but some platforms/types may
+// include methods or fields like OldPath, Src, From, etc. We try several
+// common names via reflection and return empty string if none found.
+func getOldPathFromNotify(ev notify.EventInfo) string {
+	if ev == nil {
+		return ""
+	}
+	v := reflect.ValueOf(ev)
+	// Try common method names first
+	tryMethods := []string{"OldPath", "Old", "Src", "SrcPath", "From", "Source", "Dest", "NewPath"}
+	for _, name := range tryMethods {
+		m := v.MethodByName(name)
+		if m.IsValid() && m.Type().NumIn() == 0 && m.Type().NumOut() == 1 && m.Type().Out(0).Kind() == reflect.String {
+			out := m.Call(nil)
+			return out[0].String()
+		}
+	}
+
+	// If it's a pointer to struct, try to read string fields
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+	if v.IsValid() && v.Kind() == reflect.Struct {
+		tryFields := []string{"OldPath", "Src", "From", "Source", "Dest", "NewPath"}
+		for _, f := range tryFields {
+			fv := v.FieldByName(f)
+			if fv.IsValid() && fv.Kind() == reflect.String {
+				return fv.String()
+			}
+		}
+	}
+
+	return ""
 }
 
 func (w *Watcher) shouldIgnore(path string) bool {
