@@ -280,6 +280,14 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 	return result
 }
 
+// MatchesPriorityIncludes reports whether the given path matches any negation
+// patterns (!) collected from .sync_ignore in ancestor directories. This is a
+// thin exported wrapper so callers in other packages (e.g., watcher) can use
+// the same priority-include logic.
+func (c *IgnoreCache) MatchesPriorityIncludes(path string, isDir bool) bool {
+	return c.matchesPriorityIncludes(path, isDir)
+}
+
 // GetAllPatterns returns all ignore patterns (including negation patterns)
 // collected from .sync_ignore files in the project hierarchy.
 // This is used for sending patterns to remote agents.

@@ -32,7 +32,14 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 	// Calculate watch path
 	watchPath := cfg.LocalPath
 	if watchPath == "" {
-		watchPath = "."
+		// default to project root when no LocalPath specified so ignores
+		// and project-level patterns are applied consistently
+		if pr, err := util.GetProjectRoot(); err == nil && pr != "" {
+			watchPath = pr
+			util.Default.Printf("ℹ️  Watchpath defaulted to project root: %s\n", watchPath)
+		} else {
+			watchPath = "."
+		}
 	}
 	absWatchPath, err := filepath.Abs(watchPath)
 	if err != nil {
@@ -1647,18 +1654,12 @@ func getOldPathFromNotify(ev notify.EventInfo) string {
 }
 
 func (w *Watcher) shouldIgnore(path string) bool {
-	// Context-aware ignore bypass: if working directory is inside an ignored path,
-	// we should still watch files in the working directory and its subfolders
-	if w.isWorkingDirectoryOrSubfolder(path) {
-		return false // Don't ignore paths that contain our working directory
-	}
-
-	// Use cached IgnoreCache instance for .sync_ignore files
+	// Ensure IgnoreCache instance is available early so we can consult
+	// priority-includes (negation patterns) before applying the working-dir bypass.
 	w.ignoresMu.RLock()
 	ignoreCache := w.ignoreCache
 	w.ignoresMu.RUnlock()
 
-	// Create new instance if not cached
 	if ignoreCache == nil {
 		ignoreCache = syncdata.NewIgnoreCache(w.watchPath)
 		w.ignoresMu.Lock()
@@ -1667,13 +1668,20 @@ func (w *Watcher) shouldIgnore(path string) bool {
 	}
 
 	isDir := false
-
-	// Check if path is directory
 	if stat, err := os.Stat(path); err == nil && stat.IsDir() {
 		isDir = true
 	}
 
-	// Use the cached ignore system with negation pattern support
+	// If the path is inside the working directory or explicitly included via
+	// a priority-include (negation `!`), treat it as part of the subwatch and
+	// therefore do not ignore it. The helper `isWorkingDirectoryOrSubwatch`
+	// encapsulates this logic (it consults the ignore cache so `.sync_temp`
+	// remains ignored unless explicitly negated).
+	if w.isWorkingDirectoryOrSubwatch(path, ignoreCache) {
+		return false
+	}
+
+	// Default: use ignore cache matching
 	return ignoreCache.Match(path, isDir)
 }
 
@@ -1812,33 +1820,96 @@ func (w *Watcher) loadExtendedIgnores() []string {
 	return out
 }
 
-// isWorkingDirectoryOrSubfolder checks if the given path is the working directory or a subfolder of it
-// This is used for context-aware ignore bypass - if working directory is inside an ignored path,
-// we should still watch files in that working directory and its subfolders
-func (w *Watcher) isWorkingDirectoryOrSubfolder(path string) bool {
+// isWorkingDirectoryOrSubwatch checks whether `path` should be treated as part of
+// the working-directory subwatch. It returns true when the path is either:
+//   - inside the watcher's working directory (equal or descendant) AND not
+//     matched by an ignore pattern, or
+//   - explicitly included by a priority-include (negation `!`) pattern.
+//
+// This function consults the provided IgnoreCache so decisions respect
+// `.sync_ignore` negation/include rules (so e.g. `.sync_temp` remains ignored
+// unless explicitly included by a negation).
+func (w *Watcher) isWorkingDirectoryOrSubwatch(path string, ignoreCache *syncdata.IgnoreCache) bool {
 	if w.workingDir == "" {
 		return false
 	}
 
-	// Get absolute path for comparison
+	// Determine whether the path is a directory
+	isDir := false
+	if st, err := os.Stat(path); err == nil && st.IsDir() {
+		isDir = true
+	}
+
+	// Compute canonical absolute paths (follow symlinks when possible)
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return false
 	}
-
 	absWorkingDir, err := filepath.Abs(w.workingDir)
 	if err != nil {
 		return false
 	}
 
-	// Check if the path is the working directory or a subfolder of it
-	rel, err := filepath.Rel(absWorkingDir, absPath)
-	if err != nil {
-		return false
+	absPath = filepath.Clean(absPath)
+	absWorkingDir = filepath.Clean(absWorkingDir)
+
+	if p, err := filepath.EvalSymlinks(absPath); err == nil && p != "" {
+		absPath = filepath.Clean(p)
+	}
+	if d, err := filepath.EvalSymlinks(absWorkingDir); err == nil && d != "" {
+		absWorkingDir = filepath.Clean(d)
 	}
 
-	// If rel doesn't contain ".." then the path is inside working directory (or equal to it)
-	return !strings.Contains(rel, "..")
+	// Fast-path exact equality
+	if absPath == absWorkingDir {
+		if ignoreCache != nil && ignoreCache.Match(path, isDir) {
+			return false
+		}
+		return true
+	}
+
+	// Compare path components to avoid accidental substring matches
+	pParts := strings.Split(filepath.ToSlash(absPath), "/")
+	wParts := strings.Split(filepath.ToSlash(absWorkingDir), "/")
+
+	if len(pParts) >= len(wParts) {
+		// On Windows we compare case-insensitively for components
+		ignoreCase := false
+		if os.PathSeparator == '\\' {
+			ignoreCase = true
+		}
+
+		matched := true
+		for i := 0; i < len(wParts); i++ {
+			a := wParts[i]
+			b := pParts[i]
+			if ignoreCase {
+				a = strings.ToLower(a)
+				b = strings.ToLower(b)
+			}
+			if a != b {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			// path is equal or subpath of workingDir. Respect ignore patterns:
+			if ignoreCache != nil && ignoreCache.Match(path, isDir) {
+				return false
+			}
+			return true
+		}
+	}
+
+	// Not a subpath. However, if a priority-include explicitly includes this
+	// path, treat it as part of the subwatch.
+	if ignoreCache != nil {
+		if ignoreCache.MatchesPriorityIncludes(path, isDir) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // matchesPattern checks if a path matches a pattern (supports wildcards)
