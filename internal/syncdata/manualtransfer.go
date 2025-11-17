@@ -564,7 +564,14 @@ func CompareAndDownloadManualTransferParallel(cfg *config.Config, localRoot stri
 	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
 	// Collect all files that need download
+	const maxConcurrency = 5
 	var downloadTasks []util.ConcurrentTask
+
+	// worker slot channel: provides stable slot numbers 1..maxConcurrency
+	slotCh := make(chan int, maxConcurrency)
+	for i := 1; i <= maxConcurrency; i++ {
+		slotCh <- i
+	}
 
 	for _, rel := range rels {
 		rm := remoteByRel[rel]
@@ -592,17 +599,21 @@ func CompareAndDownloadManualTransferParallel(cfg *config.Config, localRoot stri
 		if statErr != nil {
 			// File doesn't exist, needs download
 			remotePath := buildRemotePath(cfg, relNorm)
+			rp := remotePath
+			lp := localPath
 			downloadTasks = append(downloadTasks, func() error {
-				util.Default.Printf("⬇️  Downloading %s -> %s\n", remotePath, localPath)
-				if err := sshCli.DownloadFile(localPath, remotePath); err != nil {
-					util.Default.Printf("❌ Failed to download %s: %v\n", remotePath, err)
+				id := <-slotCh
+				defer func() { slotCh <- id }()
+				util.Default.Printf("⬇️  %d -> Downloading %s -> %s\n", id, rp, lp)
+				if err := sshCli.DownloadFile(lp, rp); err != nil {
+					util.Default.Printf("❌ %d Failed to download %s: %v\n", id, rp, err)
 					mu.Lock()
 					downloadErrors++
 					mu.Unlock()
 					return err
 				}
 				mu.Lock()
-				downloaded = append(downloaded, localPath)
+				downloaded = append(downloaded, lp)
 				mu.Unlock()
 				return nil
 			})
@@ -626,17 +637,21 @@ func CompareAndDownloadManualTransferParallel(cfg *config.Config, localRoot stri
 		if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
 			// File exists but different, needs download
 			remotePath := buildRemotePath(cfg, relNorm)
+			rp := remotePath
+			lp := localPath
 			downloadTasks = append(downloadTasks, func() error {
-				util.Default.Printf("⬇️  Downloading %s -> %s\n", remotePath, localPath)
-				if err := sshCli.DownloadFile(localPath, remotePath); err != nil {
-					util.Default.Printf("❌ Failed to download %s: %v\n", remotePath, err)
+				id := <-slotCh
+				defer func() { slotCh <- id }()
+				util.Default.Printf("⬇️  %d -> Downloading %s -> %s\n", id, rp, lp)
+				if err := sshCli.DownloadFile(lp, rp); err != nil {
+					util.Default.Printf("❌ %d Failed to download %s: %v\n", id, rp, err)
 					mu.Lock()
 					downloadErrors++
 					mu.Unlock()
 					return err
 				}
 				mu.Lock()
-				downloaded = append(downloaded, localPath)
+				downloaded = append(downloaded, lp)
 				mu.Unlock()
 				return nil
 			})
@@ -649,7 +664,6 @@ func CompareAndDownloadManualTransferParallel(cfg *config.Config, localRoot stri
 	}
 
 	// Execute all download tasks with bounded concurrency (max 5 parallel)
-	const maxConcurrency = 5
 	if err := util.RunConcurrent(downloadTasks, maxConcurrency); err != nil {
 		util.Default.Printf("⚠️  Some downloads failed: %v\n", err)
 	}
@@ -810,7 +824,14 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
 	// Collect all files that need download
+	const maxConcurrency = 5
 	var downloadTasks []util.ConcurrentTask
+
+	// worker slot channel: provides stable slot numbers 1..maxConcurrency
+	slotCh := make(chan int, maxConcurrency)
+	for i := 1; i <= maxConcurrency; i++ {
+		slotCh <- i
+	}
 
 	for _, rel := range rels {
 		rm := filteredRemote[rel]
@@ -845,17 +866,21 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 		if statErr != nil {
 			// File doesn't exist, needs download
 			remotePath := buildRemotePath(cfg, relNorm)
+			rp := remotePath
+			lp := localPath
 			downloadTasks = append(downloadTasks, func() error {
-				util.Default.Printf("⬇️  Downloading %s -> %s\n", remotePath, localPath)
-				if err := sshCli.DownloadFile(localPath, remotePath); err != nil {
-					util.Default.Printf("❌ Failed to download %s: %v\n", remotePath, err)
+				id := <-slotCh
+				defer func() { slotCh <- id }()
+				util.Default.Printf("⬇️  %d -> Downloading %s -> %s\n", id, rp, lp)
+				if err := sshCli.DownloadFile(lp, rp); err != nil {
+					util.Default.Printf("❌ %d Failed to download %s: %v\n", id, rp, err)
 					mu.Lock()
 					downloadErrors++
 					mu.Unlock()
 					return err
 				}
 				mu.Lock()
-				downloaded = append(downloaded, localPath)
+				downloaded = append(downloaded, lp)
 				mu.Unlock()
 				return nil
 			})
@@ -879,17 +904,21 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 		if strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
 			// File exists but different, needs download
 			remotePath := buildRemotePath(cfg, relNorm)
+			rp := remotePath
+			lp := localPath
 			downloadTasks = append(downloadTasks, func() error {
-				util.Default.Printf("⬇️  Downloading %s -> %s\n", remotePath, localPath)
-				if err := sshCli.DownloadFile(localPath, remotePath); err != nil {
-					util.Default.Printf("❌ Failed to download %s: %v\n", remotePath, err)
+				id := <-slotCh
+				defer func() { slotCh <- id }()
+				util.Default.Printf("⬇️  %d -> Downloading %s -> %s\n", id, rp, lp)
+				if err := sshCli.DownloadFile(lp, rp); err != nil {
+					util.Default.Printf("❌ %d Failed to download %s: %v\n", id, rp, err)
 					mu.Lock()
 					downloadErrors++
 					mu.Unlock()
 					return err
 				}
 				mu.Lock()
-				downloaded = append(downloaded, localPath)
+				downloaded = append(downloaded, lp)
 				mu.Unlock()
 				return nil
 			})
@@ -902,7 +931,6 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 	}
 
 	// Execute all download tasks with bounded concurrency (max 5 parallel)
-	const maxConcurrency = 5
 	if err := util.RunConcurrent(downloadTasks, maxConcurrency); err != nil {
 		util.Default.Printf("⚠️  Some downloads failed: %v\n", err)
 	}
@@ -1170,7 +1198,14 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
 	// Collect all files that need upload
+	const maxConcurrency = 5
 	var uploadTasks []util.ConcurrentTask
+
+	// worker slot channel: provides stable slot numbers 1..maxConcurrency
+	slotCh := make(chan int, maxConcurrency)
+	for i := 1; i <= maxConcurrency; i++ {
+		slotCh <- i
+	}
 
 	// Helper to mark checked in DB and memory
 	markChecked := func(rel string) {
@@ -1232,17 +1267,21 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 				// File doesn't exist remotely or is different, needs upload
 				localPath := start
 				remotePath := buildRemotePath(cfg, rel)
+				lp := localPath
+				rp := remotePath
 				uploadTasks = append(uploadTasks, func() error {
-					util.Default.Printf("⬆️  Uploading %s -> %s\n", localPath, remotePath)
-					if err := sshCli.UploadFile(localPath, remotePath); err != nil {
-						util.Default.Printf("❌ Failed to upload %s: %v\n", localPath, err)
+					id := <-slotCh
+					defer func() { slotCh <- id }()
+					util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", id, lp, rp)
+					if err := sshCli.UploadFile(lp, rp); err != nil {
+						util.Default.Printf("❌ %d Failed to upload %s: %v\n", id, lp, err)
 						mu.Lock()
 						uploadErrors++
 						mu.Unlock()
 						return err
 					}
 					mu.Lock()
-					uploaded = append(uploaded, localPath)
+					uploaded = append(uploaded, lp)
 					mu.Unlock()
 					return nil
 				})
@@ -1316,17 +1355,21 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 				// File doesn't exist remotely or is different, needs upload
 				localPath := p
 				remotePath := buildRemotePath(cfg, rel)
+				lp := localPath
+				rp := remotePath
 				uploadTasks = append(uploadTasks, func() error {
-					util.Default.Printf("⬆️  Uploading %s -> %s\n", localPath, remotePath)
-					if err := sshCli.UploadFile(localPath, remotePath); err != nil {
-						util.Default.Printf("❌ Failed to upload %s: %v\n", localPath, err)
+					id := <-slotCh
+					defer func() { slotCh <- id }()
+					util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", id, lp, rp)
+					if err := sshCli.UploadFile(lp, rp); err != nil {
+						util.Default.Printf("❌ %d Failed to upload %s: %v\n", id, lp, err)
 						mu.Lock()
 						uploadErrors++
 						mu.Unlock()
 						return err
 					}
 					mu.Lock()
-					uploaded = append(uploaded, localPath)
+					uploaded = append(uploaded, lp)
 					mu.Unlock()
 					return nil
 				})
@@ -1344,7 +1387,6 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 		examined, len(uploaded), skippedIgnored, skippedUpToDate, uploadErrors)
 
 	// Execute all upload tasks with bounded concurrency (max 5 parallel)
-	const maxConcurrency = 5
 	if err := util.RunConcurrent(uploadTasks, maxConcurrency); err != nil {
 		util.Default.Printf("⚠️  Some uploads failed: %v\n", err)
 	}
@@ -1549,7 +1591,14 @@ func CompareAndUploadManualTransferBypassParallel(cfg *config.Config, localRoot 
 	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
 	// Collect all files that need upload
+	const maxConcurrency = 5
 	var uploadTasks []util.ConcurrentTask
+
+	// worker slot channel: provides stable slot numbers 1..maxConcurrency
+	slotCh := make(chan int, maxConcurrency)
+	for i := 1; i <= maxConcurrency; i++ {
+		slotCh <- i
+	}
 
 	for _, pr := range normPrefixes {
 		start := filepath.Join(absRoot, filepath.FromSlash(pr))
@@ -1602,17 +1651,21 @@ func CompareAndUploadManualTransferBypassParallel(cfg *config.Config, localRoot 
 			rm, exists := remoteByRel[relNorm]
 			if !exists || strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
 				// File doesn't exist remotely or is different, needs upload
+				lp := localPath
+				rp := remotePath
 				uploadTasks = append(uploadTasks, func() error {
-					util.Default.Printf("⬆️  Uploading %s -> %s\n", localPath, remotePath)
-					if err := sshCli.UploadFile(localPath, remotePath); err != nil {
-						util.Default.Printf("❌ Failed to upload %s: %v\n", localPath, err)
+					id := <-slotCh
+					defer func() { slotCh <- id }()
+					util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", id, lp, rp)
+					if err := sshCli.UploadFile(lp, rp); err != nil {
+						util.Default.Printf("❌ %d Failed to upload %s: %v\n", id, lp, err)
 						mu.Lock()
 						uploadErrors++
 						mu.Unlock()
 						return err
 					}
 					mu.Lock()
-					uploaded = append(uploaded, localPath)
+					uploaded = append(uploaded, lp)
 					mu.Unlock()
 					return nil
 				})
@@ -1627,7 +1680,6 @@ func CompareAndUploadManualTransferBypassParallel(cfg *config.Config, localRoot 
 	}
 
 	// Execute all upload tasks with bounded concurrency (max 5 parallel)
-	const maxConcurrency = 5
 	if err := util.RunConcurrent(uploadTasks, maxConcurrency); err != nil {
 		util.Default.Printf("⚠️  Some uploads failed: %v\n", err)
 	}
