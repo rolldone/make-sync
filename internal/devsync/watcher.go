@@ -29,29 +29,27 @@ import (
 )
 
 func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
-	// Calculate watch path
+	// Get current working directory for context-aware ignore and sensible defaults
+	workingDir, wdErr := os.Getwd()
+	if wdErr != nil {
+		util.Default.Printf("⚠️  Failed to get working directory: %v\n", wdErr)
+		workingDir = "."
+	}
+
+	// Calculate watch path: prefer explicit cfg.LocalPath; when empty, default
+	// to the directory where make-sync is executed (workingDir). Also write
+	// the resolved value back into cfg.LocalPath so downstream code sees it.
 	watchPath := cfg.LocalPath
 	if watchPath == "" {
-		// default to project root when no LocalPath specified so ignores
-		// and project-level patterns are applied consistently
-		if pr, err := util.GetProjectRoot(); err == nil && pr != "" {
-			watchPath = pr
-			util.Default.Printf("ℹ️  Watchpath defaulted to project root: %s\n", watchPath)
-		} else {
-			watchPath = "."
-		}
+		watchPath = workingDir
+		cfg.LocalPath = watchPath
+		util.Default.Printf("ℹ️  Watchpath defaulted to current working directory: %s\n", watchPath)
 	}
+
 	absWatchPath, err := filepath.Abs(watchPath)
 	if err != nil {
 		util.Default.Printf("⚠️  Failed to get absolute watch path: %v\n", err)
 		absWatchPath = watchPath
-	}
-
-	// Get current working directory for context-aware ignore
-	workingDir, wdErr := os.Getwd()
-	if wdErr != nil {
-		util.Default.Printf("⚠️  Failed to get working directory: %v\n", wdErr)
-		workingDir = absWatchPath // fallback to watch path
 	}
 
 	// Initialize SSH client if auth is configured
