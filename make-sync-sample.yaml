@@ -22,6 +22,9 @@ var:
 project_name: Workspaces Digital Ocean
 devsync:
   size_limit: 5 # in MB, 0 = no limit, default 0 (no limit)
+  # concurrency: number of parallel workers for SFTP and fallback transfers
+  # Increase to improve throughput; tune based on network and remote limits
+  concurrency: 8
   # os_target: "linux" or "windows" - affects RemoteCommand syntax in direct_access
   os_target: linux
   auth:
