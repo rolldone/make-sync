@@ -456,10 +456,10 @@ func showDirectAccessMenu(ctx context.Context, loadedCfg *config.Config) (bool, 
 					return true, nil
 				}
 
-				// Print mapping info
+				// Print mapping info (show local binding only)
 				for _, af := range started {
 					for _, f := range af.Forwards {
-						fmt.Printf("🔁 Forward: %s -> local %s:%d -> remote %s:%d (via %s)\n", f.Name, f.LocalHost, f.LocalPort, f.RemoteHost, f.RemotePort, af.Host)
+						fmt.Printf("🔁 Forward: %s -> local %s:%d  (via %s)\n", f.Name, f.LocalHost, f.LocalPort, af.Host)
 					}
 				}
 
