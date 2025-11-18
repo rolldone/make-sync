@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"make-sync/internal/config"
 	"make-sync/internal/devsync"
 	"make-sync/internal/history"
+	"make-sync/internal/sshforward"
 	"make-sync/internal/util"
 
 	"github.com/manifoldco/promptui"
@@ -419,6 +421,55 @@ func showDirectAccessMenu(ctx context.Context, loadedCfg *config.Config) (bool, 
 	// Handle SSH command execution
 	for _, sshCmd := range cfg.DirectAccess.SSHCommands {
 		if sshCmd.AccessName == result {
+			// If this SSH command defines port_forwards, handle tunnels instead of running a direct ssh command
+			if len(sshCmd.PortForwards) > 0 {
+				// Build ForwardSpec list
+				var specs []sshforward.ForwardSpec
+				for _, pf := range sshCmd.PortForwards {
+					// ensure defaults when fields may be empty
+					remoteHost := pf.RemoteHost
+					if strings.TrimSpace(remoteHost) == "" {
+						remoteHost = "127.0.0.1"
+					}
+					localHost := pf.LocalHost
+					if strings.TrimSpace(localHost) == "" {
+						localHost = "127.0.0.1"
+					}
+
+					specs = append(specs, sshforward.ForwardSpec{
+						Name:       pf.Name,
+						HostAlias:  pf.Host,
+						RemoteHost: remoteHost,
+						RemotePort: pf.RemotePort,
+						LocalPort:  pf.LocalPort,
+						LocalHost:  localHost,
+						Protocol:   pf.Protocol,
+					})
+				}
+
+				runner := sshforward.NewRunner()
+				childCtx, cancel := context.WithCancel(ctx)
+				defer cancel()
+				started, err := runner.StartForwards(childCtx, specs)
+				if err != nil {
+					fmt.Printf("❌ Failed to start port forwards: %v\n", err)
+					return true, nil
+				}
+
+				// Print mapping info
+				for _, af := range started {
+					for _, f := range af.Forwards {
+						fmt.Printf("🔁 Forward: %s -> local %s:%d -> remote %s:%d (via %s)\n", f.Name, f.LocalHost, f.LocalPort, f.RemoteHost, f.RemotePort, af.Host)
+					}
+				}
+
+				fmt.Println("Press ENTER to stop tunnels...")
+				bufio.NewReader(os.Stdin).ReadString('\n')
+				runner.StopAll()
+				return true, nil
+			}
+
+			// Otherwise, normal SSH command flow (generate temp config and run)
 			fmt.Printf("Executing: %s\n", sshCmd.Command)
 
 			// Parse SSH command to get host name

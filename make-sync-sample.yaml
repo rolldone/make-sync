@@ -99,6 +99,11 @@ direct_access:
       ServerAliveInterval: "10"
       StrictHostKeyChecking: "no"
       User: root
+    - Host: artywiz_ovh_de
+      HostName: your.server.example.com
+      User: ubuntu
+      IdentityFile: ~/.ssh/id_rsa
+      Port: "22"
   ssh_commands:
     - access_name: Run devsync2
       command: ngi-sync devsync2
@@ -108,3 +113,17 @@ direct_access:
       command: ssh -v workspace_internal_digital_ocean
     - access_name: Enter Docker Jumper Digital Ocean
       command: ssh -v -o RemoteCommand=none workspace_internal_digital_ocean -t docker exec -it docker_jumper bash
+    - access_name: NPM + Portainer via SSH Tunnel
+      port_forwards:
+        - name: npm-dashboard
+          host: artywiz_ovh_de
+          remote_host: 127.0.0.1
+          remote_port: 81
+          local_host: 127.0.0.1
+          local_port: 8181
+        - name: portainer-http
+          host: artywiz_ovh_de
+          remote_host: 127.0.0.1
+          remote_port: 9000
+          local_host: 127.0.0.1
+          local_port: 1800

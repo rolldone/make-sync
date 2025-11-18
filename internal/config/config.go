@@ -84,8 +84,108 @@ type DirectAccess struct {
 }
 
 type SSHCommand struct {
-	AccessName string `yaml:"access_name"`
-	Command    string `yaml:"command"`
+	AccessName   string        `yaml:"access_name"`
+	Command      string        `yaml:"command"`
+	PortForwards []PortForward `yaml:"port_forwards,omitempty"`
+}
+
+// PortForward defines a single local->remote SSH port forward specification
+// PortForward defines a single local->remote SSH port forward specification
+// Canonical field names: remote_host, remote_port, local_host, local_port
+// Backwards compatibility: accepts legacy keys `port` and `bind_address`.
+type PortForward struct {
+	Name       string `yaml:"name,omitempty"`
+	Host       string `yaml:"host"`                  // alias referencing an entry in DirectAccess.SSHConfigs by its Host value
+	RemoteHost string `yaml:"remote_host,omitempty"` // remote bind host on server side (default 127.0.0.1)
+	RemotePort int    `yaml:"remote_port"`           // remote port on the server side
+	LocalHost  string `yaml:"local_host,omitempty"`  // local bind address (default 127.0.0.1)
+	LocalPort  int    `yaml:"local_port,omitempty"`  // optional local port; 0 means auto-allocate
+	Protocol   string `yaml:"protocol,omitempty"`    // tcp/udp (default tcp)
+	Enabled    *bool  `yaml:"enabled,omitempty"`
+}
+
+// UnmarshalYAML implements custom unmarshalling to support legacy keys
+// (`port` -> remote_port, `bind_address` -> local_host) and flexible types.
+func (pf *PortForward) UnmarshalYAML(value *yaml.Node) error {
+	var m map[string]interface{}
+	if err := value.Decode(&m); err != nil {
+		return err
+	}
+
+	// helpers
+	toStr := func(k string) (string, bool) {
+		if v, ok := m[k]; ok && v != nil {
+			return fmt.Sprintf("%v", v), true
+		}
+		return "", false
+	}
+	toInt := func(k string) (int, bool) {
+		if v, ok := m[k]; ok && v != nil {
+			switch t := v.(type) {
+			case int:
+				return t, true
+			case int64:
+				return int(t), true
+			case float64:
+				return int(t), true
+			case string:
+				if s := strings.TrimSpace(t); s != "" {
+					if n, err := strconv.Atoi(s); err == nil {
+						return n, true
+					}
+				}
+			}
+		}
+		return 0, false
+	}
+
+	if v, ok := toStr("name"); ok {
+		pf.Name = v
+	}
+	if v, ok := toStr("host"); ok {
+		pf.Host = v
+	}
+
+	// remote port: prefer new key, fall back to legacy `port`
+	if n, ok := toInt("remote_port"); ok {
+		pf.RemotePort = n
+	} else if n, ok := toInt("port"); ok {
+		pf.RemotePort = n
+	}
+
+	// remote host
+	if v, ok := toStr("remote_host"); ok {
+		pf.RemoteHost = v
+	}
+
+	// local host: prefer new key, fall back to legacy `bind_address`
+	if v, ok := toStr("local_host"); ok {
+		pf.LocalHost = v
+	} else if v, ok := toStr("bind_address"); ok {
+		pf.LocalHost = v
+	}
+
+	// local port
+	if n, ok := toInt("local_port"); ok {
+		pf.LocalPort = n
+	}
+
+	if v, ok := toStr("protocol"); ok {
+		pf.Protocol = v
+	}
+
+	if v, ok := m["enabled"]; ok && v != nil {
+		switch t := v.(type) {
+		case bool:
+			pf.Enabled = &t
+		case string:
+			if b, err := strconv.ParseBool(strings.TrimSpace(t)); err == nil {
+				pf.Enabled = &b
+			}
+		}
+	}
+
+	return nil
 }
 
 // ValidateConfig validates the configuration for required fields and file paths
@@ -139,6 +239,13 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	// Validate SSH configs
+	// Build map of known SSH config Host names for reference checks
+	knownSSHHosts := map[string]bool{}
+	for _, sc := range cfg.DirectAccess.SSHConfigs {
+		if h, ok := sc["Host"].(string); ok && strings.TrimSpace(h) != "" {
+			knownSSHHosts[h] = true
+		}
+	}
 	for i, sshConfig := range cfg.DirectAccess.SSHConfigs {
 		if host, ok := sshConfig["Host"].(string); !ok || strings.TrimSpace(host) == "" {
 			validationErrors = append(validationErrors, fmt.Sprintf("SSH config %d: Host cannot be empty", i+1))
@@ -178,13 +285,71 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	// Validate SSH commands
+	usedLocalPorts := map[int]struct{}{}
 	for i, sshCmd := range cfg.DirectAccess.SSHCommands {
 		if strings.TrimSpace(sshCmd.AccessName) == "" {
 			validationErrors = append(validationErrors, fmt.Sprintf("SSH command %d: access_name cannot be empty", i+1))
 		}
 
+		// Allow either a command OR one or more port_forwards. If neither present, it's invalid.
 		if strings.TrimSpace(sshCmd.Command) == "" {
-			validationErrors = append(validationErrors, fmt.Sprintf("SSH command %d: command cannot be empty", i+1))
+			if len(sshCmd.PortForwards) == 0 {
+				validationErrors = append(validationErrors, fmt.Sprintf("SSH command %d: command cannot be empty (or provide port_forwards)", i+1))
+			}
+		}
+
+		// Validate port_forwards if present
+		for j := range sshCmd.PortForwards {
+			pf := &sshCmd.PortForwards[j]
+			idx := fmt.Sprintf("SSH command %d port_forwards[%d]", i+1, j)
+
+			// Defaulting
+			if strings.TrimSpace(pf.LocalHost) == "" {
+				pf.LocalHost = "127.0.0.1"
+			}
+			if strings.TrimSpace(pf.Protocol) == "" {
+				pf.Protocol = "tcp"
+			}
+			if pf.Enabled == nil {
+				t := true
+				pf.Enabled = &t
+			}
+
+			// Skip validation if explicitly disabled
+			if pf.Enabled != nil && !*pf.Enabled {
+				continue
+			}
+
+			if strings.TrimSpace(pf.Host) == "" {
+				validationErrors = append(validationErrors, fmt.Sprintf("%s: host cannot be empty", idx))
+			} else {
+				if !knownSSHHosts[pf.Host] {
+					validationErrors = append(validationErrors, fmt.Sprintf("%s: host '%s' not found in direct_access.ssh_configs", idx, pf.Host))
+				}
+			}
+
+			if pf.RemotePort <= 0 || pf.RemotePort > 65535 {
+				validationErrors = append(validationErrors, fmt.Sprintf("%s: remote_port must be 1-65535", idx))
+			}
+
+			if pf.LocalPort != 0 {
+				if pf.LocalPort <= 0 || pf.LocalPort > 65535 {
+					validationErrors = append(validationErrors, fmt.Sprintf("%s: local_port must be 1-65535", idx))
+				} else {
+					if _, exists := usedLocalPorts[pf.LocalPort]; exists {
+						validationErrors = append(validationErrors, fmt.Sprintf("%s: local_port %d already used by another forward", idx, pf.LocalPort))
+					} else {
+						usedLocalPorts[pf.LocalPort] = struct{}{}
+					}
+				}
+			}
+
+			if strings.TrimSpace(pf.Protocol) != "" {
+				proto := strings.ToLower(strings.TrimSpace(pf.Protocol))
+				if proto != "tcp" && proto != "udp" {
+					validationErrors = append(validationErrors, fmt.Sprintf("%s: protocol must be 'tcp' or 'udp'", idx))
+				}
+			}
 		}
 	}
 
@@ -478,6 +643,29 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 			sshCmd.Command = renderer.RenderComplexTemplates(sshCmd.Command)
 			printer.Printf("🔧 Rendered SSH command[%d].Command: %s → %s\n", i, oldValue, sshCmd.Command)
 			renderCount++
+		}
+
+		// Render any port_forwards entries (host / bind_address may contain templates)
+		for j := range sshCmd.PortForwards {
+			pf := &sshCmd.PortForwards[j]
+			if strings.Contains(pf.Host, "=") {
+				old := pf.Host
+				pf.Host = renderer.RenderComplexTemplates(pf.Host)
+				printer.Printf("🔧 Rendered SSH command[%d].PortForwards[%d].Host: %s → %s\n", i, j, old, pf.Host)
+				renderCount++
+			}
+			if strings.Contains(pf.LocalHost, "=") {
+				old := pf.LocalHost
+				pf.LocalHost = renderer.RenderComplexTemplates(pf.LocalHost)
+				printer.Printf("🔧 Rendered SSH command[%d].PortForwards[%d].LocalHost: %s → %s\n", i, j, old, pf.LocalHost)
+				renderCount++
+			}
+			if strings.Contains(pf.RemoteHost, "=") {
+				old := pf.RemoteHost
+				pf.RemoteHost = renderer.RenderComplexTemplates(pf.RemoteHost)
+				printer.Printf("🔧 Rendered SSH command[%d].PortForwards[%d].RemoteHost: %s → %s\n", i, j, old, pf.RemoteHost)
+				renderCount++
+			}
 		}
 	}
 
