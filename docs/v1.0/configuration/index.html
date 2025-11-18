@@ -27,6 +27,17 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">  manual_transfer</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#9ECBFF">src</span></span>
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#9ECBFF">assets/images</span></span></code></pre>
+<h3 id="concurrency-devsyncconcurrency">Concurrency (<code>devsync.concurrency</code>)</h3>
+<ul>
+<li><strong>Deskripsi</strong>: Mengatur jumlah worker paralel yang digunakan oleh proses sinkronisasi (upload/download). Nilai ini mengontrol berapa banyak transfer file yang berjalan bersamaan.</li>
+<li><strong>Default</strong>: Jika tidak diset atau diset ke nilai &#x3C;= 0, program menggunakan nilai default internal (5).</li>
+<li><strong>Contoh</strong>:</li>
+</ul>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">devsync</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">  concurrency</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">8</span></span></code></pre>
+<ul>
+<li><strong>Catatan</strong>: Program menggunakan SFTP untuk bulk transfer dan akan melakukan fallback ke SCP per-file jika SFTP gagal pada item tertentu. Meningkatkan <code>concurrency</code> dapat mempercepat transfer, tetapi nilai yang terlalu tinggi bisa membebani server SSH atau jaringan. Untuk debugging, informasi worker/slot dicetak di log saat transfer berlangsung.</li>
+</ul>
 <h2 id="manual-transfer-devsyncmanual_transfer">Manual Transfer (devsync.manual_transfer)</h2>
 <p>Field <code>devsync.manual_transfer</code> adalah daftar path (prefix) yang digunakan oleh fitur “Single/Manual Sync”. Perilaku penting:</p>
 <ul>
