@@ -43,6 +43,7 @@ type Devsync struct {
 	Ignores        []string          `yaml:"ignores"`
 	AgentWatchs    []string          `yaml:"agent_watchs"`
 	ManualTransfer []string          `yaml:"manual_transfer"`
+	Concurrency    int               `yaml:"concurrency,omitempty"`
 	Script         Script            `yaml:"script"`
 	TriggerPerm    TriggerPermission `yaml:"trigger_permission"`
 }

@@ -51,12 +51,43 @@ func TestLoadConfigFromTestFolderUsingDotEnv(t *testing.T) {
 		t.Fatalf("failed to chdir to test dir: %v", err)
 	}
 
+	// Ensure test private key present (test make-sync.yaml references .ssh/openssh_nopassword)
+	sshDir := filepath.Join(testDir, ".ssh")
+	_ = os.MkdirAll(sshDir, 0755)
+	pkPath := filepath.Join(sshDir, "openssh_nopassword")
+	if _, err := os.Stat(pkPath); os.IsNotExist(err) {
+		if err := os.WriteFile(pkPath, []byte("dummykey"), 0600); err != nil {
+			t.Fatalf("failed to write dummy private key: %v", err)
+		}
+		defer os.Remove(pkPath)
+	}
+
+	// Ensure =... template references in the config can be resolved by
+	// rendering template variables into the file first. The test's
+	// make-sync.yaml uses =username, =privateKey, etc. Build a small
+	// cfg with Var.auth so RenderTemplateVariables can substitute them.
+	renderCfg := &Config{
+		Var: map[string]interface{}{
+			"auth": map[interface{}]interface{}{
+				"username":   "donny",
+				"privateKey": ".ssh/openssh_nopassword",
+				"host":       expected,
+				"port":       "22",
+				"remotePath": "/home/donny/workspaces/project-xyz",
+			},
+		},
+	}
+
+	if err := RenderTemplateVariables(renderCfg); err != nil {
+		t.Fatalf("RenderTemplateVariables failed: %v", err)
+	}
+
 	cfg, err := LoadAndValidateConfig()
 	if err != nil {
 		t.Fatalf("LoadAndValidateConfig failed: %v", err)
 	}
 
-	if cfg.Host != expected {
-		t.Fatalf("expected host from test/.env (%s), got %s", expected, cfg.Host)
+	if cfg.Devsync.Auth.Host != expected {
+		t.Fatalf("expected host from test/.env (%s), got %s", expected, cfg.Devsync.Auth.Host)
 	}
 }

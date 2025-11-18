@@ -12,6 +12,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"make-sync/internal/config"
+	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
 )
 
@@ -98,6 +99,7 @@ func CompareAndUploadByIgnoreIncludes(cfg *config.Config, localRoot string, negP
 
 	uploaded := make([]string, 0)
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
+	var pairs []sshclient.UploadPair
 
 	// Walk local files (local-first)
 	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
@@ -158,13 +160,9 @@ func CompareAndUploadByIgnoreIncludes(cfg *config.Config, localRoot string, negP
 		}
 
 		if needUpload {
-			util.Default.Printf("⬆️  Uploading %s -> %s\n", p, buildRemotePath(cfg, rel))
-			if err := sshCli.SyncFile(p, buildRemotePath(cfg, rel)); err != nil {
-				util.Default.Printf("❌ Failed to upload %s: %v\n", p, err)
-				uploadErrors++
-			} else {
-				uploaded = append(uploaded, p)
-			}
+			lp := p
+			rp := buildRemotePath(cfg, rel)
+			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
 		} else {
 			skippedUpToDate++
 		}
@@ -172,6 +170,46 @@ func CompareAndUploadByIgnoreIncludes(cfg *config.Config, localRoot string, negP
 	})
 	if err != nil {
 		return uploaded, fmt.Errorf("walk error: %v", err)
+	}
+
+	// Perform bulk SFTP upload for collected pairs, with per-file scp fallback
+	concurrency := cfg.Devsync.Concurrency
+	if concurrency <= 0 {
+		concurrency = 5
+	}
+	if len(pairs) > 0 {
+		successes, serr := sshCli.UploadFilesSFTP(pairs, concurrency)
+		if serr != nil {
+			util.Default.Printf("⚠️  Some uploads failed (sftp): %v\n", serr)
+		}
+		uploaded = append(uploaded, successes...)
+		if len(successes) < len(pairs) {
+			ok := make(map[string]struct{}, len(successes))
+			for _, s := range successes {
+				ok[s] = struct{}{}
+			}
+			var fallbackTasks []util.ConcurrentTask
+			for _, p := range pairs {
+				if _, found := ok[p.Local]; found {
+					continue
+				}
+				lp := p.Local
+				rp := p.Remote
+				fallbackTasks = append(fallbackTasks, func() error {
+					util.Default.Printf("⬆️  fallback -> Uploading %s -> %s\n", lp, rp)
+					if err := sshCli.SyncFile(lp, rp); err != nil {
+						util.Default.Printf("❌ fallback Failed to upload %s: %v\n", lp, err)
+						uploadErrors++
+						return err
+					}
+					uploaded = append(uploaded, lp)
+					return nil
+				})
+			}
+			if err := util.RunConcurrent(fallbackTasks, concurrency); err != nil {
+				util.Default.Printf("⚠️  Some fallback uploads failed: %v\n", err)
+			}
+		}
 	}
 
 	util.Default.Printf("🔁 Upload via !patterns: examined=%d, uploaded=%d, skipped(ignored)=%d, skipped(up-to-date)=%d, errors=%d\n",
@@ -278,6 +316,7 @@ func CompareAndUploadByIgnoreIncludesForce(cfg *config.Config, localRoot string,
 	uploaded := make([]string, 0)
 	checkedSet := make(map[string]struct{})
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
+	var pairs []sshclient.UploadPair
 
 	// Helper to mark checked in DB and memory
 	markChecked := func(rel string) {
@@ -342,13 +381,9 @@ func CompareAndUploadByIgnoreIncludesForce(cfg *config.Config, localRoot string,
 			needUpload = true
 		}
 		if needUpload {
-			util.Default.Printf("⬆️  Uploading %s -> %s\n", p, buildRemotePath(cfg, rel))
-			if err := sshCli.SyncFile(p, buildRemotePath(cfg, rel)); err != nil {
-				util.Default.Printf("❌ Failed to upload %s: %v\n", p, err)
-				uploadErrors++
-			} else {
-				uploaded = append(uploaded, p)
-			}
+			lp := p
+			rp := buildRemotePath(cfg, rel)
+			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
 		} else {
 			skippedUpToDate++
 		}
@@ -357,6 +392,46 @@ func CompareAndUploadByIgnoreIncludesForce(cfg *config.Config, localRoot string,
 	})
 	if err != nil {
 		return uploaded, fmt.Errorf("walk error: %v", err)
+	}
+
+	// Perform bulk SFTP upload for collected pairs, with per-file scp fallback
+	concurrency := cfg.Devsync.Concurrency
+	if concurrency <= 0 {
+		concurrency = 5
+	}
+	if len(pairs) > 0 {
+		successes, serr := sshCli.UploadFilesSFTP(pairs, concurrency)
+		if serr != nil {
+			util.Default.Printf("⚠️  Some uploads failed (sftp): %v\n", serr)
+		}
+		uploaded = append(uploaded, successes...)
+		if len(successes) < len(pairs) {
+			ok := make(map[string]struct{}, len(successes))
+			for _, s := range successes {
+				ok[s] = struct{}{}
+			}
+			var fallbackTasks []util.ConcurrentTask
+			for _, p := range pairs {
+				if _, found := ok[p.Local]; found {
+					continue
+				}
+				lp := p.Local
+				rp := p.Remote
+				fallbackTasks = append(fallbackTasks, func() error {
+					util.Default.Printf("⬆️  fallback -> Uploading %s -> %s\n", lp, rp)
+					if err := sshCli.SyncFile(lp, rp); err != nil {
+						util.Default.Printf("❌ fallback Failed to upload %s: %v\n", lp, err)
+						uploadErrors++
+						return err
+					}
+					uploaded = append(uploaded, lp)
+					return nil
+				})
+			}
+			if err := util.RunConcurrent(fallbackTasks, concurrency); err != nil {
+				util.Default.Printf("⚠️  Some fallback uploads failed: %v\n", err)
+			}
+		}
 	}
 
 	util.Default.Printf("🔁 Upload via !patterns: examined=%d, uploaded=%d, skipped(ignored)=%d, skipped(up-to-date)=%d, errors=%d\n",

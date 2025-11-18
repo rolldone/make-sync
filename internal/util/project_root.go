@@ -290,9 +290,9 @@ func findMakeSyncProjectRoot() (string, error) {
 		// If executable is in /usr/local/bin, /usr/bin, etc.,
 		// make-sync might be installed, check common source locations
 		commonPaths := []string{
-			"/home/donny/workspaces/make-sync",
-			"/mnt/sda/workspaces/make-sync",
-			"/workspaces/make-sync",
+			// "/home/donny/workspaces/make-sync",
+			// "/mnt/sda/workspaces/make-sync",
+			// "/workspaces/make-sync",
 		}
 
 		for _, path := range commonPaths {

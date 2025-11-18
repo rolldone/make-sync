@@ -10,17 +10,17 @@ type ConcurrentTask func() error
 
 // RunConcurrent executes tasks with bounded concurrency (maxConcurrency goroutines at once)
 // Returns the first error encountered, or nil if all tasks succeed
-func RunConcurrent(tasks []ConcurrentTask, maxConcurrency int) error {
+func RunConcurrent(tasks []ConcurrentTask, concurrency int) error {
 	if len(tasks) == 0 {
 		return nil
 	}
 
-	if maxConcurrency <= 0 {
-		maxConcurrency = 1
+	if concurrency <= 0 {
+		concurrency = 1
 	}
 
 	// Semaphore channel to limit concurrency
-	semaphore := make(chan struct{}, maxConcurrency)
+	semaphore := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(tasks))
 
@@ -69,16 +69,16 @@ func RunConcurrent(tasks []ConcurrentTask, maxConcurrency int) error {
 }
 
 // RunConcurrentWithContext same as RunConcurrent but with external context control
-func RunConcurrentWithContext(ctx context.Context, tasks []ConcurrentTask, maxConcurrency int) error {
+func RunConcurrentWithContext(ctx context.Context, tasks []ConcurrentTask, concurrency int) error {
 	if len(tasks) == 0 {
 		return nil
 	}
 
-	if maxConcurrency <= 0 {
-		maxConcurrency = 1
+	if concurrency <= 0 {
+		concurrency = 1
 	}
 
-	semaphore := make(chan struct{}, maxConcurrency)
+	semaphore := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(tasks))
 

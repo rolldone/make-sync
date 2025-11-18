@@ -4,6 +4,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,17 +17,20 @@ func TestEnvInterpolationFromDotEnv(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// write make-sync.yaml
-	cfgText := `project_name: test
-username: user
-host: ${MAKE_SYNCHOST}
-port: "22"
-remotePath: /tmp
-devsync:
-  os_target: linux
-  auth:
-    host: ${MAKE_SYNCHOST}
-    port: "22"
-`
+	cfgText := strings.Join([]string{
+		"project_name: test",
+		"username: user",
+		"host: ${MAKE_SYNCHOST}",
+		"port: \"22\"",
+		"remotePath: /tmp",
+		"devsync:",
+		"  os_target: linux",
+		"  auth:",
+		"    username: user",
+		"    host: ${MAKE_SYNCHOST}",
+		"    port: \"22\"",
+		"    remotePath: /tmp",
+	}, "\n") + "\n"
 	cfgPath := filepath.Join(dir, ConfigFileName)
 	if err := ioutil.WriteFile(cfgPath, []byte(cfgText), 0644); err != nil {
 		t.Fatal(err)
@@ -48,8 +52,8 @@ devsync:
 		t.Fatalf("LoadAndValidateConfig failed: %v", err)
 	}
 
-	if cfg.Host != "example.env.host" {
-		t.Fatalf("expected host from .env, got %s", cfg.Host)
+	if cfg.Devsync.Auth.Host != "example.env.host" {
+		t.Fatalf("expected host from .env, got %s", cfg.Devsync.Auth.Host)
 	}
 }
 
@@ -60,17 +64,20 @@ func TestEnvInterpolationPrecedenceOSTakesPriority(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 
-	cfgText := `project_name: test
-username: user
-host: ${MAKE_SYNCHOST}
-port: "22"
-remotePath: /tmp
-devsync:
-  os_target: linux
-  auth:
-    host: ${MAKE_SYNCHOST}
-    port: "22"
-`
+	cfgText := strings.Join([]string{
+		"project_name: test",
+		"username: user",
+		"host: ${MAKE_SYNCHOST}",
+		"port: \"22\"",
+		"remotePath: /tmp",
+		"devsync:",
+		"  os_target: linux",
+		"  auth:",
+		"    username: user",
+		"    host: ${MAKE_SYNCHOST}",
+		"    port: \"22\"",
+		"    remotePath: /tmp",
+	}, "\n") + "\n"
 	cfgPath := filepath.Join(dir, ConfigFileName)
 	if err := ioutil.WriteFile(cfgPath, []byte(cfgText), 0644); err != nil {
 		t.Fatal(err)
@@ -94,7 +101,7 @@ devsync:
 		t.Fatalf("LoadAndValidateConfig failed: %v", err)
 	}
 
-	if cfg.Host != "from.os.env" {
-		t.Fatalf("expected host from OS env, got %s", cfg.Host)
+	if cfg.Devsync.Auth.Host != "from.os.env" {
+		t.Fatalf("expected host from OS env, got %s", cfg.Devsync.Auth.Host)
 	}
 }

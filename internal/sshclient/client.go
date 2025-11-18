@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -32,6 +33,12 @@ type SSHClient struct {
 	persistent   bool
 	session      *ssh.Session // Persistent session for continuous commands
 	agentSession *ssh.Session // Persistent session for agent monitoring
+}
+
+// UploadPair represents a single local->remote upload mapping
+type UploadPair struct {
+	Local  string
+	Remote string
 }
 
 // NewSSHClient creates a new SSH client
@@ -149,15 +156,65 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 		return fmt.Errorf("failed to stat local file: %v", err)
 	}
 
-	// Create remote file
-	session, err := c.client.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create session: %v", err)
+	// Determine remote directory (POSIX normalized path in remotePathForScp)
+	var remoteDir string
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		if idx == -1 {
+			remoteDir = "."
+		} else {
+			remoteDir = remotePathForScp[:idx]
+		}
+	} else {
+		remoteDir = path.Dir(remotePathForScp)
 	}
-	defer session.Close()
+
+	// Create remote file
+
+	// If we have a connected SSH client and the remote looks POSIX, prefer SFTP
+	// which allows reuse of the SSH connection and concurrent uploads.
+	if !isWindowsRemote && c.client != nil {
+		// Try SFTP upload; fall back to scp on any error
+		sftpClient, serr := sftp.NewClient(c.client)
+		if serr != nil {
+			util.Default.Printf("[sshclient] sftp.NewClient failed: %v\n", serr)
+		} else {
+			// Ensure remote directory exists
+			if err := sftpClient.MkdirAll(remoteDir); err != nil {
+				util.Default.Printf("[sshclient] sftp.MkdirAll failed for %s: %v\n", remoteDir, err)
+			} else {
+				// Rewind localFile in case it was read
+				if _, err := localFile.Seek(0, 0); err != nil {
+					// ignore seek error and proceed
+				}
+
+				// Open remote file for writing (create/truncate)
+				rf, err := sftpClient.OpenFile(remotePathForScp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+				if err != nil {
+					util.Default.Printf("[sshclient] sftp OpenFile failed for %s: %v\n", remotePathForScp, err)
+				} else {
+					// Copy contents
+					if _, err := io.Copy(rf, localFile); err != nil {
+						util.Default.Printf("[sshclient] sftp Copy failed %s -> %s: %v\n", localPath, remotePathForScp, err)
+						rf.Close()
+					} else {
+						// Set permissions
+						if stat != nil {
+							_ = sftpClient.Chmod(remotePathForScp, stat.Mode().Perm())
+						}
+						rf.Close()
+						sftpClient.Close()
+						return nil
+					}
+				}
+			}
+			sftpClient.Close()
+		}
+		util.Default.Printf("[sshclient] falling back to scp for %s\n", remotePathForScp)
+		// on any sftp error, fall through to scp implementation below
+	}
 
 	// Create remote directory if it doesn't exist
-	var remoteDir string
 	if isWindowsRemote {
 		// find last slash or backslash
 		idx := strings.LastIndexAny(remotePathForScp, "\\/")
@@ -178,6 +235,13 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 			return fmt.Errorf("failed to create remote directory: %v", err)
 		}
 	}
+
+	// Create a session for scp fallback transfer
+	session, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %v", err)
+	}
+	defer session.Close()
 
 	// Use scp protocol properly: run scp -t on remote directory and drive protocol over stdin/stdout
 
@@ -330,6 +394,233 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 // SyncFile is an alias for UploadFile for backward compatibility
 func (c *SSHClient) SyncFile(localPath, remotePath string) error {
 	return c.UploadFile(localPath, remotePath)
+}
+
+// UploadFilesSFTP uploads multiple files using a single SFTP client and a
+// bounded worker pool. It prefers SFTP (single SSH connection) and returns
+// a combined error if any upload fails. If the SSH client is not connected
+// or SFTP is not supported, it returns an error.
+// UploadFilesSFTP uploads multiple files using a single SFTP client and a
+// bounded worker pool. It returns a slice of local paths that were
+// successfully uploaded and an error summarizing any failures.
+func (c *SSHClient) UploadFilesSFTP(pairs []UploadPair, concurrency int) ([]string, error) {
+	if c.client == nil {
+		return nil, fmt.Errorf("SSH client not connected")
+	}
+
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+
+	// Check for any Windows-style remote paths; SFTP is typically for POSIX
+	for _, p := range pairs {
+		if (len(p.Remote) >= 3 && p.Remote[1] == ':' && (p.Remote[2] == '\\' || p.Remote[2] == '/')) || strings.HasPrefix(p.Remote, "\\\\") {
+			return nil, fmt.Errorf("sftp: remote path contains Windows-style paths; skip SFTP")
+		}
+	}
+
+	sftpClient, err := sftp.NewClient(c.client)
+	if err != nil {
+		util.Default.Printf("[sshclient] UploadFilesSFTP: sftp.NewClient failed: %v\n", err)
+		return nil, fmt.Errorf("failed to create sftp client: %v", err)
+	}
+	defer sftpClient.Close()
+
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+
+	// Jobs and result channel
+	jobs := make(chan UploadPair, len(pairs))
+	errCh := make(chan error, len(pairs))
+	successCh := make(chan string, len(pairs))
+	var wg sync.WaitGroup
+
+	// Launch workers
+	for wid := 1; wid <= concurrency; wid++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for job := range jobs {
+				util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", workerID, job.Local, job.Remote)
+				// Open local file per job
+				lf, lerr := os.Open(job.Local)
+				if lerr != nil {
+					util.Default.Printf("❌ %d Failed to open %s: %v\n", workerID, job.Local, lerr)
+					errCh <- lerr
+					continue
+				}
+				fi, statErr := lf.Stat()
+				if statErr != nil {
+					lf.Close()
+					util.Default.Printf("❌ %d Failed to stat %s: %v\n", workerID, job.Local, statErr)
+					errCh <- statErr
+					continue
+				}
+
+				// Ensure remote dir exists
+				remoteDir := path.Dir(job.Remote)
+				if rerr := sftpClient.MkdirAll(remoteDir); rerr != nil {
+					// MkdirAll might fail if remote path permissions deny it
+					util.Default.Printf("⚠️  %d MkdirAll failed for %s: %v\n", workerID, remoteDir, rerr)
+				}
+
+				// Open remote file
+				rf, rerr := sftpClient.OpenFile(job.Remote, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+				if rerr != nil {
+					lf.Close()
+					util.Default.Printf("❌ %d Failed to open remote file %s: %v\n", workerID, job.Remote, rerr)
+					errCh <- rerr
+					continue
+				}
+
+				// Copy contents
+				if _, cerr := io.Copy(rf, lf); cerr != nil {
+					util.Default.Printf("❌ %d Failed to copy %s -> %s: %v\n", workerID, job.Local, job.Remote, cerr)
+					errCh <- cerr
+					rf.Close()
+					lf.Close()
+					continue
+				}
+
+				// Set permissions
+				if fi != nil {
+					_ = sftpClient.Chmod(job.Remote, fi.Mode().Perm())
+				}
+
+				rf.Close()
+				lf.Close()
+				successCh <- job.Local
+			}
+		}(wid)
+	}
+
+	// Enqueue jobs
+	for _, p := range pairs {
+		jobs <- p
+	}
+	close(jobs)
+
+	// Wait for workers
+	wg.Wait()
+	close(errCh)
+	close(successCh)
+
+	// Aggregate successes and errors
+	var errs []string
+	for e := range errCh {
+		errs = append(errs, e.Error())
+	}
+	successes := make([]string, 0, len(pairs))
+	for s := range successCh {
+		successes = append(successes, s)
+	}
+
+	if len(errs) > 0 {
+		agg := strings.Join(errs, "; ")
+		util.Default.Printf("[sshclient] UploadFilesSFTP aggregated errors: %s\n", agg)
+		return successes, fmt.Errorf("sftp upload errors: %s", agg)
+	}
+	return successes, nil
+}
+
+// DownloadFilesSFTP downloads multiple remote->local file pairs using a single
+// SFTP client and a bounded worker pool. Returns list of local paths that
+// succeeded and an aggregated error if any failed.
+func (c *SSHClient) DownloadFilesSFTP(pairs []UploadPair, concurrency int) ([]string, error) {
+	if c.client == nil {
+		return nil, fmt.Errorf("SSH client not connected")
+	}
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+
+	// Skip if any remote looks like Windows path; prefer scp fallback in that case
+	for _, p := range pairs {
+		if (len(p.Remote) >= 3 && p.Remote[1] == ':' && (p.Remote[2] == '\\' || p.Remote[2] == '/')) || strings.HasPrefix(p.Remote, "\\\\") {
+			return nil, fmt.Errorf("sftp: remote path contains Windows-style paths; skip SFTP")
+		}
+	}
+
+	sftpClient, err := sftp.NewClient(c.client)
+	if err != nil {
+		util.Default.Printf("[sshclient] DownloadFilesSFTP: sftp.NewClient failed: %v\n", err)
+		return nil, fmt.Errorf("failed to create sftp client: %v", err)
+	}
+	defer sftpClient.Close()
+
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+
+	jobs := make(chan UploadPair, len(pairs))
+	errCh := make(chan error, len(pairs))
+	successCh := make(chan string, len(pairs))
+	var wg sync.WaitGroup
+
+	for wid := 1; wid <= concurrency; wid++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for job := range jobs {
+				util.Default.Printf("⬇️  %d -> Downloading %s -> %s\n", workerID, job.Remote, job.Local)
+
+				// Ensure local dir exists
+				if lerr := os.MkdirAll(path.Dir(job.Local), 0755); lerr != nil {
+					util.Default.Printf("⚠️  %d Failed to ensure local dir %s: %v\n", workerID, path.Dir(job.Local), lerr)
+				}
+
+				rf, rerr := sftpClient.Open(job.Remote)
+				if rerr != nil {
+					util.Default.Printf("❌ %d Failed to open remote %s: %v\n", workerID, job.Remote, rerr)
+					errCh <- rerr
+					continue
+				}
+
+				lf, lerr := os.Create(job.Local)
+				if lerr != nil {
+					util.Default.Printf("❌ %d Failed to create local %s: %v\n", workerID, job.Local, lerr)
+					errCh <- lerr
+					rf.Close()
+					continue
+				}
+
+				if _, cerr := io.Copy(lf, rf); cerr != nil {
+					util.Default.Printf("❌ %d Failed to copy %s -> %s: %v\n", workerID, job.Remote, job.Local, cerr)
+					errCh <- cerr
+					rf.Close()
+					lf.Close()
+					continue
+				}
+
+				rf.Close()
+				lf.Close()
+				successCh <- job.Local
+			}
+		}(wid)
+	}
+
+	for _, p := range pairs {
+		jobs <- p
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(errCh)
+	close(successCh)
+
+	var errs []string
+	for e := range errCh {
+		errs = append(errs, e.Error())
+	}
+	successes := make([]string, 0, len(pairs))
+	for s := range successCh {
+		successes = append(successes, s)
+	}
+	if len(errs) > 0 {
+		return successes, fmt.Errorf("sftp download errors: %s", strings.Join(errs, "; "))
+	}
+	return successes, nil
 }
 
 // RunCommand executes a command on the remote server

@@ -726,13 +726,14 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 	skippedIgnored := 0
 	skippedUpToDate := 0
 	downloadErrors := 0
-	var downloadTasks []util.ConcurrentTask
 	var mu sync.Mutex // mutex for thread-safe access to shared variables used by tasks
-	const maxConcurrency = 5
-	slotCh := make(chan int, maxConcurrency)
-	for i := 1; i <= maxConcurrency; i++ {
-		slotCh <- i
+	concurrency := cfg.Devsync.Concurrency
+	if concurrency <= 0 {
+		concurrency = 5
 	}
+
+	// Collect download pairs for SFTP bulk download
+	var pairs []sshclient.UploadPair
 
 	for _, rel := range rels {
 		rm := remoteByRel[rel]
@@ -764,22 +765,7 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 			remotePath := buildRemotePath(cfg, relNorm)
 			rp := remotePath
 			lp := localPath
-			downloadTasks = append(downloadTasks, func() error {
-				id := <-slotCh
-				defer func() { slotCh <- id }()
-				util.Default.Printf("⬇️  %d -> Downloading %s -> %s\n", id, rp, lp)
-				if err := sshCli.DownloadFile(lp, rp); err != nil {
-					util.Default.Printf("❌ %d Failed to download %s: %v\n", id, rp, err)
-					mu.Lock()
-					downloadErrors++
-					mu.Unlock()
-					return err
-				}
-				mu.Lock()
-				downloaded = append(downloaded, lp)
-				mu.Unlock()
-				return nil
-			})
+			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
 			continue
 		}
 		if info.IsDir() {
@@ -801,32 +787,56 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 			remotePath := buildRemotePath(cfg, relNorm)
 			rp := remotePath
 			lp := localPath
-			downloadTasks = append(downloadTasks, func() error {
-				id := <-slotCh
-				defer func() { slotCh <- id }()
-				util.Default.Printf("⬇️  %d -> Downloading %s -> %s\n", id, rp, lp)
-				if err := sshCli.DownloadFile(lp, rp); err != nil {
-					util.Default.Printf("❌ %d Failed to download %s: %v\n", id, rp, err)
-					mu.Lock()
-					downloadErrors++
-					mu.Unlock()
-					return err
-				}
-				mu.Lock()
-				downloaded = append(downloaded, lp)
-				mu.Unlock()
-				return nil
-			})
+			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
 			continue
 		}
 
 		skippedUpToDate++
 	}
 
-	// Execute all download tasks with bounded concurrency (max 5 parallel)
-	if len(downloadTasks) > 0 {
-		if err := util.RunConcurrent(downloadTasks, maxConcurrency); err != nil {
-			util.Default.Printf("⚠️  Some downloads failed: %v\n", err)
+	// If we have any pairs, try SFTP bulk download and fall back to per-file scp on failures
+	if len(pairs) > 0 {
+		successes, serr := sshCli.DownloadFilesSFTP(pairs, concurrency)
+		if serr != nil {
+			util.Default.Printf("⚠️  Some downloads failed (sftp): %v\n", serr)
+		}
+
+		// Record successes
+		downloaded = append(downloaded, successes...)
+
+		// If some failed, fallback per-file with bounded concurrency
+		if len(successes) < len(pairs) {
+			// Build map of successful local paths
+			ok := make(map[string]struct{}, len(successes))
+			for _, s := range successes {
+				ok[s] = struct{}{}
+			}
+
+			var fallbackTasks []util.ConcurrentTask
+			for _, p := range pairs {
+				if _, found := ok[p.Local]; found {
+					continue
+				}
+				lp := p.Local
+				rp := p.Remote
+				fallbackTasks = append(fallbackTasks, func() error {
+					util.Default.Printf("⬇️  fallback -> Downloading %s -> %s\n", rp, lp)
+					if err := sshCli.DownloadFile(lp, rp); err != nil {
+						util.Default.Printf("❌ fallback Failed to download %s: %v\n", rp, err)
+						mu.Lock()
+						downloadErrors++
+						mu.Unlock()
+						return err
+					}
+					mu.Lock()
+					downloaded = append(downloaded, lp)
+					mu.Unlock()
+					return nil
+				})
+			}
+			if err := util.RunConcurrent(fallbackTasks, concurrency); err != nil {
+				util.Default.Printf("⚠️  Some fallback downloads failed: %v\n", err)
+			}
 		}
 	}
 
@@ -943,13 +953,9 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
 	// Collect all files that need upload
-	const maxConcurrency = 5
-	var uploadTasks []util.ConcurrentTask
-
-	// worker slot channel: provides stable slot numbers 1..maxConcurrency
-	slotCh := make(chan int, maxConcurrency)
-	for i := 1; i <= maxConcurrency; i++ {
-		slotCh <- i
+	concurrency := cfg.Devsync.Concurrency
+	if concurrency <= 0 {
+		concurrency = 5
 	}
 	var filesToProcess []struct {
 		path      string
@@ -1024,7 +1030,8 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 		return uploaded, fmt.Errorf("walk error: %v", err)
 	}
 
-	// Second pass: create upload tasks for files that need uploading
+	// Second pass: collect upload pairs for files that need uploading
+	pairs := make([]sshclient.UploadPair, 0, len(filesToProcess))
 	for _, file := range filesToProcess {
 		// decide upload
 		rm, exists := remoteByRel[file.rel]
@@ -1038,32 +1045,56 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 		if needUpload {
 			lp := file.path
 			rp := buildRemotePath(cfg, file.rel)
-			uploadTasks = append(uploadTasks, func() error {
-				id := <-slotCh
-				defer func() { slotCh <- id }()
-				util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", id, lp, rp)
-				if err := sshCli.SyncFile(lp, rp); err != nil {
-					util.Default.Printf("❌ %d Failed to upload %s: %v\n", id, lp, err)
-					mu.Lock()
-					uploadErrors++
-					mu.Unlock()
-					return err
-				}
-				mu.Lock()
-				uploaded = append(uploaded, lp)
-				mu.Unlock()
-				return nil
-			})
+			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
 		} else {
 			mu.Lock()
 			skippedUpToDate++
 			mu.Unlock()
 		}
 	}
+	// If we have any pairs, try SFTP bulk upload (falls back internally if needed)
+	if len(pairs) > 0 {
+		successes, serr := sshCli.UploadFilesSFTP(pairs, concurrency)
+		if serr != nil {
+			util.Default.Printf("⚠️  Some uploads failed (sftp): %v\n", serr)
+		}
+		// successes contains local paths that were uploaded
+		uploaded = append(uploaded, successes...)
 
-	// Execute all upload tasks with bounded concurrency (max 5 parallel)
-	if err := util.RunConcurrent(uploadTasks, maxConcurrency); err != nil {
-		util.Default.Printf("⚠️  Some uploads failed: %v\n", err)
+		// If some failed, fallback per-file with bounded concurrency using SyncFile (scp)
+		if len(successes) < len(pairs) {
+			// Build map of successful local paths
+			ok := make(map[string]struct{}, len(successes))
+			for _, s := range successes {
+				ok[s] = struct{}{}
+			}
+
+			var fallbackTasks []util.ConcurrentTask
+			for _, p := range pairs {
+				if _, found := ok[p.Local]; found {
+					continue
+				}
+				lp := p.Local
+				rp := p.Remote
+				fallbackTasks = append(fallbackTasks, func() error {
+					util.Default.Printf("⬆️  fallback -> Uploading %s -> %s\n", lp, rp)
+					if err := sshCli.SyncFile(lp, rp); err != nil {
+						util.Default.Printf("❌ fallback Failed to upload %s: %v\n", lp, err)
+						mu.Lock()
+						uploadErrors++
+						mu.Unlock()
+						return err
+					}
+					mu.Lock()
+					uploaded = append(uploaded, lp)
+					mu.Unlock()
+					return nil
+				})
+			}
+			if err := util.RunConcurrent(fallbackTasks, concurrency); err != nil {
+				util.Default.Printf("⚠️  Some fallback uploads failed: %v\n", err)
+			}
+		}
 	}
 
 	util.Default.Printf("🔁 Local files examined: %d, uploaded: %d, skipped(ignored): %d, skipped(up-to-date): %d, upload errors: %d\n",
@@ -1186,12 +1217,15 @@ func CompareAndDownloadByHashWithFilter(cfg *config.Config, localRoot string, pr
 	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
 	// Collect all files that need download
-	const maxConcurrency = 5
+	concurrency := cfg.Devsync.Concurrency
+	if concurrency <= 0 {
+		concurrency = 5
+	}
 	var downloadTasks []util.ConcurrentTask
 
-	// worker slot channel: provides stable slot numbers 1..maxConcurrency
-	slotCh := make(chan int, maxConcurrency)
-	for i := 1; i <= maxConcurrency; i++ {
+	// worker slot channel: provides stable slot numbers 1..concurrency
+	slotCh := make(chan int, concurrency)
+	for i := 1; i <= concurrency; i++ {
 		slotCh <- i
 	}
 
@@ -1291,8 +1325,8 @@ func CompareAndDownloadByHashWithFilter(cfg *config.Config, localRoot string, pr
 		mu.Unlock()
 	}
 
-	// Execute all download tasks with bounded concurrency (max 5 parallel)
-	if err := util.RunConcurrent(downloadTasks, maxConcurrency); err != nil {
+	// Execute all download tasks with bounded concurrency
+	if err := util.RunConcurrent(downloadTasks, concurrency); err != nil {
 		util.Default.Printf("⚠️  Some downloads failed: %v\n", err)
 	}
 
@@ -1397,11 +1431,14 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 	var mu sync.Mutex // mutex for thread-safe access to shared variables
 
 	// Collect all files that need upload
-	const maxConcurrency = 5
+	concurrency := cfg.Devsync.Concurrency
+	if concurrency <= 0 {
+		concurrency = 5
+	}
 	var uploadTasks []util.ConcurrentTask
-	// worker slot channel: provides stable slot numbers 1..maxConcurrency
-	slotCh := make(chan int, maxConcurrency)
-	for i := 1; i <= maxConcurrency; i++ {
+	// worker slot channel: provides stable slot numbers 1..concurrency
+	slotCh := make(chan int, concurrency)
+	for i := 1; i <= concurrency; i++ {
 		slotCh <- i
 	}
 
@@ -1527,8 +1564,8 @@ func CompareAndUploadByHashWithFilter(cfg *config.Config, localRoot string, pref
 		}
 	}
 
-	// Execute all upload tasks with bounded concurrency (max 5 parallel)
-	if err := util.RunConcurrent(uploadTasks, maxConcurrency); err != nil {
+	// Execute all upload tasks with bounded concurrency
+	if err := util.RunConcurrent(uploadTasks, concurrency); err != nil {
 		util.Default.Printf("⚠️  Some uploads failed: %v\n", err)
 	}
 
