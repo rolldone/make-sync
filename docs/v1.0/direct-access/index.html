@@ -35,8 +35,59 @@ Lihat semua versi
 <span class="line"><span style="color:#85E89D">  ssh_commands</span><span style="color:#E1E4E8">:</span></span>
 <span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">access_name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">Connect to Server</span></span>
 <span class="line"><span style="color:#85E89D">      command</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">ssh -v my-server</span></span></code></pre>
-<p>Setelah <code>make-sync direct_access</code>, file config akan di <code>.sync_temp/.ssh/config</code>.</p> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
-Terakhir diperbarui: 30/10/2025 </div>  <a href="/make-sync/docs/v1.0">
+<p>Setelah <code>make-sync direct_access</code>, file config akan di <code>.sync_temp/.ssh/config</code>.</p>
+<h3 id="port-forwards-ssh-tunnels">Port Forwards (SSH tunnels)</h3>
+<p><code>make-sync</code> mendukung mendefinisikan satu atau banyak port-forward (tunnel) per entry <code>ssh_commands</code>.
+Konfigurasi ini memudahkan membuka beberapa forwards sekaligus (mis. membuka UI web dan service lain dalam satu langkah).</p>
+<p>Contoh: dua forward digabung dalam satu <code>access_name</code></p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#85E89D">direct_access</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#85E89D">  ssh_configs</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">Host</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">artywiz_ovh_de</span></span>
+<span class="line"><span style="color:#85E89D">      HostName</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">your.server.example.com</span></span>
+<span class="line"><span style="color:#85E89D">      User</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">ubuntu</span></span>
+<span class="line"><span style="color:#85E89D">      IdentityFile</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">~/.ssh/id_rsa</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#85E89D">  ssh_commands</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">    - </span><span style="color:#85E89D">access_name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">NPM + Portainer via SSH Tunnel</span></span>
+<span class="line"><span style="color:#85E89D">      port_forwards</span><span style="color:#E1E4E8">:</span></span>
+<span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">npm-dashboard</span></span>
+<span class="line"><span style="color:#85E89D">          host</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">artywiz_ovh_de</span></span>
+<span class="line"><span style="color:#85E89D">          remote_host</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">127.0.0.1</span></span>
+<span class="line"><span style="color:#85E89D">          remote_port</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">81</span></span>
+<span class="line"><span style="color:#85E89D">          local_host</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">127.0.0.1</span></span>
+<span class="line"><span style="color:#85E89D">          local_port</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">8181</span></span>
+<span class="line"><span style="color:#E1E4E8">        - </span><span style="color:#85E89D">name</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">portainer-http</span></span>
+<span class="line"><span style="color:#85E89D">          host</span><span style="color:#E1E4E8">: </span><span style="color:#9ECBFF">artywiz_ovh_de</span></span>
+<span class="line"><span style="color:#85E89D">          remote_host</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">127.0.0.1</span></span>
+<span class="line"><span style="color:#85E89D">          remote_port</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">9000</span></span>
+<span class="line"><span style="color:#85E89D">          local_host</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">127.0.0.1</span></span>
+<span class="line"><span style="color:#85E89D">          local_port</span><span style="color:#E1E4E8">: </span><span style="color:#79B8FF">1800</span></span></code></pre>
+<p>Field penting:</p>
+<ul>
+<li><code>host</code>: alias <code>Host</code> pada <code>ssh_configs</code> yang akan dipakai sebagai tujuan SSH.</li>
+<li><code>remote_host</code> / <code>remote_port</code>: host/port pada sisi remote yang ingin di-forward (default <code>127.0.0.1</code> untuk <code>remote_host</code>).</li>
+<li><code>local_host</code> / <code>local_port</code>: alamat dan port lokal untuk bind; jika <code>local_port</code> diisi <code>0</code> atau kosong, maka program akan mengalokasi port ephemeral.</li>
+<li><code>scheme</code> (opsional): jika diisi <code>http</code> atau <code>https</code>, program akan menampilkan URL lengkap (mis. <code>http://127.0.0.1:8181/</code>) setelah forward dibuat sehingga mudah diklik di terminal yang mendukung auto-link.</li>
+<li><code>protocol</code> (tcp/udp) dan <code>enabled</code> (bool) juga didukung.</li>
+</ul>
+<p>Kompatibilitas:</p>
+<ul>
+<li>Format lama (<code>port</code> untuk remote port dan <code>bind_address</code> untuk local host) masih diterima.</li>
+</ul>
+<p>Deteksi <code>http</code> otomatis:</p>
+<ul>
+<li>Jika <code>scheme</code> tidak disediakan, <code>make-sync</code> menggunakan heuristik (port umum: 80, 81, 8000, 8080, 3000, 9000, 8181, 1800, dsb) dan akan melakukan probe singkat ke <code>http://local_host:local_port/</code>.</li>
+<li>Jika probe berhasil (mendapat respons HTTP), program akan menampilkan URL lengkap.</li>
+<li>Probe bersifat best-effort: layanan yang memerlukan path khusus atau otentikasi mungkin tidak terdeteksi.</li>
+</ul>
+<p>Cara pakai cepat:</p>
+<ol>
+<li>Jalankan <code>./make-sync</code>.</li>
+<li>Pilih menu <code>NPM + Portainer via SSH Tunnel</code>.</li>
+<li>Program membuka kedua tunnel dan mencetak mapping dan (jika terdeteksi) URL yang bisa langsung dibuka di browser.</li>
+<li>Tekan ENTER di jendela <code>make-sync</code> untuk menutup semua tunnel.</li>
+</ol> </div> <!-- Navigation --> <div class="flex justify-between items-center pt-8 border-t"> <div class="text-sm text-muted-foreground">
+Terakhir diperbarui: 18/11/2025 </div>  <a href="/make-sync/docs/v1.0">
 ← Kembali ke overview
 </a>  </div> </div>  </article> </main></div> </div> </div> <!-- Theme toggle + mobile menu client script --> <script type="module">
         (function() {
