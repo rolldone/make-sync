@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +30,7 @@ type ActiveForward struct {
 	Cmd      *exec.Cmd
 	Host     string
 	Forwards []ForwardSpec
+	LogPath  string
 }
 
 // Runner manages multiple ActiveForwards
@@ -78,24 +81,62 @@ func (r *Runner) StartForwards(ctx context.Context, specs []ForwardSpec) ([]*Act
 
 		// essential flags: don't run remote command (-N), disable tty (-T), fail if forward fails
 		args = append(args, "-N", "-T", "-o", "ExitOnForwardFailure=yes")
+
+		// If a generated temporary SSH config exists at .sync_temp/.ssh/config, tell ssh to use it
+		cfgPath := ".sync_temp/.ssh/config"
+		if _, err := os.Stat(cfgPath); err == nil {
+			args = append(args, "-F", cfgPath)
+		}
+
 		args = append(args, hostAlias)
 
 		cmd := exec.CommandContext(ctx, "ssh", args...)
 
-		// capture stdout/stderr to avoid blocking
+		// ensure .sync_temp logs dir exists
+		logsDir := ".sync_temp"
+		if err := os.MkdirAll(logsDir, 0755); err != nil {
+			r.stopMany(started)
+			return nil, fmt.Errorf("failed create logs dir: %v", err)
+		}
+
+		// create logfile per hostAlias
+		logFileName := fmt.Sprintf("ssh-forward-%s-%d.log", sanitizeFileName(hostAlias), time.Now().Unix())
+		logPath := filepath.Join(logsDir, logFileName)
+		lf, err := os.Create(logPath)
+		if err != nil {
+			r.stopMany(started)
+			return nil, fmt.Errorf("failed create log file: %v", err)
+		}
+
+		// capture stdout/stderr
 		stderr, _ := cmd.StderrPipe()
 		stdout, _ := cmd.StdoutPipe()
 
 		if err := cmd.Start(); err != nil {
+			lf.Close()
 			r.stopMany(started)
 			return nil, fmt.Errorf("failed start ssh for %s: %v", hostAlias, err)
 		}
 
-		// simple goroutine to drain pipes
-		go io.Copy(io.Discard, stderr)
-		go io.Copy(io.Discard, stdout)
+		// copy streams to logfile. By default do NOT stream to terminal.
+		// Set env MAKE_SYNC_SSH_STREAM=1 (or true/yes) to stream to stdout/stderr as well.
+		var stdoutWriter io.Writer = lf
+		var stderrWriter io.Writer = lf
+		if v := strings.ToLower(strings.TrimSpace(os.Getenv("MAKE_SYNC_SSH_STREAM"))); v == "1" || v == "true" || v == "yes" {
+			stdoutWriter = io.MultiWriter(lf, os.Stdout)
+			stderrWriter = io.MultiWriter(lf, os.Stderr)
+		}
 
-		af := &ActiveForward{Cmd: cmd, Host: hostAlias, Forwards: fwdList}
+		go func() {
+			defer lf.Sync()
+			io.Copy(stdoutWriter, stdout)
+		}()
+		go func() {
+			defer lf.Sync()
+			io.Copy(stderrWriter, stderr)
+		}()
+
+		af := &ActiveForward{Cmd: cmd, Host: hostAlias, Forwards: fwdList, LogPath: logPath}
 		r.mu.Lock()
 		r.actives = append(r.actives, af)
 		r.mu.Unlock()
@@ -119,6 +160,22 @@ func (r *Runner) stopMany(list []*ActiveForward) {
 		_ = a.Cmd.Process.Kill()
 		a.Cmd.Wait()
 	}
+}
+
+// sanitizeFileName makes a safe filename fragment from an arbitrary string
+func sanitizeFileName(s string) string {
+	// allow alnum, dot, dash, underscore; replace others with underscore
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		switch r {
+		case '.', '-', '_':
+			return r
+		default:
+			return '_'
+		}
+	}, s)
 }
 
 // StopAll stops all active forwards

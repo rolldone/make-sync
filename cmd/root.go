@@ -447,6 +447,18 @@ func showDirectAccessMenu(ctx context.Context, loadedCfg *config.Config) (bool, 
 					})
 				}
 
+				// Ensure temporary SSH config exists for host aliases used by the forwards
+				seenHosts := map[string]struct{}{}
+				for _, s := range specs {
+					seenHosts[s.HostAlias] = struct{}{}
+				}
+				for h := range seenHosts {
+					if err := generateSSHTempConfig(cfg, h); err != nil {
+						fmt.Printf("❌ Failed to generate temporary SSH config for host '%s': %v\n", h, err)
+						return true, nil
+					}
+				}
+
 				runner := sshforward.NewRunner()
 				childCtx, cancel := context.WithCancel(ctx)
 				defer cancel()
