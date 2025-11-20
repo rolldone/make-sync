@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"syscall"
 
 	"make-sync/internal/util"
 )
@@ -143,13 +144,33 @@ func (r *Runner) StartForwards(ctx context.Context, specs []ForwardSpec) ([]*Act
 
 		started = append(started, af)
 
-		// give a moment for ssh to establish; if process exits quickly treat as error
-		go func(a *ActiveForward) {
-			time.Sleep(500 * time.Millisecond)
-			if a.Cmd.ProcessState != nil && a.Cmd.ProcessState.Exited() {
-				// no-op here; caller should check cmd.Wait via returned ActiveForward if desired
+		// verify ssh process is alive shortly after start. If it exited immediately
+		// treat that as a failure and abort with log path for debugging.
+		alive := false
+		// Poll process existence using syscall.Kill(pid, 0)
+		for i := 0; i < 15; i++ {
+			if af.Cmd == nil || af.Cmd.Process == nil {
+				break
 			}
-		}(af)
+			pid := af.Cmd.Process.Pid
+			err := syscall.Kill(pid, 0)
+			if err == nil || err == syscall.EPERM {
+				alive = true
+				break
+			}
+			if err == syscall.ESRCH {
+				// process does not exist -> exited
+				// ensure logfile flushed
+				_ = af.LogPath
+				r.stopMany(started)
+				return nil, fmt.Errorf("ssh process for %s exited immediately; see log: %s", hostAlias, af.LogPath)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if !alive {
+			r.stopMany(started)
+			return nil, fmt.Errorf("ssh process for %s did not become alive in time; see log: %s", hostAlias, af.LogPath)
+		}
 	}
 
 	return started, nil
