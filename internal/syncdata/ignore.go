@@ -306,7 +306,11 @@ func (c *IgnoreCache) GetAllPatterns() []string {
 		if err != nil {
 			return nil
 		}
+		// skip scanning inside .sync_collections to avoid picking up archived/last-open
 		if d.IsDir() {
+			if strings.EqualFold(d.Name(), ".sync_collections") {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.EqualFold(d.Name(), ".sync_ignore") {

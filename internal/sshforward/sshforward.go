@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 	"syscall"
+	"time"
 
 	"make-sync/internal/util"
 )

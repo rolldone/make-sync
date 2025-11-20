@@ -36,7 +36,11 @@ func collectPreprocessedIgnores(root string) ([]string, error) {
 		if err != nil {
 			return nil
 		}
+		// Skip archived collections to avoid stale ignore patterns
 		if d.IsDir() {
+			if strings.EqualFold(d.Name(), ".sync_collections") {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if strings.EqualFold(d.Name(), ".sync_ignore") {
