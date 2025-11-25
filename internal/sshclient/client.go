@@ -178,10 +178,12 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 		sftpClient, serr := sftp.NewClient(c.client)
 		if serr != nil {
 			util.Default.Printf("[sshclient] sftp.NewClient failed: %v\n", serr)
+			util.Default.ClearLine()
 		} else {
 			// Ensure remote directory exists
 			if err := sftpClient.MkdirAll(remoteDir); err != nil {
 				util.Default.Printf("[sshclient] sftp.MkdirAll failed for %s: %v\n", remoteDir, err)
+				util.Default.ClearLine()
 			} else {
 				// Rewind localFile in case it was read
 				if _, err := localFile.Seek(0, 0); err != nil {
@@ -192,10 +194,12 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 				rf, err := sftpClient.OpenFile(remotePathForScp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 				if err != nil {
 					util.Default.Printf("[sshclient] sftp OpenFile failed for %s: %v\n", remotePathForScp, err)
+					util.Default.ClearLine()
 				} else {
 					// Copy contents
 					if _, err := io.Copy(rf, localFile); err != nil {
 						util.Default.Printf("[sshclient] sftp Copy failed %s -> %s: %v\n", localPath, remotePathForScp, err)
+						util.Default.ClearLine()
 						rf.Close()
 					} else {
 						// Set permissions
@@ -211,6 +215,7 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 			sftpClient.Close()
 		}
 		util.Default.Printf("[sshclient] falling back to scp for %s\n", remotePathForScp)
+		util.Default.ClearLine()
 		// on any sftp error, fall through to scp implementation below
 	}
 
