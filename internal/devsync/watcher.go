@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/asaskevich/EventBus"
@@ -142,7 +143,26 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 		TUIActive:      false,
 		ctx:            ctx,
 		cancelFunc:     cancel,
+		// initialize pending maps
+		pendingDirDeletes: make(map[string]struct{}),
+		pendingDirMoves:   make(map[string]struct{}),
 	}
+
+	// Initialize uploadSlots bounded by configuration
+	concurrency := 4
+	if cfg != nil && cfg.Devsync.Concurrency > 0 {
+		concurrency = cfg.Devsync.Concurrency
+	}
+	watcher.uploadSlots = make(chan struct{}, 1)
+	// Force single-slot sequential uploads per user's request
+	_ = concurrency
+
+	// Event queue for serialized processing of watch triggers
+	watcher.eventQueue = make(chan FileEvent, 1024)
+	watcher.debounceMap = make(map[string]*debounceEntry)
+	watcher.debounceDelay = 100 * time.Millisecond
+	// start serialized processor
+	watcher.startEventQueueProcessor()
 
 	return watcher, nil
 }
@@ -1204,6 +1224,8 @@ func (w *Watcher) setupEventBusSubscriptions() {
 func (w *Watcher) handleEvent(event notify.EventInfo) {
 	path := event.Path()
 
+	// (debug logs removed)
+
 	// If .sync_ignore modified -> clear cache under lock
 	if filepath.Base(path) == ".sync_ignore" {
 		w.ignoresMu.Lock()
@@ -1262,6 +1284,71 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 	// Get file info
 	info, err := os.Stat(path)
 	isDir := err == nil && info.IsDir()
+
+	// If the notify backend reports a directory-level Create/Write event,
+	// many backends do that instead of a per-file event. In that case,
+	// proactively scan the directory and trigger per-file events so the
+	// rest of the pipeline receives full file paths (avoids uploading the
+	// directory path itself which can lead to "is a directory" errors).
+	if isDir && (eventType == EventCreate || eventType == EventWrite) {
+		// Read directory entries (non-recursive) and trigger events for files
+		entries, rerr := os.ReadDir(path)
+		if rerr == nil {
+			dispatched := 0
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				full := filepath.Join(path, e.Name())
+				childEvent := FileEvent{
+					Path:      full,
+					EventType: EventCreate,
+					IsDir:     false,
+					Timestamp: time.Now(),
+				}
+				// Respect ignores for child path
+				if w.shouldIgnore(full) {
+					continue
+				}
+				// Debounce/duplicate detection
+				if w.isDuplicateEvent(childEvent) {
+					continue
+				}
+				w.storeEvent(childEvent)
+				// Execute scripts/sync for the child file
+				w.ExecuteScripts(childEvent)
+				dispatched++
+			}
+			// If no immediate files were dispatched (only subdirs or empty),
+			// schedule a directory-level event so the queued worker will walk
+			// the tree and upload nested files.
+			if dispatched == 0 {
+				// compute remote mapping for directory if possible
+				remoteBase := w.config.Devsync.Auth.RemotePath
+				if remoteBase == "" {
+					remoteBase = "."
+				}
+				var remoteDir string
+				if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, path); rerr == nil {
+					remoteDir = w.joinRemotePath(remoteBase, filepath.ToSlash(rel))
+				} else {
+					remoteDir = ""
+				}
+				dirEvent := FileEvent{
+					Path:      path,
+					EventType: EventCreate,
+					IsDir:     true,
+					Remote:    remoteDir,
+					Timestamp: time.Now(),
+				}
+				w.safePrintf("⏳ Scheduling recursive upload for directory: %s\n", path)
+				w.scheduleDebouncedEvent(dirEvent)
+			}
+			// We've handled directory-level processing; skip further processing.
+			return
+		}
+		// If reading dir failed, fall through and handle directory event normally
+	}
 
 	// Create FileEvent
 	fileEvent := FileEvent{
@@ -1382,6 +1469,17 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 			}
 		} else {
 			// For create/write events, sync file normally
+			// If this event refers to a directory, bypass the file-oriented
+			// cache check (ShouldSyncFile) because that helper can return
+			// "is a directory" errors and prevent directory-level rename
+			// / move handlers from running. Let directory events flow to
+			// syncFileViaSSH so the queued processor can attempt server-side
+			// mv or fallback upload+delete semantics.
+			if event.IsDir {
+				w.syncFileViaSSH(event)
+				return
+			}
+
 			isDifferent, err := w.fileCache.ShouldSyncFile(event.Path)
 			if err != nil {
 				// If the file no longer exists locally (common after rename/move),
@@ -1404,26 +1502,27 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 					}
 
 					if remotePath != "" {
+						// Instead of deleting remote immediately (which races with
+						// concurrent rename/move events), enqueue a remove event into
+						// the serialized event queue so ordering with rename is
+						// deterministic and suppression maps work correctly.
 						if strings.Contains(remotePath, ".sync_temp") {
 							w.safePrintf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remotePath)
 						} else {
-							cmd := fmt.Sprintf("rm -rf '%s'", remotePath)
-							w.safePrintf("📤 Deleting remote path (local missing): %s\n", remotePath)
-							if derr := w.sshClient.RunCommand(cmd); derr != nil {
-								w.safePrintf("❌ Failed to delete remote path %s: %v\n", remotePath, derr)
-							} else {
-								w.safePrintf("✅ Remote delete succeeded: %s\n", remotePath)
+							remEv := FileEvent{
+								Path:      event.Path,
+								EventType: EventRemove,
+								IsDir:     true, // treat as dir to suppress child events under this prefix
+								Remote:    remotePath,
+								Timestamp: time.Now(),
 							}
+							w.safePrintf("⏳ Scheduling remote delete for: %s\n", remotePath)
+							w.scheduleDebouncedEvent(remEv)
 						}
 					}
 
-					if w.fileCache != nil {
-						if cerr := w.fileCache.DeleteFileMetadata(event.Path); cerr != nil {
-							w.safePrintf("⚠️  Failed to delete metadata for %s: %v\n", event.Path, cerr)
-						} else {
-							w.safePrintf("🗑️  Deleted cache metadata for missing local path %s\n", event.Path)
-						}
-					}
+					// Defer cache metadata removal to the queued delete handler so that
+					// we don't lose metadata if the delete is superseded by a rename.
 					return
 				}
 
@@ -1512,6 +1611,8 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 		return
 	}
 
+	// (debug logs removed)
+
 	localPath := event.Path
 
 	// Check file size limit before syncing
@@ -1585,16 +1686,350 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 	util.Default.Printf("🔄 Sync (OS=%s) local='%s' → remote='%s' dir='%s'\n", targetOS, localPath, remotePath, remoteDir)
 	util.Default.ClearLine()
 
-	if err := w.sshClient.UploadFile(localPath, remotePath); err != nil {
-		w.safePrintf("❌ Failed to sync file %s to %s: %v\n", localPath, remotePath, err)
+	// Enqueue the event for serialized processing by the event queue worker
+	event.Remote = remotePath
+
+	// Suppress events that are inside a pending directory delete or move
+	// Only suppress non-create events. If this is a Create we should still
+	// allow it to pass through (so new files are uploaded even when a
+	// directory-level delete/move is pending) because the old path may have
+	// already been removed and the new file needs to be synced.
+	if event.EventType != EventCreate {
+		w.pendingMu.Lock()
+		for p := range w.pendingDirDeletes {
+			if strings.HasPrefix(event.Path, p+"/") || event.Path == p {
+				w.pendingMu.Unlock()
+				w.safePrintf("⚠️  Dropping event under pending delete: %s\n", event.Path)
+				return
+			}
+		}
+		for p := range w.pendingDirMoves {
+			if strings.HasPrefix(event.Path, p+"/") || event.Path == p {
+				w.pendingMu.Unlock()
+				w.safePrintf("⚠️  Dropping event under pending move: %s\n", event.Path)
+				return
+			}
+		}
+		w.pendingMu.Unlock()
+	}
+	if event.OldPath != "" {
+		// compute old remote mapping if available
+		if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, event.OldPath); rerr == nil {
+			event.OldRemote = w.joinRemotePath(remoteBase, filepath.ToSlash(rel))
+		} else {
+			if rp, merr := util.LocalToRemote(w.config.Devsync.Auth.LocalPath, remoteBase, event.OldPath); merr == nil {
+				event.OldRemote = rp
+			}
+		}
+	}
+
+	// Schedule via debouncer so rapid bursts don't enqueue redundant work
+	w.scheduleDebouncedEvent(event)
+}
+
+// startEventQueueProcessor starts a single worker goroutine to process queued events
+func (w *Watcher) startEventQueueProcessor() {
+	if w.eventQueue == nil {
+		return
+	}
+	go func() {
+		for ev := range w.eventQueue {
+			w.processQueuedEvent(ev)
+		}
+	}()
+}
+
+// scheduleDebouncedEvent schedules an event to be enqueued after debounceDelay.
+// Multiple events for the same path within the delay will be coalesced into
+// the last event.
+func (w *Watcher) scheduleDebouncedEvent(evt FileEvent) {
+	key := evt.Path
+	// If debounceDelay is zero, bypass debounce and enqueue immediately.
+	if w.debounceDelay == 0 {
+		select {
+		case w.eventQueue <- evt:
+			// enqueued
+		default:
+			w.safePrintf("⚠️  Event queue full, dropping event for %s\n", key)
+		}
 		return
 	}
 
-	util.Default.Printf("✅ File synced: %s → %s\n", localPath, remotePath)
-	util.Default.ClearLine()
-	if w.fileCache != nil {
-		if err := w.fileCache.UpdateFileMetadata(localPath); err != nil {
-			w.safePrintf("⚠️  Failed to update cache metadata for %s: %v\n", localPath, err)
+	w.debounceMu.Lock()
+	if ent, ok := w.debounceMap[key]; ok {
+		// update event and reset timer
+		ent.evt = evt
+		ent.timer.Reset(w.debounceDelay)
+		w.debounceMu.Unlock()
+		return
+	}
+
+	// create new entry
+	timer := time.AfterFunc(w.debounceDelay, func() {
+		// when timer fires, enqueue latest event
+		w.debounceMu.Lock()
+		entry, ok := w.debounceMap[key]
+		if !ok {
+			w.debounceMu.Unlock()
+			return
+		}
+		delete(w.debounceMap, key)
+		w.debounceMu.Unlock()
+
+		// try to enqueue non-blocking, log if full
+		select {
+		case w.eventQueue <- entry.evt:
+			// enqueued
+		default:
+			w.safePrintf("⚠️  Event queue full, dropping debounced event for %s\n", key)
+		}
+	})
+
+	w.debounceMap[key] = &debounceEntry{evt: evt, timer: timer}
+	w.debounceMu.Unlock()
+}
+
+// compactEventQueue removes queued events whose paths are under the given prefix.
+// It drains the channel non-blocking and re-enqueues items that don't match.
+func (w *Watcher) compactEventQueue(prefix string) {
+	var buf []FileEvent
+	for {
+		select {
+		case ev := <-w.eventQueue:
+			buf = append(buf, ev)
+		default:
+			goto REENQUEUE
+		}
+	}
+REENQUEUE:
+	for _, ev := range buf {
+		// drop if under prefix
+		if strings.HasPrefix(ev.Path, prefix+"/") || ev.Path == prefix {
+			continue
+		}
+		select {
+		case w.eventQueue <- ev:
+		default:
+			// if re-enqueue fails, drop remaining to avoid blocking
+		}
+	}
+}
+
+// processQueuedEvent processes a single queued FileEvent sequentially.
+func (w *Watcher) processQueuedEvent(ev FileEvent) {
+	if w.sshClient == nil {
+		w.safePrintf("❌ SSH client not available for queued file sync\n")
+		return
+	}
+
+	switch ev.EventType {
+	case EventRemove:
+		// If this is a directory remove, mark as pending so child events are suppressed
+		if ev.IsDir {
+			w.pendingMu.Lock()
+			w.pendingDirDeletes[ev.Path] = struct{}{}
+			w.pendingMu.Unlock()
+			defer func(p string) {
+				w.pendingMu.Lock()
+				delete(w.pendingDirDeletes, p)
+				w.pendingMu.Unlock()
+			}(ev.Path)
+		}
+
+		remote := ev.Remote
+		if remote == "" && ev.Path != "" {
+			// compute if not provided
+			if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, ev.Path); rerr == nil {
+				remote = w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+			}
+		}
+		if remote == "" {
+			return
+		}
+		if strings.Contains(remote, ".sync_temp") {
+			w.safePrintf("🚫 BLOCKED: Remote delete blocked for path: %s\n", remote)
+			return
+		}
+		cmd := fmt.Sprintf("rm -rf '%s'", remote)
+		w.safePrintf("📤 Deleting remote path: %s\n", remote)
+		if err := w.sshClient.RunCommand(cmd); err != nil {
+			w.safePrintf("❌ Failed to delete remote path %s: %v\n", remote, err)
+		} else {
+			w.safePrintf("✅ Remote delete succeeded: %s\n", remote)
+		}
+
+		// Remove metadata from file cache if available
+		if w.fileCache != nil {
+			if cerr := w.fileCache.DeleteFileMetadata(ev.Path); cerr != nil {
+				w.safePrintf("⚠️  Failed to delete metadata for %s: %v\n", ev.Path, cerr)
+			} else {
+				w.safePrintf("🗑️  Deleted cache metadata for %s\n", ev.Path)
+			}
+		}
+
+	case EventCreate, EventWrite:
+		// If the event refers to a directory, walk and upload contained files
+		if ev.Path == "" || ev.Remote == "" {
+			return
+		}
+		if ev.IsDir {
+			_ = filepath.Walk(ev.Path, func(p string, info os.FileInfo, err error) error {
+				if err != nil {
+					// skip problematic entries but continue walking
+					return nil
+				}
+				if info.IsDir() {
+					return nil
+				}
+				// Compute remote path for this file
+				rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, p)
+				if rerr != nil {
+					// fallback: skip file if we cannot compute relative path
+					w.safePrintf("⚠️  Skipping upload for %s: cannot compute relative path: %v\n", p, rerr)
+					return nil
+				}
+				remote := w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+
+				// Acquire slot and upload
+				w.uploadSlots <- struct{}{}
+				wid := atomic.AddInt64(&w.uploadCounter, 1)
+				util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", wid, p, remote)
+				util.Default.ClearLine()
+				if err := w.sshClient.UploadFileSCP(p, remote); err != nil {
+					w.safePrintf("❌ %d Failed to sync file %s to %s: %v\n", wid, p, remote, err)
+				} else {
+					util.Default.Printf("✅ %d File synced: %s → %s\n", wid, p, remote)
+					util.Default.ClearLine()
+					if w.fileCache != nil {
+						_ = w.fileCache.UpdateFileMetadata(p)
+					}
+				}
+				<-w.uploadSlots
+				return nil
+			})
+			return
+		}
+
+		// Single file upload
+		w.uploadSlots <- struct{}{}
+		wid := atomic.AddInt64(&w.uploadCounter, 1)
+		util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", wid, ev.Path, ev.Remote)
+		util.Default.ClearLine()
+
+		if err := w.sshClient.UploadFileSCP(ev.Path, ev.Remote); err != nil {
+			// If SCP reported "is a directory" (some notify backends produce
+			// directory-level events instead of per-file events), fall back to
+			// walking the directory and uploading contained files.
+			if strings.Contains(strings.ToLower(err.Error()), "is a directory") {
+				util.Default.Printf("⚠️ Detected directory when uploading %s; walking tree...\n", ev.Path)
+				util.Default.ClearLine()
+				_ = filepath.Walk(ev.Path, func(p string, info os.FileInfo, werr error) error {
+					if werr != nil {
+						return nil
+					}
+					if info.IsDir() {
+						return nil
+					}
+					rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, p)
+					if rerr != nil {
+						w.safePrintf("⚠️  Skipping upload for %s: cannot compute relative path: %v\n", p, rerr)
+						return nil
+					}
+					remote := w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+					w.uploadSlots <- struct{}{}
+					wid := atomic.AddInt64(&w.uploadCounter, 1)
+					util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", wid, p, remote)
+					util.Default.ClearLine()
+					if uerr := w.sshClient.UploadFileSCP(p, remote); uerr != nil {
+						w.safePrintf("❌ %d Failed to sync file %s to %s: %v\n", wid, p, remote, uerr)
+					} else {
+						util.Default.Printf("✅ %d File synced: %s → %s\n", wid, p, remote)
+						util.Default.ClearLine()
+						if w.fileCache != nil {
+							_ = w.fileCache.UpdateFileMetadata(p)
+						}
+					}
+					<-w.uploadSlots
+					return nil
+				})
+			} else {
+				w.safePrintf("❌ %d Failed to sync file %s to %s: %v\n", wid, ev.Path, ev.Remote, err)
+			}
+		} else {
+			util.Default.Printf("✅ %d File synced: %s → %s\n", wid, ev.Path, ev.Remote)
+			util.Default.ClearLine()
+			if w.fileCache != nil {
+				_ = w.fileCache.UpdateFileMetadata(ev.Path)
+			}
+		}
+		<-w.uploadSlots
+
+	case EventRename:
+		// Treat rename specially: prefer server-side mv to avoid transferring data
+		// Mark old path as pending move to suppress child events
+		if ev.OldPath != "" {
+			w.pendingMu.Lock()
+			w.pendingDirMoves[ev.OldPath] = struct{}{}
+			w.pendingMu.Unlock()
+			defer func(p string) {
+				w.pendingMu.Lock()
+				delete(w.pendingDirMoves, p)
+				w.pendingMu.Unlock()
+			}(ev.OldPath)
+		}
+
+		// Compute remote paths if missing
+		oldRemote := ev.OldRemote
+		if oldRemote == "" && ev.OldPath != "" {
+			if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, ev.OldPath); rerr == nil {
+				oldRemote = w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+			}
+		}
+		newRemote := ev.Remote
+		if newRemote == "" && ev.Path != "" {
+			if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, ev.Path); rerr == nil {
+				newRemote = w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+			}
+		}
+
+		if oldRemote != "" && newRemote != "" {
+			// Try server-side mv first
+			mvCmd := fmt.Sprintf("mv '%s' '%s'", oldRemote, newRemote)
+			w.safePrintf("🔁 Attempting remote mv: %s -> %s\n", oldRemote, newRemote)
+			if err := w.sshClient.RunCommand(mvCmd); err == nil {
+				w.safePrintf("✅ Remote mv succeeded: %s -> %s\n", oldRemote, newRemote)
+				// update cache: delete old metadata
+				if w.fileCache != nil {
+					_ = w.fileCache.DeleteFileMetadata(ev.OldPath)
+				}
+				break
+			} else {
+				w.safePrintf("⚠️ Remote mv failed: %v; falling back to upload+delete\n", err)
+			}
+		}
+
+		// Fallback: upload new path then delete old
+		if ev.Path != "" && newRemote != "" {
+			w.uploadSlots <- struct{}{}
+			wid := atomic.AddInt64(&w.uploadCounter, 1)
+			util.Default.Printf("⬆️  %d -> Uploading (rename fallback) %s -> %s\n", wid, ev.Path, newRemote)
+			util.Default.ClearLine()
+			if err := w.sshClient.UploadFileSCP(ev.Path, newRemote); err != nil {
+				w.safePrintf("❌ %d Failed to upload renamed file %s to %s: %v\n", wid, ev.Path, newRemote, err)
+			} else {
+				util.Default.Printf("✅ %d File uploaded (rename fallback): %s → %s\n", wid, ev.Path, newRemote)
+				util.Default.ClearLine()
+				if w.fileCache != nil {
+					_ = w.fileCache.UpdateFileMetadata(ev.Path)
+				}
+				// delete old remote if present
+				if oldRemote != "" && !strings.Contains(oldRemote, ".sync_temp") {
+					if derr := w.sshClient.RunCommand(fmt.Sprintf("rm -rf '%s'", oldRemote)); derr != nil {
+						w.safePrintf("⚠️ Failed to delete old remote path %s after upload: %v\n", oldRemote, derr)
+					}
+				}
+			}
+			<-w.uploadSlots
 		}
 	}
 }
@@ -1958,9 +2393,17 @@ func (w *Watcher) isEventAllowed(eventType EventType) bool {
 
 // isDuplicateEvent checks if this event is a duplicate of a recent event
 func (w *Watcher) isDuplicateEvent(event FileEvent) bool {
+	// Always allow rename events through even if a similar event was seen
+	// recently. Rename handling is important and can race with remove/create
+	// sequences; treating it as duplicate can cause us to skip server-side
+	// mv logic.
+	if event.EventType == EventRename {
+		return false
+	}
+
 	key := event.Path + string(rune(event.EventType))
 	if lastEvent, exists := w.lastEvents[key]; exists {
-		// If same event type for same path within 1000ms, consider it duplicate
+		// If same event type for same path within 3s, consider it duplicate
 		if time.Since(lastEvent.Timestamp) < 3*time.Second {
 			return true
 		}
@@ -1993,6 +2436,13 @@ func (w *Watcher) hasActiveSession() bool {
 
 // HandleReloadCommand handles the reload command from user input
 func (w *Watcher) HandleReloadCommand() {
+	// Abort any in-flight SCP transfers before reloading configuration so
+	// the UI can return promptly and uploads do not continue in background.
+	if w.sshClient != nil {
+		w.safePrintln("🔁 Aborting in-flight SCP transfers...")
+		w.sshClient.AbortAllSCPTransfers()
+	}
+
 	if err := w.ReloadConfiguration(); err != nil {
 		w.safePrintf("❌ Failed to reload configuration: %v\n", err)
 	}

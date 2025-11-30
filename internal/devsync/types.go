@@ -65,6 +65,9 @@ type FileEvent struct {
 	IsDir     bool
 	OldPath   string // For rename events
 	Timestamp time.Time
+	// Remote path equivalents computed by watcher before enqueuing
+	Remote    string
+	OldRemote string
 }
 
 // Session represents a remote or local terminal session
@@ -127,6 +130,26 @@ type Watcher struct {
 	cancelFunc context.CancelFunc
 	shutdownMu sync.Mutex
 
+	// uploadSlots limits concurrent per-file upload goroutines (bounded by config)
+	uploadSlots chan struct{}
+
+	// uploadCounter provides stable worker ids for logging
+	uploadCounter int64
+	// eventQueue is used to serialize file events for processing
+	eventQueue chan FileEvent
+
+	// debounce map to coalesce rapid events per-path
+	debounceMu    sync.Mutex
+	debounceMap   map[string]*debounceEntry
+	debounceDelay time.Duration
+
+	// pendingDirDeletes tracks directories currently scheduled for deletion
+	pendingDirDeletes map[string]struct{}
+	// pendingDirMoves tracks directories currently scheduled for move/rename
+	pendingDirMoves map[string]struct{}
+	// protects access to pendingDirDeletes/pendingDirMoves
+	pendingMu sync.Mutex
+
 	// Agent process tracking
 	agentPID string // PID of remote agent process
 
@@ -153,6 +176,12 @@ type Watcher struct {
 	oldState *term.State
 
 	firstOld *term.State
+}
+
+// debounceEntry stores a pending debounced event and its timer
+type debounceEntry struct {
+	evt   FileEvent
+	timer *time.Timer
 }
 
 // RemoteAgentConfig represents the configuration sent to remote agent

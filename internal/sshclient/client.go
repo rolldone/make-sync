@@ -33,6 +33,10 @@ type SSHClient struct {
 	persistent   bool
 	session      *ssh.Session // Persistent session for continuous commands
 	agentSession *ssh.Session // Persistent session for agent monitoring
+	// activeSCP tracks active SCP upload sessions so they can be aborted
+	// when the watcher requests cancellation (e.g., user pressed Ctrl+R).
+	activeSCP map[*ssh.Session]struct{}
+	activeMu  sync.Mutex
 }
 
 // UploadPair represents a single local->remote upload mapping
@@ -92,6 +96,7 @@ func NewSSHClient(username, privateKeyPath, password, host, port string) (*SSHCl
 		host:       host,
 		port:       port,
 		persistent: false,
+		activeSCP:  make(map[*ssh.Session]struct{}),
 	}, nil
 }
 
@@ -246,7 +251,12 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create session: %v", err)
 	}
-	defer session.Close()
+	// register this scp session so it can be aborted if needed
+	c.registerSCPSession(session)
+	defer func() {
+		c.unregisterSCPSession(session)
+		session.Close()
+	}()
 
 	// Use scp protocol properly: run scp -t on remote directory and drive protocol over stdin/stdout
 
@@ -399,6 +409,353 @@ func (c *SSHClient) UploadFile(localPath, remotePath string) error {
 // SyncFile is an alias for UploadFile for backward compatibility
 func (c *SSHClient) SyncFile(localPath, remotePath string) error {
 	return c.UploadFile(localPath, remotePath)
+}
+
+// registerSCPSession registers a session in the activeSCP registry.
+func (c *SSHClient) registerSCPSession(s *ssh.Session) {
+	if s == nil {
+		return
+	}
+	c.activeMu.Lock()
+	if c.activeSCP == nil {
+		c.activeSCP = make(map[*ssh.Session]struct{})
+	}
+	c.activeSCP[s] = struct{}{}
+	c.activeMu.Unlock()
+}
+
+// unregisterSCPSession removes a session from the activeSCP registry.
+func (c *SSHClient) unregisterSCPSession(s *ssh.Session) {
+	if s == nil {
+		return
+	}
+	c.activeMu.Lock()
+	delete(c.activeSCP, s)
+	c.activeMu.Unlock()
+}
+
+// AbortAllSCPTransfers closes all registered SCP sessions. This is safe to call
+// from another goroutine (e.g., when user requests reload) and will cause
+// io.Copy in upload routines to return with error.
+func (c *SSHClient) AbortAllSCPTransfers() {
+	c.activeMu.Lock()
+	// copy keys to avoid holding lock while closing
+	sessions := make([]*ssh.Session, 0, len(c.activeSCP))
+	for s := range c.activeSCP {
+		sessions = append(sessions, s)
+	}
+	c.activeMu.Unlock()
+
+	for _, s := range sessions {
+		// Best-effort close; ignore errors
+		_ = s.Close()
+	}
+}
+
+// UploadFileSCP uploads a single file using the SCP protocol only (no SFTP).
+// This reuses the scp sink protocol used as a fallback in UploadFile and
+// is intended for callers that prefer scp behavior for uploads.
+func (c *SSHClient) UploadFileSCP(localPath, remotePath string) error {
+	if c.client == nil {
+		return fmt.Errorf("SSH client not connected")
+	}
+
+	// Detect if remotePath looks like a Windows absolute path (e.g. C:\...)
+	isWindowsRemote := false
+	if (len(remotePath) >= 3 && remotePath[1] == ':' && (remotePath[2] == '\\' || remotePath[2] == '/')) || strings.HasPrefix(remotePath, "\\\\") {
+		isWindowsRemote = true
+	}
+
+	var remotePathForScp string
+	if isWindowsRemote {
+		remotePathForScp = remotePath
+	} else {
+		remotePathForScp = strings.ReplaceAll(remotePath, "\\", "/")
+		remotePathForScp = path.Clean(remotePathForScp)
+	}
+
+	// Open local file
+	localFile, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local file: %v", err)
+	}
+	defer localFile.Close()
+
+	stat, err := localFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat local file: %v", err)
+	}
+
+	// Ensure remote directory exists
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		var remoteDir string
+		if idx == -1 {
+			remoteDir = "."
+		} else {
+			remoteDir = remotePathForScp[:idx]
+		}
+		// Try to remove a file that conflicts with the directory path, ignore
+		// errors, then create the directory if it does not exist.
+		doubleQuote := func(s string) string { return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\"" }
+		mkdirCmd := fmt.Sprintf("cmd.exe /C del /F %s 2>nul || echo; if not exist %s mkdir %s", doubleQuote(remoteDir), doubleQuote(remoteDir), doubleQuote(remoteDir))
+		if out, err := c.RunCommandWithOutput(mkdirCmd); err != nil {
+			return fmt.Errorf("failed to prepare remote directory (windows): %v (output: %s)", err, strings.TrimSpace(out))
+		} else {
+			_ = out
+		}
+	} else {
+		targetDir := path.Dir(remotePathForScp)
+		// If a file exists where we expect a directory, remove it first so mkdir
+		// can succeed. Then create the directory if necessary.
+		mkdirCmd := fmt.Sprintf("if [ -f %s ]; then rm -f %s; fi; if [ -d %s ]; then echo EXISTS; else mkdir -p %s; fi", shellEscape(targetDir), shellEscape(targetDir), shellEscape(targetDir), shellEscape(targetDir))
+		if out, err := c.RunCommandWithOutput(mkdirCmd); err != nil {
+			return fmt.Errorf("failed to create remote directory: %v (output: %s)", err, strings.TrimSpace(out))
+		} else {
+			_ = out
+		}
+	}
+
+	// Create scp session
+	session, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %v", err)
+	}
+	// register session so it can be aborted by caller
+	c.registerSCPSession(session)
+	defer func() {
+		// unregister then close
+		c.unregisterSCPSession(session)
+		session.Close()
+	}()
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to get stdin pipe: %v", err)
+	}
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to get stdout pipe: %v", err)
+	}
+	stderr, err := session.StderrPipe()
+	if err != nil {
+		session.Close()
+		return fmt.Errorf("failed to get stderr pipe: %v", err)
+	}
+
+	// Start scp -t on remote directory
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		var targetDir string
+		if idx == -1 {
+			targetDir = "."
+		} else {
+			targetDir = remotePathForScp[:idx]
+		}
+		targetDir = strings.ReplaceAll(targetDir, "\\", "/")
+		doubleQuote := func(s string) string { return "\"" + strings.ReplaceAll(s, "\"", "\\\"") + "\"" }
+		cmd := fmt.Sprintf("scp -t %s", doubleQuote(targetDir))
+		if err := session.Start(cmd); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
+	} else {
+		targetDir := path.Dir(remotePathForScp)
+		cmd := fmt.Sprintf("scp -t %s", shellEscape(targetDir))
+		if err := session.Start(cmd); err != nil {
+			session.Close()
+			return fmt.Errorf("failed to start scp on remote: %v", err)
+		}
+	}
+
+	readAck := func() error {
+		buf := make([]byte, 1)
+		ch := make(chan error, 1)
+		go func() {
+			if _, err := stdout.Read(buf); err != nil {
+				ch <- fmt.Errorf("failed to read scp ack: %v", err)
+				return
+			}
+			switch buf[0] {
+			case 0:
+				ch <- nil
+			case 1, 2:
+				msg := make([]byte, 2048)
+				n, _ := stderr.Read(msg)
+				ch <- fmt.Errorf("scp remote error: %s", strings.TrimSpace(string(msg[:n])))
+			default:
+				ch <- fmt.Errorf("unknown scp ack: %v", buf[0])
+			}
+		}()
+		select {
+		case err := <-ch:
+			return err
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("timeout waiting for scp ack")
+		}
+	}
+
+	if err := readAck(); err != nil {
+		stdin.Close()
+		session.Wait()
+		return err
+	}
+
+	var filename string
+	if isWindowsRemote {
+		idx := strings.LastIndexAny(remotePathForScp, "\\/")
+		if idx == -1 {
+			filename = remotePathForScp
+		} else {
+			filename = remotePathForScp[idx+1:]
+		}
+	} else {
+		filename = path.Base(remotePathForScp)
+	}
+
+	fmt.Fprintf(stdin, "C%04o %d %s\n", stat.Mode().Perm(), stat.Size(), filename)
+	if err := readAck(); err != nil {
+		stdin.Close()
+		session.Wait()
+		return err
+	}
+
+	if _, err := io.Copy(stdin, localFile); err != nil {
+		stdin.Close()
+		session.Wait()
+		return fmt.Errorf("failed to send file data: %v", err)
+	}
+
+	if _, err := fmt.Fprint(stdin, "\x00"); err != nil {
+		stdin.Close()
+		session.Wait()
+		return fmt.Errorf("failed to send scp terminator: %v", err)
+	}
+
+	if err := readAck(); err != nil {
+		stdin.Close()
+		session.Wait()
+		return err
+	}
+
+	stdin.Close()
+	if err := session.Wait(); err != nil {
+		return fmt.Errorf("remote scp command failed: %v", err)
+	}
+	return nil
+}
+
+// UploadFileSFTP uploads a file using SFTP only (no SCP fallback). It will
+// attempt up to retries times (retries >= 1). This uses temp-file -> rename
+// semantics for atomic replace on POSIX-like remotes.
+func (c *SSHClient) UploadFileSFTP(localPath, remotePath string, retries int) error {
+	if c.client == nil {
+		return fmt.Errorf("SSH client not connected")
+	}
+
+	if retries <= 0 {
+		retries = 1
+	}
+
+	// detect windows-style remote path and bail early because SFTP semantics
+	// for Windows paths are environment-dependent and we require POSIX-like
+	// remote paths for atomic rename.
+	if (len(remotePath) >= 3 && remotePath[1] == ':' && (remotePath[2] == '\\' || remotePath[2] == '/')) || strings.HasPrefix(remotePath, "\\\\") {
+		return fmt.Errorf("sftp: remote path contains Windows-style path; SFTP-only upload not supported for this path: %s", remotePath)
+	}
+
+	// Normalize to POSIX style remote path
+	remote := strings.ReplaceAll(remotePath, "\\", "/")
+	remote = path.Clean(remote)
+
+	var lastErr error
+	for attempt := 1; attempt <= retries; attempt++ {
+		sftpClient, err := sftp.NewClient(c.client)
+		if err != nil {
+			lastErr = fmt.Errorf("sftp.NewClient failed: %v", err)
+			util.Default.Printf("❌ SFTP attempt %d/%d failed: %v\n", attempt, retries, err)
+			util.Default.ClearLine()
+			// backoff
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			continue
+		}
+
+		// ensure remote dir exists
+		remoteDir := path.Dir(remote)
+		if err := sftpClient.MkdirAll(remoteDir); err != nil {
+			util.Default.Printf("⚠️  MkdirAll failed for %s: %v\n", remoteDir, err)
+			util.Default.ClearLine()
+			// continue attempt, may still fail on write
+		}
+
+		// Open local file
+		lf, lerr := os.Open(localPath)
+		if lerr != nil {
+			sftpClient.Close()
+			return fmt.Errorf("failed to open local file: %v", lerr)
+		}
+		fi, _ := lf.Stat()
+
+		// create temp remote path
+		pid := os.Getpid()
+		randSuffix := time.Now().UnixNano()
+		tmpRemote := fmt.Sprintf("%s.tmp.%d.%d", remote, pid, randSuffix)
+
+		rf, rerr := sftpClient.OpenFile(tmpRemote, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+		if rerr != nil {
+			lf.Close()
+			sftpClient.Close()
+			lastErr = fmt.Errorf("failed to open remote temp file %s: %v", tmpRemote, rerr)
+			util.Default.Printf("❌ SFTP attempt %d/%d failed opening temp file: %v\n", attempt, retries, rerr)
+			util.Default.ClearLine()
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			continue
+		}
+
+		// copy
+		if _, cerr := io.Copy(rf, lf); cerr != nil {
+			rf.Close()
+			lf.Close()
+			sftpClient.Remove(tmpRemote)
+			sftpClient.Close()
+			lastErr = fmt.Errorf("failed to copy to remote temp %s: %v", tmpRemote, cerr)
+			util.Default.Printf("❌ SFTP attempt %d/%d copy failed: %v\n", attempt, retries, cerr)
+			util.Default.ClearLine()
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			continue
+		}
+
+		// set permissions if available
+		if fi != nil {
+			_ = sftpClient.Chmod(tmpRemote, fi.Mode().Perm())
+		}
+
+		rf.Close()
+		lf.Close()
+
+		// rename temp -> final (atomic on POSIX servers)
+		if rerr := sftpClient.Rename(tmpRemote, remote); rerr != nil {
+			// cleanup temp and treat as failure
+			_ = sftpClient.Remove(tmpRemote)
+			sftpClient.Close()
+			lastErr = fmt.Errorf("failed to rename temp %s -> %s: %v", tmpRemote, remote, rerr)
+			util.Default.Printf("❌ SFTP attempt %d/%d rename failed: %v\n", attempt, retries, rerr)
+			util.Default.ClearLine()
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			continue
+		}
+
+		sftpClient.Close()
+		// success
+		return nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("sftp upload failed for unknown reason")
+	}
+	return lastErr
 }
 
 // UploadFilesSFTP uploads multiple files using a single SFTP client and a

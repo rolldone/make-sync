@@ -174,6 +174,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 		}
 
 		util.Default.Printf("Selected: %s (index %d)\n", result, i)
+		util.Default.ClearLine()
 		util.Default.Resume()
 
 		// If we're in local submenu, handle local command selection
