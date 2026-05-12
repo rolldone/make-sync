@@ -1878,6 +1878,13 @@ func (w *Watcher) processQueuedEvent(ev FileEvent) {
 					// skip problematic entries but continue walking
 					return nil
 				}
+				// Respect ignore rules for recursive uploads
+				if w.shouldIgnore(p) {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
 				if info.IsDir() {
 					return nil
 				}
@@ -1925,6 +1932,13 @@ func (w *Watcher) processQueuedEvent(ev FileEvent) {
 				util.Default.ClearLine()
 				_ = filepath.Walk(ev.Path, func(p string, info os.FileInfo, werr error) error {
 					if werr != nil {
+						return nil
+					}
+					// Respect ignore rules for recursive uploads
+					if w.shouldIgnore(p) {
+						if info.IsDir() {
+							return filepath.SkipDir
+						}
 						return nil
 					}
 					if info.IsDir() {
