@@ -19,6 +19,243 @@ import (
 	"github.com/cespare/xxhash/v2"
 )
 
+var manualTransferIgnoreState struct {
+	mu       sync.RWMutex
+	enabled  bool
+	profiles map[string][]string
+}
+
+// SetManualTransferIgnoreProfiles enables manual-transfer ignore mode.
+// When enabled, manual sync operations ignore files only by these profiles and
+// do not consult .sync_ignore.
+func SetManualTransferIgnoreProfiles(profiles map[string][]string) {
+	cloned := make(map[string][]string)
+	for rawPrefix, rules := range profiles {
+		prefix := normalizeManualPrefix(rawPrefix)
+		clean := make([]string, 0, len(rules))
+		for _, r := range rules {
+			r = strings.TrimSpace(r)
+			if r == "" {
+				continue
+			}
+			clean = append(clean, r)
+		}
+		cloned[prefix] = clean
+	}
+
+	manualTransferIgnoreState.mu.Lock()
+	manualTransferIgnoreState.enabled = true
+	manualTransferIgnoreState.profiles = cloned
+	manualTransferIgnoreState.mu.Unlock()
+}
+
+// ClearManualTransferIgnoreProfiles disables manual-transfer ignore mode.
+func ClearManualTransferIgnoreProfiles() {
+	manualTransferIgnoreState.mu.Lock()
+	manualTransferIgnoreState.enabled = false
+	manualTransferIgnoreState.profiles = nil
+	manualTransferIgnoreState.mu.Unlock()
+}
+
+func isManualTransferIgnoreModeEnabled() bool {
+	manualTransferIgnoreState.mu.RLock()
+	enabled := manualTransferIgnoreState.enabled
+	manualTransferIgnoreState.mu.RUnlock()
+	return enabled
+}
+
+func shouldIgnoreManualTransferPath(absRoot, path string, isDir bool, fallback func(string, bool) bool) bool {
+	manualTransferIgnoreState.mu.RLock()
+	enabled := manualTransferIgnoreState.enabled
+	profiles := manualTransferIgnoreState.profiles
+	manualTransferIgnoreState.mu.RUnlock()
+
+	if enabled {
+		return matchManualTransferIgnoreProfiles(absRoot, path, isDir, profiles)
+	}
+
+	if fallback != nil {
+		return fallback(path, isDir)
+	}
+
+	return false
+}
+
+func matchManualTransferIgnoreProfiles(absRoot, path string, isDir bool, profiles map[string][]string) bool {
+	if len(profiles) == 0 {
+		return false
+	}
+
+	rel, err := filepath.Rel(absRoot, path)
+	if err != nil {
+		rel = path
+	}
+	rel = normalizeManualPrefix(rel)
+
+	bestPrefix := ""
+	bestLen := -1
+	for prefix := range profiles {
+		if prefix == "" || rel == prefix || strings.HasPrefix(rel, prefix+"/") {
+			if len(prefix) > bestLen {
+				bestLen = len(prefix)
+				bestPrefix = prefix
+			}
+		}
+	}
+
+	if bestLen < 0 {
+		return false
+	}
+
+	target := rel
+	if bestPrefix != "" {
+		if rel == bestPrefix {
+			target = ""
+		} else {
+			target = strings.TrimPrefix(rel, bestPrefix+"/")
+		}
+	}
+
+	rules := profiles[bestPrefix]
+	matched := matchManualIgnoreRules(target, isDir, rules)
+	// If a directory is ignored by a broad rule (e.g. "*"), but a later
+	// negation might include files under it (e.g. "!test/file.txt"), do not
+	// skip that directory so the walker can reach included descendants.
+	if matched && isDir && manualIgnoreDirHasNegationDescendant(target, rules) {
+		return false
+	}
+
+	return matched
+}
+
+func matchManualIgnoreRules(rel string, isDir bool, rules []string) bool {
+	if len(rules) == 0 {
+		return false
+	}
+
+	rel = filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(rel), "./"))
+	matched := false
+
+	for _, raw := range rules {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || strings.HasPrefix(raw, "#") {
+			continue
+		}
+
+		neg := false
+		pat := raw
+		if strings.HasPrefix(pat, "!") {
+			neg = true
+			pat = strings.TrimSpace(strings.TrimPrefix(pat, "!"))
+		}
+		if pat == "" {
+			continue
+		}
+
+		if manualIgnorePatternMatch(pat, rel, isDir) {
+			matched = !neg
+		}
+	}
+
+	return matched
+}
+
+func manualIgnoreDirHasNegationDescendant(dirRel string, rules []string) bool {
+	dirRel = normalizeManualPrefix(dirRel)
+	for _, raw := range rules {
+		raw = strings.TrimSpace(raw)
+		if !strings.HasPrefix(raw, "!") {
+			continue
+		}
+
+		pat := normalizeManualPrefix(strings.TrimSpace(strings.TrimPrefix(raw, "!")))
+		if pat == "" {
+			continue
+		}
+
+		// For profile root, any negation can potentially include descendants.
+		if dirRel == "" {
+			return true
+		}
+
+		// Exact/prefix relation (non-glob) means this directory may contain
+		// explicitly included descendants.
+		if !strings.ContainsAny(pat, "*?[") {
+			if pat == dirRel || strings.HasPrefix(pat, dirRel+"/") {
+				return true
+			}
+			continue
+		}
+
+		// For glob patterns, use conservative checks to avoid false negative skip-dir.
+		if ok, _ := filepath.Match(pat, dirRel); ok {
+			return true
+		}
+
+		prefix := pat
+		if i := strings.IndexAny(prefix, "*?["); i >= 0 {
+			prefix = prefix[:i]
+		}
+		prefix = strings.TrimSuffix(prefix, "/")
+		if prefix == "" {
+			return true
+		}
+		if dirRel == prefix || strings.HasPrefix(prefix, dirRel+"/") || strings.HasPrefix(dirRel, prefix+"/") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func manualIgnorePatternMatch(pattern, rel string, isDir bool) bool {
+	pattern = normalizeManualPrefix(pattern)
+	rel = normalizeManualPrefix(rel)
+	if pattern == "" {
+		return false
+	}
+
+	if ok, _ := filepath.Match(pattern, rel); ok {
+		return true
+	}
+
+	base := filepath.Base(rel)
+	if ok, _ := filepath.Match(pattern, base); ok {
+		return true
+	}
+
+	if strings.HasPrefix(pattern, "**/") {
+		trimmed := strings.TrimPrefix(pattern, "**/")
+		if ok, _ := filepath.Match(trimmed, rel); ok {
+			return true
+		}
+		if ok, _ := filepath.Match(trimmed, base); ok {
+			return true
+		}
+	}
+
+	if strings.HasSuffix(pattern, "/**") {
+		dirPattern := strings.TrimSuffix(pattern, "/**")
+		if rel == dirPattern || strings.HasPrefix(rel, dirPattern+"/") {
+			return true
+		}
+	}
+
+	if !strings.ContainsAny(pattern, "*?[") {
+		if rel == pattern || strings.HasPrefix(rel, pattern+"/") {
+			return true
+		}
+		if base == pattern {
+			return true
+		}
+		if isDir && strings.HasSuffix(rel, "/"+pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // CompareAndUploadManualTransfer uploads only within the provided manual-transfer
 // prefixes. Each prefix is treated as its own subtree (two-head-loop), so we
 // never prune ancestor directories unintentionally. Prefixes must be relative
@@ -161,7 +398,7 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 			if rel == ".sync_temp" || strings.HasPrefix(rel, ".sync_temp/") || strings.Contains(rel, "/.sync_temp/") {
 				continue
 			}
-			if ic.Match(start, false) {
+			if shouldIgnoreManualTransferPath(absRoot, start, false, ic.Match) {
 				skippedIgnored++
 				continue
 			}
@@ -215,7 +452,9 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 
 			if p == start && d.IsDir() {
 				// Context-aware ignore check for root directory
-				if !isExplicitEndpoint(rel) && ic.Match(p, true) {
+				if shouldIgnoreManualTransferPath(absRoot, p, true, func(path string, isDir bool) bool {
+					return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+				}) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -230,7 +469,9 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 			}
 
 			// Context-aware ignore check: don't apply ignore patterns to explicit endpoints
-			if !isExplicitEndpoint(rel) && ic.Match(p, d.IsDir()) {
+			if shouldIgnoreManualTransferPath(absRoot, p, d.IsDir(), func(path string, isDir bool) bool {
+				return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+			}) {
 				if d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -634,6 +875,14 @@ func CompareAndDownloadManualTransferParallel(cfg *config.Config, localRoot stri
 			continue
 		}
 
+		// In manual-transfer ignore mode, ignore files by per-entry rules only.
+		if shouldIgnoreManualTransferPath(absRoot, localPath, false, nil) {
+			mu.Lock()
+			skippedIgnored++
+			mu.Unlock()
+			continue
+		}
+
 		// check local file
 		info, statErr := os.Stat(localPath)
 		if statErr != nil {
@@ -761,9 +1010,9 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 		for _, pr := range normPrefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(pr, "/")
-			// Treat empty prefix as an explicit endpoint (protect endpoints)
+			// Empty prefix means full-scope force push; it must still respect .sync_ignore.
 			if normalizedPr == "" {
-				return true
+				continue
 			}
 			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
@@ -897,7 +1146,9 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 		}
 
 		// Context-aware ignore check: don't apply ignore patterns to explicit endpoints
-		if !isExplicitEndpoint(relNorm) && ic.Match(localPath, false) {
+		if shouldIgnoreManualTransferPath(absRoot, localPath, false, func(path string, isDir bool) bool {
+			return !isExplicitEndpoint(relNorm) && ic.Match(path, isDir)
+		}) {
 			mu.Lock()
 			skippedIgnored++
 			mu.Unlock()
@@ -1004,7 +1255,9 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 				continue
 			}
 			// Context-aware ignore check: don't apply ignore patterns to explicit endpoints
-			if !isExplicitEndpoint(rel) && ic.Match(start, false) {
+			if shouldIgnoreManualTransferPath(absRoot, start, false, func(path string, isDir bool) bool {
+				return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+			}) {
 				continue
 			}
 			if _, seen := visited[rel]; seen {
@@ -1039,7 +1292,7 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 			rel = filepath.ToSlash(rel)
 
 			if p == start && d.IsDir() {
-				if ic.Match(p, true) {
+				if shouldIgnoreManualTransferPath(absRoot, p, true, ic.Match) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -1052,7 +1305,9 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 				return nil
 			}
 			// Context-aware ignore check: don't apply ignore patterns to explicit endpoints
-			if !isExplicitEndpoint(rel) && ic.Match(p, d.IsDir()) {
+			if shouldIgnoreManualTransferPath(absRoot, p, d.IsDir(), func(path string, isDir bool) bool {
+				return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+			}) {
 				if d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -1087,7 +1342,11 @@ func CompareAndDownloadManualTransferForce(cfg *config.Config, localRoot string,
 	util.Default.Printf("🧹 Force-Delete summary: deleted=%d, errors=%d\n", deleted, deleteErrors)
 
 	// Prune empty local directories left behind by deletions (respect ignore rules)
-	_ = pruneEmptyDirsLocal(absRoot, normPrefixes, ic)
+	pruneIgnore := ic
+	if isManualTransferIgnoreModeEnabled() {
+		pruneIgnore = nil
+	}
+	_ = pruneEmptyDirsLocal(absRoot, normPrefixes, pruneIgnore)
 
 	return downloaded, nil
 }
@@ -1148,9 +1407,9 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 		for _, pr := range normPrefixes {
 			// Normalize prefix by removing trailing slash for comparison
 			normalizedPr := strings.TrimSuffix(pr, "/")
-			// Treat empty prefix as an explicit endpoint (protect endpoints)
+			// Empty prefix means full-scope force push; it must still respect .sync_ignore.
 			if normalizedPr == "" {
-				return true
+				continue
 			}
 			if relPath == normalizedPr || strings.HasPrefix(relPath, normalizedPr+"/") {
 				return true
@@ -1278,7 +1537,9 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 				continue
 			}
 			// Context-aware ignore check: don't apply ignore patterns to explicit endpoints
-			if !isExplicitEndpoint(rel) && ic.Match(start, false) {
+			if shouldIgnoreManualTransferPath(absRoot, start, false, func(path string, isDir bool) bool {
+				return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+			}) {
 				skippedIgnored++
 				// still mark checked to avoid remote delete of ignored?
 				// Design: treat ignored as excluded (do not mark checked)
@@ -1330,7 +1591,9 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 
 			if p == start && d.IsDir() {
 				// Context-aware ignore check for root directory
-				if !isExplicitEndpoint(rel) && ic.Match(p, true) {
+				if shouldIgnoreManualTransferPath(absRoot, p, true, func(path string, isDir bool) bool {
+					return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+				}) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -1342,7 +1605,9 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 				return nil
 			}
 			// Context-aware ignore check: don't apply ignore patterns to explicit endpoints
-			if !isExplicitEndpoint(rel) && ic.Match(p, d.IsDir()) {
+			if shouldIgnoreManualTransferPath(absRoot, p, d.IsDir(), func(path string, isDir bool) bool {
+				return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+			}) {
 				if d.IsDir() {
 					return filepath.SkipDir
 				}
@@ -1461,7 +1726,9 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 		}
 		localPath := filepath.Join(absRoot, filepath.FromSlash(rel))
 		// Context-aware ignore check: don't apply ignore patterns to explicit endpoints
-		if !isExplicitEndpoint(rel) && ic.Match(localPath, false) {
+		if shouldIgnoreManualTransferPath(absRoot, localPath, false, func(path string, isDir bool) bool {
+			return !isExplicitEndpoint(rel) && ic.Match(path, isDir)
+		}) {
 			continue
 		}
 		// checked determination

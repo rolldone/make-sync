@@ -36,16 +36,157 @@ type SyncCollection struct {
 }
 
 type Devsync struct {
-	OSTarget       string            `yaml:"os_target"`
-	SizeLimit      int               `yaml:"size_limit,omitempty"` // Size limit in MB, 0 = no limit, default 0 (no limit)
-	AgentName      string            `yaml:"agent_name,omitempty"` // Unique identifier for agent process
-	Auth           Auth              `yaml:"auth"`
-	Ignores        []string          `yaml:"ignores"`
-	AgentWatchs    []string          `yaml:"agent_watchs"`
-	ManualTransfer []string          `yaml:"manual_transfer"`
-	Concurrency    int               `yaml:"concurrency,omitempty"`
-	Script         Script            `yaml:"script"`
-	TriggerPerm    TriggerPermission `yaml:"trigger_permission"`
+	OSTarget       string   `yaml:"os_target"`
+	SizeLimit      int      `yaml:"size_limit,omitempty"` // Size limit in MB, 0 = no limit, default 0 (no limit)
+	AgentName      string   `yaml:"agent_name,omitempty"` // Unique identifier for agent process
+	Auth           Auth     `yaml:"auth"`
+	Ignores        []string `yaml:"ignores"`
+	AgentWatchs    []string `yaml:"agent_watchs"`
+	ManualTransfer []string `yaml:"manual_transfer"`
+	// ManualTransferIgnores stores per-path ignore rules parsed from
+	// object-style manual_transfer entries. Keys are raw configured paths.
+	ManualTransferIgnores map[string][]string `yaml:"-"`
+	Concurrency           int                 `yaml:"concurrency,omitempty"`
+	Script                Script              `yaml:"script"`
+	TriggerPerm           TriggerPermission   `yaml:"trigger_permission"`
+}
+
+// UnmarshalYAML supports dual manual_transfer format:
+// - string item: "vendor"
+// - object item: { path: "vendor", ignores: ["lib_a", "!lib_a/keep.txt"] }
+func (d *Devsync) UnmarshalYAML(value *yaml.Node) error {
+	type rawDevsync struct {
+		OSTarget    string            `yaml:"os_target"`
+		SizeLimit   int               `yaml:"size_limit,omitempty"`
+		AgentName   string            `yaml:"agent_name,omitempty"`
+		Auth        Auth              `yaml:"auth"`
+		Ignores     []string          `yaml:"ignores"`
+		AgentWatchs []string          `yaml:"agent_watchs"`
+		Concurrency int               `yaml:"concurrency,omitempty"`
+		Script      Script            `yaml:"script"`
+		TriggerPerm TriggerPermission `yaml:"trigger_permission"`
+	}
+
+	var raw rawDevsync
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	manualPaths, manualIgnores, err := parseManualTransferNode(getMapValueNode(value, "manual_transfer"))
+	if err != nil {
+		return err
+	}
+
+	d.OSTarget = raw.OSTarget
+	d.SizeLimit = raw.SizeLimit
+	d.AgentName = raw.AgentName
+	d.Auth = raw.Auth
+	d.Ignores = raw.Ignores
+	d.AgentWatchs = raw.AgentWatchs
+	d.ManualTransfer = manualPaths
+	d.ManualTransferIgnores = manualIgnores
+	d.Concurrency = raw.Concurrency
+	d.Script = raw.Script
+	d.TriggerPerm = raw.TriggerPerm
+
+	return nil
+}
+
+func getMapValueNode(node *yaml.Node, key string) *yaml.Node {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k := node.Content[i]
+		v := node.Content[i+1]
+		if strings.TrimSpace(k.Value) == key {
+			return v
+		}
+	}
+	return nil
+}
+
+func parseManualTransferNode(node *yaml.Node) ([]string, map[string][]string, error) {
+	paths := make([]string, 0)
+	ignoresByPath := make(map[string][]string)
+	if node == nil || node.Kind == 0 {
+		return paths, ignoresByPath, nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, nil, fmt.Errorf("devsync.manual_transfer must be an array")
+	}
+
+	for i, entry := range node.Content {
+		switch entry.Kind {
+		case yaml.ScalarNode:
+			p := strings.TrimSpace(entry.Value)
+			if p == "" {
+				continue
+			}
+			paths = append(paths, p)
+		case yaml.MappingNode:
+			pathNode := getMapValueNode(entry, "path")
+			p := ""
+			if pathNode != nil {
+				p = strings.TrimSpace(pathNode.Value)
+			}
+			if p == "" {
+				return nil, nil, fmt.Errorf("devsync.manual_transfer[%d].path cannot be empty", i)
+			}
+			paths = append(paths, p)
+
+			clean, err := parseIgnoreRulesNode(getMapValueNode(entry, "ignores"))
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid devsync.manual_transfer[%d].ignores: %w", i, err)
+			}
+			if len(clean) > 0 {
+				ignoresByPath[p] = clean
+			}
+		default:
+			return nil, nil, fmt.Errorf("devsync.manual_transfer[%d] must be string or object", i)
+		}
+	}
+
+	return paths, ignoresByPath, nil
+}
+
+func parseIgnoreRulesNode(node *yaml.Node) ([]string, error) {
+	if node == nil || node.Kind == 0 {
+		return nil, nil
+	}
+	if node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("must be an array")
+	}
+
+	out := make([]string, 0, len(node.Content))
+	for _, item := range node.Content {
+		if item.Kind != yaml.ScalarNode {
+			continue
+		}
+
+		rule := strings.TrimSpace(item.Value)
+		// Unquoted '!pattern' is parsed as a YAML tag with empty scalar value.
+		// Reconstruct it so users can write !foo/bar directly.
+		if rule == "" && strings.HasPrefix(item.Tag, "!") && item.Tag != "!!str" {
+			rawTag := strings.TrimSpace(strings.TrimPrefix(item.Tag, "!"))
+			if rawTag != "" {
+				rule = "!" + rawTag
+			}
+		}
+
+		if rule == "" {
+			continue
+		}
+		out = append(out, rule)
+	}
+
+	return out, nil
 }
 
 type Auth struct {

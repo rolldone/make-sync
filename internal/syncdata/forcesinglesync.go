@@ -2,7 +2,6 @@ package syncdata
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -17,25 +16,49 @@ func isBypassMode(modeChoice string) bool {
 	return strings.Contains(modeChoice, "(Bypass)")
 }
 
-// readNegationPatterns reads .sync_ignore in the given root and returns lines
-// starting with '!' with leading '!' and whitespace trimmed.
-func readNegationPatterns(root string) []string {
-	path := filepath.Join(root, ".sync_ignore")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
+func normalizeManualPrefix(prefix string) string {
+	prefix = filepath.ToSlash(strings.TrimSpace(prefix))
+	prefix = strings.TrimPrefix(prefix, "/")
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "." {
+		return ""
 	}
-	lines := strings.Split(string(data), "\n")
-	out := make([]string, 0)
-	for _, l := range lines {
-		t := strings.TrimSpace(l)
-		if strings.HasPrefix(t, "!") {
-			p := strings.TrimSpace(strings.TrimPrefix(t, "!"))
-			if p != "" {
-				out = append(out, p)
+	return prefix
+}
+
+func buildManualIgnoreProfilesForSelection(cfg *config.Config, absRoot string, selectedPrefixes []string) map[string][]string {
+	out := make(map[string][]string)
+	if cfg == nil || len(cfg.Devsync.ManualTransferIgnores) == 0 || len(selectedPrefixes) == 0 {
+		return out
+	}
+
+	selected := make(map[string]struct{}, len(selectedPrefixes))
+	for _, p := range selectedPrefixes {
+		selected[normalizeManualPrefix(p)] = struct{}{}
+	}
+
+	for rawPath, rules := range cfg.Devsync.ManualTransferIgnores {
+		rels := normalizeToRelativePrefixes(absRoot, []string{rawPath})
+		for _, rel := range rels {
+			rel = normalizeManualPrefix(rel)
+			if _, ok := selected[rel]; !ok {
+				continue
+			}
+
+			clean := make([]string, 0, len(rules))
+			for _, r := range rules {
+				r = strings.TrimSpace(r)
+				if r == "" {
+					continue
+				}
+				clean = append(clean, r)
+			}
+			if len(clean) > 0 {
+				out[rel] = clean
 			}
 		}
 	}
+
 	return out
 }
 
@@ -67,14 +90,13 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 		// folder selection menu
 		for {
 			// construct folder choices
-			items := make([]string, 0, len(registered)+4)
+			items := make([]string, 0, len(registered)+3)
 			items = append(items, registered...)
 			items = append(items, "----------")
 			// Add a manual refresh action so users can reload `make-sync.yaml` without
 			// restarting the app.
 			items = append(items, "Refresh sync folders")
 			items = append(items, "All data registered in manual_sync only")
-			items = append(items, "All Data Only In Your \"Sync Ignore\" File Pattern")
 			items = append(items, "Back Previous / Exit")
 
 			folderChoice, err := tui.ShowMenuWithPrints(items, "? Single Sync : Which folder :")
@@ -113,17 +135,6 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 					util.Default.Println("ℹ️  No registered paths found.")
 					continue
 				}
-			case "All Data Only In Your \"Sync Ignore\" File Pattern":
-				// read negation patterns from localRoot
-				neg := readNegationPatterns(localRoot)
-				if len(neg) == 0 {
-					util.Default.Println("ℹ️  No negation patterns found in .sync_ignore")
-					continue
-				}
-				// use negation patterns as prefixes
-				for _, p := range neg {
-					prefixes = append(prefixes, filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(p), "/")))
-				}
 			default:
 				// assume it's a registered path - normalize single entry
 				single := strings.TrimSpace(folderChoice)
@@ -154,130 +165,96 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			// execute selected action
 			// small debug: show prefixes used
 			util.Default.Printf("🔎 Using prefixes: %v\n", prefixes)
+			manualProfiles := buildManualIgnoreProfilesForSelection(cfg, absRoot, prefixes)
 
-			switch choice {
-			case "Download":
-				util.Default.Printf("🔁 Running Download (%s) for prefixes: %v\n", modeChoice, prefixes)
-				// Mirror safe_pull_sync: build agent (with fallback) and run remote indexing first
-				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice), prefixes); err != nil {
-					util.Default.Printf("❌ Remote indexing (safe_pull) failed: %v\n", err)
-					continue
-				}
-				var downloaded []string
-				// If selection is "All Data Only In Your \"Sync Ignore\" File Pattern", we should use include-pattern logic
-				if folderChoice == "All Data Only In Your \"Sync Ignore\" File Pattern" {
-					neg := readNegationPatterns(localRoot)
-					if strings.Contains(modeChoice, "Force") {
-						// confirm destructive action
-						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
-						if cerr != nil {
-							util.Default.Printf("❌ Captcha error: %v\n", cerr)
-							continue
-						}
-						if !ok {
-							continue
-						}
-						downloaded, err = CompareAndDownloadByIgnoreIncludesForce(cfg, localRoot, neg)
-					} else {
-						downloaded, err = CompareAndDownloadByIgnoreIncludes(cfg, localRoot, neg)
-					}
+			func() {
+				if isBypassMode(modeChoice) {
+					// Manual sync bypass mode: disable all ignore filtering.
+					SetManualTransferIgnoreProfiles(map[string][]string{})
 				} else {
+					// Manual sync safe/force: use per-entry ignores from manual_transfer objects only.
+					SetManualTransferIgnoreProfiles(manualProfiles)
+				}
+				defer ClearManualTransferIgnoreProfiles()
+
+				switch choice {
+				case "Download":
+					util.Default.Printf("🔁 Running Download (%s) for prefixes: %v\n", modeChoice, prefixes)
+					// Single-sync indexing intentionally bypasses remote .sync_ignore.
+					if err := runRemoteIndexingForPull(cfg, true, prefixes); err != nil {
+						util.Default.Printf("❌ Remote indexing (safe_pull) failed: %v\n", err)
+						return
+					}
+
+					var downloaded []string
 					if strings.Contains(modeChoice, "Force") {
-						// Force mode: confirm then perform rsync --delete semantics within prefixes (parallel)
 						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
 						if cerr != nil {
 							util.Default.Printf("❌ Captcha error: %v\n", cerr)
-							continue
+							return
 						}
 						if !ok {
-							continue
+							return
 						}
 						downloaded, err = CompareAndDownloadManualTransferForceParallel(cfg, localRoot, prefixes)
-					} else if strings.Contains(modeChoice, "Safe") {
-						// Safe mode: rsync semantics within prefixes (parallel)
-						// For bypass-safe we want to bypass ignore checks; detect by 'Bypass' substring
-						if strings.Contains(modeChoice, "Bypass") {
-							downloaded, err = CompareAndDownloadManualTransferBypassParallel(cfg, localRoot, prefixes)
-						} else {
-							downloaded, err = CompareAndDownloadManualTransferParallel(cfg, localRoot, prefixes)
-						}
+					} else if strings.Contains(modeChoice, "Bypass") {
+						downloaded, err = CompareAndDownloadManualTransferBypassParallel(cfg, localRoot, prefixes)
 					} else {
 						downloaded, err = CompareAndDownloadManualTransferParallel(cfg, localRoot, prefixes)
 					}
-				}
-				if err != nil {
-					util.Default.Printf("❌ Download failed: %v\n", err)
-				} else {
+
+					if err != nil {
+						util.Default.Printf("❌ Download failed: %v\n", err)
+						return
+					}
 					if len(downloaded) == 0 {
 						util.Default.Println("✅ No files downloaded (nothing matched or already up-to-date)")
-					} else {
-						util.Default.Printf("⬇️  Downloaded %d files:\n", len(downloaded))
-						for _, f := range downloaded {
-							util.Default.Printf(" - %s\n", f)
-						}
+						return
 					}
-				}
-			case "Upload":
-				util.Default.Printf("🔁 Running Upload (%s) for prefixes: %v\n", modeChoice, prefixes)
-				// Mirror safe_push_sync: run remote indexing first so DB is fresh
-				if err := runRemoteIndexingForPull(cfg, isBypassMode(modeChoice), prefixes); err != nil {
-					util.Default.Printf("❌ Remote indexing (safe_push) failed: %v\n", err)
-					continue
-				}
-				var uploaded []string
-				// If selection is "All Data Only In Your \"Sync Ignore\" File Pattern", use include-pattern Upload
-				if folderChoice == "All Data Only In Your \"Sync Ignore\" File Pattern" {
-					neg := readNegationPatterns(localRoot)
+					util.Default.Printf("⬇️  Downloaded %d files:\n", len(downloaded))
+					for _, f := range downloaded {
+						util.Default.Printf(" - %s\n", f)
+					}
+
+				case "Upload":
+					util.Default.Printf("🔁 Running Upload (%s) for prefixes: %v\n", modeChoice, prefixes)
+					// Single-sync indexing intentionally bypasses remote .sync_ignore.
+					if err := runRemoteIndexingForPull(cfg, true, prefixes); err != nil {
+						util.Default.Printf("❌ Remote indexing (safe_push) failed: %v\n", err)
+						return
+					}
+
+					var uploaded []string
 					if strings.Contains(modeChoice, "Force") {
 						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
 						if cerr != nil {
 							util.Default.Printf("❌ Captcha error: %v\n", cerr)
-							continue
+							return
 						}
 						if !ok {
-							continue
-						}
-						uploaded, err = CompareAndUploadByIgnoreIncludesForce(cfg, localRoot, neg)
-					} else {
-						uploaded, err = CompareAndUploadByIgnoreIncludes(cfg, localRoot, neg)
-					}
-				} else {
-					if strings.Contains(modeChoice, "Force") {
-						ok, cerr := tui.ConfirmWithCaptcha("This action may delete files on remote/local. Proceed?", 3)
-						if cerr != nil {
-							util.Default.Printf("❌ Captcha error: %v\n", cerr)
-							continue
-						}
-						if !ok {
-							continue
+							return
 						}
 						uploaded, err = CompareAndUploadManualTransferForceParallel(cfg, localRoot, prefixes)
-					} else if strings.Contains(modeChoice, "Safe") {
-						// Safe mode: upload within prefixes
-						if strings.Contains(modeChoice, "Bypass") {
-							uploaded, err = CompareAndUploadManualTransferBypassParallel(cfg, localRoot, prefixes)
-						} else {
-							uploaded, err = CompareAndUploadManualTransfer(cfg, localRoot, prefixes)
-						}
+					} else if strings.Contains(modeChoice, "Bypass") {
+						uploaded, err = CompareAndUploadManualTransferBypassParallel(cfg, localRoot, prefixes)
 					} else {
 						uploaded, err = CompareAndUploadManualTransfer(cfg, localRoot, prefixes)
 					}
-				}
-				if err != nil {
-					util.Default.Printf("❌ Upload failed: %v\n", err)
-				} else {
+
+					if err != nil {
+						util.Default.Printf("❌ Upload failed: %v\n", err)
+						return
+					}
 					if len(uploaded) == 0 {
 						util.Default.Println("✅ No files uploaded (nothing matched or already up-to-date)")
-					} else {
-						util.Default.Printf("⬆️  Uploaded %d files:\n", len(uploaded))
-						for _, f := range uploaded {
-							util.Default.Printf(" - %s\n", f)
-						}
+						return
+					}
+					util.Default.Printf("⬆️  Uploaded %d files:\n", len(uploaded))
+					for _, f := range uploaded {
+						util.Default.Printf(" - %s\n", f)
 					}
 				}
-			default:
-				// no-op
-			}
+			}()
 			// after operation, return to folder selection (per stepwise behavior)
 		}
 	}

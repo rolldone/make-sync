@@ -1,6 +1,6 @@
 # make-sync
 
-CLI untuk sinkronisasi file/devsync via SSH, dengan mode aman (safe pull/push), menu interaktif, dan dukungan manual sync berbasis path terdaftar maupun pola `!` dari `.sync_ignore`.
+CLI untuk sinkronisasi file/devsync via SSH, dengan mode aman (safe pull/push), menu interaktif, dan dukungan manual sync berbasis path terdaftar serta ignore per-item di `devsync.manual_transfer`.
 
 PERINGATAN: Fitur "Pipeline System" telah dihapus dari rilis saat ini. Bagian pipeline di README ini dipertahankan sebagai arsip/dokumentasi lama saja — fitur tidak lagi didukung. Untuk migrasi atau akses arsip, lihat dokumentasi internal atau hubungi tim.
 
@@ -8,13 +8,14 @@ PERINGATAN: Fitur "Pipeline System" telah dihapus dari rilis saat ini. Bagian pi
 - Safe Pull/Push: indeks remote (SQLite) dibuat dulu, lalu bandingkan hash untuk unduh/unggah yang berubah saja.
 - Manual/Single Sync Menu:
   - Download/Upload
-  - Pilih folder: salah satu path terdaftar, semua yang terdaftar, atau berdasarkan pola `!` di `.sync_ignore`
-  - Mode: Rsync Soft (tanpa delete) atau Rsync Force (dengan delete terbatas scope)
+  - Pilih folder: salah satu path terdaftar atau semua yang terdaftar
+  - Ignore per folder ditentukan di `devsync.manual_transfer` (string = path saja, object = path + ignores)
+  - Mode: Soft (tanpa delete) atau Force (dengan delete terbatas scope)
   - Catatan: opsi "Bypass" telah dihapus dari menu top-level Pull/Push. Opsi bypass-ignore masih tersedia sebagai flag CLI/agent untuk pengguna lanjutan, tetapi tidak ditampilkan pada menu interaktif utama untuk mencegah penghapusan tak sengaja.
 - Force Mode (Rsync-like delete):
   - Download Force: hapus file lokal yang tidak ada di DB remote dalam scope pilihan
   - Upload Force: hapus file remote yang tidak ada di lokal (gunakan kolom `checked` di DB bila ada)
-- `.sync_ignore` cerdas: menghormati `.sync_temp` dan pola wildcard (termasuk `**`), serta mendukung "include by negation" via `!pattern`.
+  - Global `.sync_ignore` cerdas: menghormati `.sync_temp` dan pola wildcard (termasuk `**`) untuk flow global; Single/Manual Sync memakai ignore per-item di `devsync.manual_transfer`.
 - SSH Agent Remote: otomatis build atau pakai fallback binary, jalankan indexing di remote, unduh DB.
 
 ## Instalasi & Build
@@ -36,7 +37,7 @@ Jika ingin menjalankan seluruh test (yang ada):
 # Review output after execution
 # make-sync
 
-CLI untuk sinkronisasi file/devsync via SSH, dengan mode aman (safe pull/push), menu interaktif, dan dukungan manual sync berbasis path terdaftar maupun pola `!` dari `.sync_ignore`.
+CLI untuk sinkronisasi file/devsync via SSH, dengan mode aman (safe pull/push), menu interaktif, dan dukungan manual sync berbasis path terdaftar serta ignore per-item di `devsync.manual_transfer`.
 
 **PERINGATAN:** Fitur "Pipeline System" telah dihapus dari rilis saat ini. Jika Anda mencari dokumentasi lama tentang pipeline, silakan lihat arsip internal atau hubungi tim — fitur tersebut tidak lagi didukung.
 
@@ -44,13 +45,14 @@ CLI untuk sinkronisasi file/devsync via SSH, dengan mode aman (safe pull/push), 
 - Safe Pull/Push: indeks remote (SQLite) dibuat dulu, lalu bandingkan hash untuk unduh/unggah yang berubah saja.
 - Manual/Single Sync Menu:
   - Download/Upload
-  - Pilih folder: salah satu path terdaftar, semua yang terdaftar, atau berdasarkan pola `!` di `.sync_ignore`
-  - Mode: Rsync Soft (tanpa delete) atau Rsync Force (dengan delete terbatas scope)
+  - Pilih folder: salah satu path terdaftar atau semua yang terdaftar
+  - Ignore per folder ditentukan di `devsync.manual_transfer` (string = path saja, object = path + ignores)
+  - Mode: Soft (tanpa delete) atau Force (dengan delete terbatas scope)
   - Catatan: opsi "Bypass" telah dihapus dari menu top-level Pull/Push. Opsi bypass-ignore masih tersedia sebagai flag CLI/agent untuk pengguna lanjutan, tetapi tidak ditampilkan pada menu interaktif utama untuk mencegah penghapusan tak sengaja.
 - Force Mode (Rsync-like delete):
   - Download Force: hapus file lokal yang tidak ada di DB remote dalam scope pilihan
   - Upload Force: hapus file remote yang tidak ada di lokal (gunakan kolom `checked` di DB bila ada)
-- `.sync_ignore` cerdas: menghormati `.sync_temp` dan pola wildcard (termasuk `**`), serta mendukung "include by negation" via `!pattern`.
+  - Global `.sync_ignore` cerdas: menghormati `.sync_temp` dan pola wildcard (termasuk `**`) untuk flow global; Single/Manual Sync memakai ignore per-item di `devsync.manual_transfer`.
 - SSH Agent Remote: otomatis build atau pakai fallback binary, jalankan indexing di remote, unduh DB.
 
 ## Instalasi & Build
@@ -87,13 +89,17 @@ devsync:
     - .sync_temp
   manual_transfer:
     - src
-    - assets/images
+    - path: assets/images
+      ignores:
+        - "*"
+        - "!test/kokok.txt"
 ```
 
 Catatan:
 - `devsync.auth.remote_path` adalah root project di remote.
-- `devsync.manual_transfer` adalah daftar path yang ditampilkan di menu Manual/Single Sync.
-- `.sync_ignore` di root mengatur pola ignore biasa, dan juga bisa memuat pola negasi `!pattern` untuk fitur include-by-pattern.
+- `devsync.manual_transfer` bisa berisi string path sederhana atau object `{ path, ignores }`.
+- `manual_transfer` object memakai `ignores` lokal ke path tersebut; pattern negasi `!pattern` sebaiknya di-quote di YAML, misalnya `"!test/kokok.txt"`.
+- `.sync_ignore` di root tetap dipakai oleh flow global, tetapi Manual/Single Sync memakai ignore dari `devsync.manual_transfer`.
 
 ## Konfigurasi Direct Access (SSH Config)
 
@@ -130,10 +136,10 @@ RemoteCommand: cd =remotePath && bash -l
 4. Pilih scope:
    - Salah satu path terdaftar (dari `devsync.manual_transfer`)
    - "All data registered in manual_sync only" (semua path terdaftar)
-   - "All Data Only In Your \"Sync Ignore\" File Pattern" (berdasarkan `!patterns` dari `.sync_ignore`)
+  - Jika entry `manual_transfer` bertipe object, ignore mengikuti rules di entry itu
 5. Pilih mode:
-  - Rsync Soft Mode: hanya transfer file yang berubah, tanpa penghapusan
-  - Rsync Force Mode: selain transfer, juga melakukan penghapusan file yang tidak ada pada sisi lain, terbatas pada scope pilihan
+  - Soft Mode: hanya transfer file yang berubah, tanpa penghapusan
+  - Force Mode: selain transfer, juga melakukan penghapusan file yang tidak ada pada sisi lain, terbatas pada scope pilihan, dan tetap menghormati ignore per-item `manual_transfer`
   - Catatan: Mode Force sekarang dilindungi dengan konfirmasi captcha untuk operasi destruktif. Ini mencegah eksekusi Force oleh kelalaian. Jika Anda perlu menggunakan bypass-ignore, gunakan flag CLI/agent dengan kehati-hatian.
 
 Selama Download/Upload:
@@ -149,10 +155,12 @@ Selama Download/Upload:
 - Download Force: setelah unduh, hapus file lokal yang match scope namun tidak ada di DB remote.
 - Upload Soft: unggah file lokal yang belum ada atau hash berbeda, dalam scope.
 - Upload Force: tandai setiap file lokal yang diproses sebagai `checked` (di DB bila tersedia), lalu hapus file remote match scope yang tidak `checked`.
-- Scope "Sync Ignore !patterns":
-  - Matcher dibangun dengan basis ignore semua (`**`), lalu di-"unignore" oleh tiap negation pattern (ditambah varian `**/` untuk token pendek).
+- Scope `manual_transfer` ignores:
+  - Entry string berarti path saja, tanpa ignore tambahan.
+  - Entry object mendukung `ignores` lokal ke path tersebut.
+  - `ignores` mendukung wildcard (`*`, `**`) dan negation `!pattern`.
   - `.sync_temp` selalu diabaikan.
-  - Pola ignore `.sync_ignore` tetap dihormati saat traversing.
+  - Untuk include satu file di subtree yang di-ignore, pakai pattern negasi yang di-quote di YAML, misalnya `"!test/kokok.txt"`.
 
 ## Tips & Batasan
 - Pastikan `devsync.auth` terisi benar untuk koneksi SSH.
@@ -162,7 +170,7 @@ Selama Download/Upload:
 
 ### Catatan tentang `.sync_temp` dan ignore
 - `.sync_temp` selalu dikecualikan dari sinkronisasi.
-- Pola di `.sync_ignore` tetap dihormati saat traversal lokal.
+- `.sync_ignore` tetap dipakai oleh flow global, tetapi Manual/Single Sync mengikuti ignore rules per-item di `devsync.manual_transfer`.
 
 ## Eksekusi Perintah Remote (exec)
 
@@ -217,8 +225,8 @@ Troubleshooting:
   - Cek apakah hash sama atau scope/pola tidak match.
 - Gagal indexing remote:
   - Periksa kredensial SSH, jalur `remote_path`, dan izin eksekusi pada binary agent (Unix: chmod +x).
-- Pola `!pattern` tidak bekerja:
-  - Pastikan `.sync_ignore` ada di root lokal, setiap pattern pada baris terpisah, tanpa komentar. Gunakan `**/` untuk menjangkau subfolder jika perlu.
+- Pola `!pattern` pada `manual_transfer` object tidak bekerja:
+  - Pastikan `ignores` ditulis sebagai array string dan pattern negasi di-quote jika diawali `!`, misalnya `"!test/kokok.txt"`.
 
 ## Lisensi
 Proyek ini mengikuti lisensi yang ditentukan oleh pemilik repositori.
