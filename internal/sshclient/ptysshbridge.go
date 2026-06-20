@@ -604,7 +604,7 @@ func (bridge *PTYSSHBridge) Resume() error {
 	return nil
 }
 
-// Close closes bridge
+// Close closes bridge with a timeout to prevent hanging on laggy SSH connections.
 func (bridge *PTYSSHBridge) Close() error {
 	bridge.outputDisabled = true
 	log.Println("PTYSSHBridge : Close called, output disabled")
@@ -624,9 +624,19 @@ func (bridge *PTYSSHBridge) Close() error {
 		log.Println("PTYSSHBridge : localTTY closed")
 	}
 
+	// Close sshSession with a 3-second timeout to avoid hanging on laggy connections
 	if bridge.sshSession != nil {
-		bridge.sshSession.Close()
-		log.Println("PTYSSHBridge : sshSession closed")
+		done := make(chan struct{}, 1)
+		go func() {
+			bridge.sshSession.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+			log.Println("PTYSSHBridge : sshSession closed")
+		case <-time.After(3 * time.Second):
+			log.Println("PTYSSHBridge : sshSession close timed out after 3s, forcing shutdown")
+		}
 	}
 	if bridge.localPTY != nil {
 		_ = bridge.localPTY.Close()

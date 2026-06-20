@@ -22,6 +22,8 @@ type PTYLocalBridge struct {
 	StdinObserver  func([]byte)
 	outputDisabled bool
 	outputMu       sync.Mutex
+	overlayActive  bool
+	overlayMu      sync.Mutex
 
 	outputCache []byte
 	cacheMu     sync.Mutex

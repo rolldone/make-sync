@@ -23,15 +23,20 @@ type PTYSession struct {
 
 // PTYManager manages multiple persistent PTY sessions (slots 3..9)
 type PTYManager struct {
-	w                *Watcher
-	sessions         map[int]*PTYSession
-	Pendingchan      chan string  // channel to send pause/unpause/exit commands
-	mu               sync.RWMutex // protect sessions map
-	pendingMu        sync.Mutex   // protect Pendingchan creation/close
-	bridgeActive     Bridge       // currently active bridge (if any)
-	routerStop       chan struct{}
-	wgGroup          sync.WaitGroup
-	bridgeActiveSlot int // slot number of currently active bridge
+	w                    *Watcher
+	sessions             map[int]*PTYSession
+	Pendingchan          chan string  // channel to send pause/unpause/exit commands
+	mu                   sync.RWMutex // protect sessions map
+	pendingMu            sync.Mutex   // protect Pendingchan creation/close
+	bridgeActive         Bridge       // currently active bridge (if any)
+	routerStop           chan struct{}
+	wgGroup              sync.WaitGroup
+	bridgeActiveSlot     int  // slot number of currently active bridge
+	controlMenuRequested bool // set when user presses Alt+N on active slot → show control menu
+	controlMenuSlot      int  // the slot number for which control menu was requested
+	controlMenuMu        sync.Mutex
+	activeChansClosed    bool // true when Pendingchan+routerStop already closed for current active session
+	activeChansClosedMu  sync.Mutex
 }
 
 // setPending sets the Pendingchan under lock
@@ -47,6 +52,22 @@ func NewPTYManager(w *Watcher) *PTYManager {
 		w:        w,
 		sessions: make(map[int]*PTYSession),
 	}
+}
+
+// IsControlMenuRequested returns true if the user pressed Alt+N on the active slot
+// and a control menu should be shown. The slot number is also returned.
+func (m *PTYManager) IsControlMenuRequested() (bool, int) {
+	m.controlMenuMu.Lock()
+	defer m.controlMenuMu.Unlock()
+	return m.controlMenuRequested, m.controlMenuSlot
+}
+
+// ResetControlMenuRequested clears the control menu request flag.
+func (m *PTYManager) ResetControlMenuRequested() {
+	m.controlMenuMu.Lock()
+	m.controlMenuRequested = false
+	m.controlMenuSlot = 0
+	m.controlMenuMu.Unlock()
 }
 
 // OpenRemoteSlot creates (but does not attach) a remote PTY session in the given slot.
@@ -122,6 +143,9 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 	// central stdin router: reads os.Stdin and forwards to active bridge's stdin writer.
 	// It also detects Ctrl+G (0x07) to pause and ESC+digit (Alt+[n]) to trigger slot switch.
 	m.routerStop = make(chan struct{})
+	m.activeChansClosedMu.Lock()
+	m.activeChansClosed = false
+	m.activeChansClosedMu.Unlock()
 
 	// Setup input listeners ONCE - no need to re-setup in loop
 	m.bridgeActive.SetOnInputListener(func(b []byte) {
@@ -138,10 +162,18 @@ func (m *PTYManager) Focus(slot int, isExist bool, callback func(slotNew int)) e
 				}
 			}
 			if newSlot != "" {
-				// fmt.Println("DEBUG: input hit digits:", digits)
 				gg, err := strconv.Atoi(newSlot)
 				if err != nil {
 					fmt.Println("DEBUG: invalid slot number:", newSlot)
+					return
+				}
+				// Alt+N on same slot → control menu, not slot switch
+				if gg == slot {
+					m.controlMenuMu.Lock()
+					m.controlMenuRequested = true
+					m.controlMenuSlot = slot
+					m.controlMenuMu.Unlock()
+					m.PauseSlot(slot)
 					return
 				}
 				callback(gg)
@@ -245,8 +277,13 @@ func (m *PTYManager) PauseSlot(slot int) error {
 	s.Bridge.SetOnInputHitCodeListener(nil)
 	err := s.Bridge.Pause()
 
-	close(m.Pendingchan)
-	close(m.routerStop)
+	m.activeChansClosedMu.Lock()
+	if !m.activeChansClosed {
+		close(m.Pendingchan)
+		close(m.routerStop)
+		m.activeChansClosed = true
+	}
+	m.activeChansClosedMu.Unlock()
 	return err
 }
 
@@ -271,10 +308,6 @@ func (m *PTYManager) CloseSlot(slot int) error {
 
 	// util.Default.ClearScreen()
 	// time.Sleep(400 * time.Millisecond)
-	util.Default.Resume()
-	util.Default.PrintBlock("", true)
-	util.Default.PrintBlock("🔌 Remote PTY session closed. Press Enter to return menu...", true)
-	log.Println("PTYManager: Remote PTY session closed. Press Enter to return menu...")
 
 	m.mu.Lock()
 	s, ok := m.sessions[slot]
@@ -296,11 +329,15 @@ func (m *PTYManager) CloseSlot(slot int) error {
 	}
 	log.Println("PTYManager: Bridge closed for slot", slot)
 
-	// cleanup
-	close(m.routerStop)
+	// cleanup — safe against double-close (PauseSlot may have already closed them)
+	m.activeChansClosedMu.Lock()
+	if !m.activeChansClosed {
+		close(m.routerStop)
+		close(m.Pendingchan)
+		m.activeChansClosed = true
+	}
+	m.activeChansClosedMu.Unlock()
 	log.Println("PTYManager: routerStop channel closed")
-	close(m.Pendingchan)
-	log.Println("PTYManager: Pendingchan channel closed")
 
 	log.Println("PTYManager: Waiting for goroutines to finish")
 
@@ -313,6 +350,16 @@ func (m *PTYManager) HasSlot(slot int) bool {
 	defer m.mu.RUnlock()
 	_, ok := m.sessions[slot]
 	return ok
+}
+
+// GetSlotCmd returns the original command for a slot, or empty string.
+func (m *PTYManager) GetSlotCmd(slot int) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if s, ok := m.sessions[slot]; ok && s != nil {
+		return s.Cmd
+	}
+	return ""
 }
 
 func (m *PTYManager) ListSlots() []int {

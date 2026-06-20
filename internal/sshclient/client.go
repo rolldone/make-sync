@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"make-sync/internal/util"
 	"os"
 	"path"
@@ -127,6 +128,22 @@ func (c *SSHClient) Close() error {
 		return c.client.Close()
 	}
 	return nil
+}
+
+// Reconnect force-closes the old TCP connection and establishes a fresh one.
+// This is used when the connection is lagging and normal Close would hang.
+func (c *SSHClient) Reconnect() error {
+	log.Println("SSHClient: Reconnect — force closing old connection")
+	// Force close old connection (ignore errors — we don't care)
+	if c.client != nil {
+		_ = c.client.Close()
+		c.client = nil
+	}
+	// Brief pause for OS to release the port
+	time.Sleep(200 * time.Millisecond)
+	// Establish fresh connection
+	log.Println("SSHClient: Reconnect — dialing new connection")
+	return c.Connect()
 }
 
 // UploadFile uploads a local file to remote server

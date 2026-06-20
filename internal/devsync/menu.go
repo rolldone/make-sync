@@ -24,6 +24,7 @@ var promptMu sync.Mutex
 
 // displayMainMenu moved to view so watcher UI code is grouped
 func (w *Watcher) displayMainMenu() {
+	util.Default.ClearScreen()
 	lines := []string{
 		"🔧 DevSync Main Menu",
 		"====================",
@@ -43,6 +44,40 @@ func (w *Watcher) displayMainMenu() {
 	}
 }
 
+// showSlotControlMenu displays a promptui menu when user presses Alt+N on the active slot.
+// Returns one of: "continue", "exit".
+func (w *Watcher) showSlotControlMenu(slot int) string {
+	util.Default.Suspend()
+	defer util.Default.Resume()
+	promptMu.Lock()
+	defer promptMu.Unlock()
+	prompt := promptui.Select{
+		Label: fmt.Sprintf("? Slot %d — What would you like to do?", slot),
+		Items: []string{"Continue (stay in slot)", "Exit to main menu"},
+		Size:  2,
+		Templates: &promptui.SelectTemplates{
+			Label:    "{{ . }}",
+			Active:   "▸ {{ . | cyan }}",
+			Inactive: "  {{ . }}",
+			Selected: "Selected: {{ . }}",
+		},
+		HideHelp: true,
+	}
+	i, _, err := prompt.Run()
+	if err != nil {
+		util.Default.Printf("❌ Menu cancelled: %v — continuing\n", err)
+		return "continue"
+	}
+	switch i {
+	case 0:
+		return "continue"
+	case 1:
+		return "exit"
+	default:
+		return "continue"
+	}
+}
+
 // showCommandMenuDisplay moved to view (keeps promptui usage local)
 func (w *Watcher) showCommandMenuDisplay() {
 	if w == nil || w.config == nil {
@@ -59,6 +94,7 @@ func (w *Watcher) showCommandMenuDisplay() {
 	// Snapshot config for local use in this function to avoid repeated nil-checks
 	cfg := w.config
 	var oldStateHead *term.State
+menuLoop:
 	for {
 		util.ResetRaw(oldStateHead)
 		oldstate, err := util.NewRaw()
@@ -84,9 +120,23 @@ func (w *Watcher) showCommandMenuDisplay() {
 			if err := w.ptyMgr.Focus(*slot, true, callback); err != nil {
 				w.safePrintf("❌ Failed to focus slot %d: %v\n", *slot, err)
 			}
+			// Check if user pressed Alt+N on the active slot → show control menu
+			if requested, ctrlSlot := w.ptyMgr.IsControlMenuRequested(); requested && ctrlSlot == *slot {
+				w.ptyMgr.ResetControlMenuRequested()
+				util.Default.Resume()
+				result := w.showSlotControlMenu(*slot)
+				switch result {
+				case "continue":
+					// re-focus the same slot without closing
+					continue
+				case "exit":
+					w.ptyMgr.CloseSlot(*slot)
+					w.displayMainMenu()
+					break menuLoop
+				}
+			}
 			FlushAllStdinNonBlocking()
 			continue
-		} else {
 		}
 
 		var items []string
@@ -530,6 +580,24 @@ func (w *Watcher) enterShellNonCommand() {
 		util.Default.Resume()
 	} else {
 		util.Default.Resume()
+	}
+
+	// Check if user pressed Alt+2 on the active slot 2 → show control menu
+	if requested, ctrlSlot := w.ptyMgr.IsControlMenuRequested(); requested && ctrlSlot == slot {
+		w.ptyMgr.ResetControlMenuRequested()
+		result := w.showSlotControlMenu(slot)
+		switch result {
+		case "continue":
+			// Re-focus slot 2
+			if err := w.ptyMgr.Focus(slot, true, func(slotNew int) {
+				w.Slot = &slotNew
+			}); err != nil {
+				util.Default.Printf("⚠️  Failed to refocus slot %d: %v\n", slot, err)
+			}
+		case "exit":
+			w.ptyMgr.CloseSlot(slot)
+			*w.Slot = 1
+		}
 	}
 
 	if *w.Slot == 1 {

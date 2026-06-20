@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"golang.org/x/term"
@@ -76,10 +77,14 @@ func (b *PTYLocalBridge) startLocalWithCommand(command string) error {
 }
 
 func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context) error {
-	// Goroutine stdin reader
+	// Goroutine stdin reader with vim-style command mode (ESC : exit)
 	go func(ctx context.Context) {
 		buf := make([]byte, 256)
 		throttledMyFunc := util.ThrottledFunction(300 * time.Millisecond)
+
+		cmdState := 0 // 0=normal, 1=esc_seen, 2=command_mode
+		var cmdBuf []byte
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -94,7 +99,6 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context) error {
 					ih := b.inputHitCodeListener
 					b.mu.RUnlock()
 
-					// call inputListener asynchronously
 					if il != nil {
 						data := make([]byte, n)
 						copy(data, buf[:n])
@@ -103,43 +107,99 @@ func (b *PTYLocalBridge) ProcessPTYReadInput(ctx context.Context) error {
 							cb(d)
 						}(il, data)
 					}
-					matchShortcut := false
-					// detect ESC + digit (Alt+1..Alt+9, Alt+0)
-					if ih != nil {
-						for i := 0; i < n-1; i++ {
-							if buf[i] == 0x1b { // ESC
-								c := buf[i+1]
-								if (c >= '1' && c <= '9') || c == '0' {
-									digit := string([]byte{c})
-									go func(cb func(string), d string) {
-										throttledMyFunc(func() {
-											defer func() { _ = recover() }()
-											// prevent panic if cb misbehaves
-											cb("alt+" + d)
-										})
-									}(ih, digit)
-									matchShortcut = true
-									i++
-								}
+
+					for i := 0; i < n; i++ {
+						bt := buf[i]
+
+						switch cmdState {
+						case 0: // normal mode
+							if bt == 0x1b { // ESC
+								cmdState = 1
+								continue
 							}
+							if bt == 0x10 && ih != nil { // Ctrl+0 fallback
+								log.Println("PTYLocalBridge: Ctrl+0 detected, force close")
+								go func(cb func(string)) {
+									defer func() { _ = recover() }()
+									cb("alt+0")
+								}(ih)
+								continue
+							}
+							if w != nil {
+								w.Write([]byte{bt})
+							}
+							cmdState = 0
+
+						case 1: // just saw ESC
+							if bt == ':' {
+								cmdState = 2
+								cmdBuf = nil
+								log.Println("PTYLocalBridge: ESC+: detected, entering command mode")
+								continue
+							}
+							if (bt >= '1' && bt <= '9') || bt == '0' {
+								digit := string([]byte{bt})
+								log.Println("PTYLocalBridge: ESC+digit shortcut: alt+" + digit)
+								if ih != nil {
+									if bt == '0' {
+										go func(cb func(string), d string) {
+											defer func() { _ = recover() }()
+											cb("alt+" + d)
+										}(ih, digit)
+									} else {
+										go func(cb func(string), d string) {
+											throttledMyFunc(func() {
+												defer func() { _ = recover() }()
+												cb("alt+" + d)
+											})
+										}(ih, digit)
+									}
+								}
+								cmdState = 0
+								continue
+							}
+							// Not a shortcut: forward ESC + this byte
+							if w != nil {
+								w.Write([]byte{0x1b, bt})
+							}
+							cmdState = 0
+
+						case 2: // command mode
+							if bt == '\r' || bt == '\n' {
+								cmd := strings.TrimSpace(string(cmdBuf))
+								log.Printf("PTYLocalBridge: command mode: got '%s'", cmd)
+								if cmd == "exit" || cmd == "q" || cmd == "quit" {
+									log.Println("PTYLocalBridge: exit command, force close")
+									if ih != nil {
+										go func(cb func(string)) {
+											defer func() { _ = recover() }()
+											cb("alt+0")
+										}(ih)
+									}
+								} else {
+									// Forward whole sequence to PTY
+									if w != nil {
+										w.Write([]byte{0x1b, ':'})
+										w.Write(cmdBuf)
+										w.Write([]byte{bt})
+									}
+								}
+								cmdBuf = nil
+								cmdState = 0
+								continue
+							}
+							if bt == 0x7f || bt == 0x08 {
+								if len(cmdBuf) > 0 {
+									cmdBuf = cmdBuf[:len(cmdBuf)-1]
+								}
+								continue
+							}
+							if bt >= 0x20 && bt <= 0x7e {
+								cmdBuf = append(cmdBuf, bt)
+							}
+							continue
 						}
 					}
-
-					if matchShortcut {
-						// skip forwarding the ESC + digit sequence to the PTY
-						log.Println("ProcessPTYReadInput :: Skipping forwarding shortcut input to PTY")
-						continue
-					}
-
-					// forward to PTY stdin writer
-					if w != nil {
-						// fmt.Println("Writing to PTY:", string(buf[:n]))
-						_, werr := w.Write(buf[:n])
-						if werr != nil {
-							return
-						}
-					}
-
 				}
 
 				if rerr != nil {

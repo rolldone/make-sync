@@ -2,7 +2,9 @@ package devsync
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +42,23 @@ func (w *Watcher) handleKeyboardInput() {
 			}
 			// Quick checks for control bytes
 			b0 := buffer[0]
+			// Ctrl+0 (0x10) - force close current session (for VS Code terminal)
+			if b0 == 0x10 {
+				slot := 0
+				if w.Slot != nil {
+					slot = *w.Slot
+				}
+				if w.ptyMgr != nil && slot >= 3 {
+					log.Println("DEBUG: handleKeyboardInput Ctrl+0 — force closing slot", slot)
+					util.Default.ClearLine()
+					util.Default.PrintBlock("🔌 Force closing slot "+strconv.Itoa(slot)+"...", true)
+					w.ptyMgr.CloseSlot(slot)
+				}
+				one := 1
+				w.Slot = &one
+				w.displayMainMenu()
+				continue
+			}
 			// Ctrl+R (0x12) - trigger notify reload
 			if b0 == 0x12 {
 				// Stop both the remote agent monitoring and the local file watcher.
@@ -164,6 +183,22 @@ func (w *Watcher) handleAltKey(input string) {
 	switch input {
 	case "\x1br", "\x1br\n", "\x1bR", "\x1bR\n": // Alt + R (reload)
 		w.HandleReloadCommand()
+		return
+	case "\x1b0":
+		// Alt+0: force close current session and return to main menu
+		slot := 0
+		if w.Slot != nil {
+			slot = *w.Slot
+		}
+		if w.ptyMgr != nil && slot >= 3 {
+			log.Println("DEBUG: handleAltKey Alt+0 — force closing slot", slot)
+			util.Default.ClearLine()
+			util.Default.PrintBlock("🔌 Force closing slot "+strconv.Itoa(slot)+"...", true)
+			w.ptyMgr.CloseSlot(slot)
+		}
+		one := 1
+		w.Slot = &one
+		w.displayMainMenu()
 		return
 	case "\x1b1", "\x1b2", "\x1b3", "\x1b4", "\x1b5", "\x1b6", "\x1b7", "\x1b8", "\x1b9":
 		// Alt + 2-9: map to slot numbers and show the command menu
