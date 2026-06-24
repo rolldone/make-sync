@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -178,6 +179,11 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 	// Initialize PTY manager for persistent remote sessions (Alt+3..9)
 	watcher.ptyMgr = NewPTYManager(watcher)
 
+	// --- PID singleton: kill stale predecessor via .sync_temp/make-sync.pid ---
+	// If a previous make-sync process was orphaned (e.g. VS Code restart),
+	// kill it before starting a new agent to prevent double agents on remote.
+	watcher.handlePidSingleton()
+
 	// build & deploy
 	if err := watcher.buildAndDeployAgent(); err != nil {
 		util.Default.Printf("⚠️  Failed to build/deploy agent: %v\n", err)
@@ -209,6 +215,13 @@ func (w *Watcher) Start() error {
 	}
 	w.oldState = restore
 	w.firstOld = restore
+	// Restore terminal state when Start() exits (e.g. Ctrl+R, StopNotify)
+	defer func() {
+		if w.firstOld != nil {
+			util.ResetRaw(w.firstOld)
+			w.firstOld = nil
+		}
+	}()
 
 	// make Start idempotent for repeated UI navigation
 	w.runningMu.Lock()
@@ -321,6 +334,41 @@ func (w *Watcher) Start() error {
 		w.safePrintln("notifyStopped:", w.notifyStopped)
 		// notify subsystem stopped -> return to menu
 		return nil
+	}
+}
+
+// pidFileName returns the path to the PID file inside the project-local .sync_temp.
+func (w *Watcher) pidFileName() string {
+	return filepath.Join(w.config.LocalPath, ".sync_temp", "make-sync.pid")
+}
+
+// handlePidSingleton implements a simple singleton pattern using a PID file
+// in .sync_temp/. If a previous make-sync process left a stale PID file
+// (e.g. after a VS Code restart that orphaned the terminal), kill it before
+// starting a new agent to prevent double agents on the remote host.
+func (w *Watcher) handlePidSingleton() {
+	pidFile := w.pidFileName()
+	newPid := os.Getpid()
+
+	data, err := os.ReadFile(pidFile)
+	if err == nil {
+		oldPid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		if oldPid > 0 && oldPid != newPid {
+			process, _ := os.FindProcess(oldPid)
+			if process != nil {
+				if err := process.Kill(); err == nil {
+					util.Default.Printf("🔪 Killed stale make-sync process (PID: %d)\n", oldPid)
+				}
+			}
+		}
+	}
+
+	// Ensure directory exists
+	dir := filepath.Dir(pidFile)
+	os.MkdirAll(dir, 0755)
+
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(newPid)), 0644); err != nil {
+		util.Default.Printf("⚠️  Failed to write PID file: %v\n", err)
 	}
 }
 
