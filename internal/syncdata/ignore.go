@@ -82,14 +82,13 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 		var result bool
 		if strings.HasPrefix(strings.ToLower(runtime.GOOS), "windows") {
 			result = m.MatchesPath(strings.ToLower(relp))
-			if !result {
-				result = m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
-			}
 		} else {
 			result = m.MatchesPath(relp)
-			if !result {
-				result = m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
-			}
+		}
+		// Trailing-slash directory fix: if a directory matched (would be ignored),
+		// re-check with trailing "/" so negations like !/app/ can recover it.
+		if result && isDir {
+			result = m.MatchesPath(relp + "/")
 		}
 		return result
 	}
@@ -156,27 +155,18 @@ func (c *IgnoreCache) Match(path string, isDir bool) bool {
 	relp, _ := filepath.Rel(c.Root, path)
 	relp = filepath.ToSlash(relp)
 
-	if strings.Contains(path, ".git") {
-		// Git path handling - no special logic needed
-	}
-
 	var result bool
 	if strings.HasPrefix(strings.ToLower(runtime.GOOS), "windows") {
 		result = m.MatchesPath(strings.ToLower(relp))
-		if !result {
-			result = m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
-		}
 	} else {
 		result = m.MatchesPath(relp)
-		if !result {
-			baseResult := m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
-			result = baseResult
-		}
 	}
 
-	if strings.Contains(path, ".git") {
+	// Trailing-slash directory fix: if a directory matched (would be ignored),
+	// re-check with trailing "/" so negations like !/app/ can recover it.
+	if result && isDir {
+		result = m.MatchesPath(relp + "/")
 	}
-
 	return result
 }
 
@@ -267,17 +257,9 @@ func (c *IgnoreCache) matchesPriorityIncludes(path string, isDir bool) bool {
 	relp = filepath.ToSlash(relp)
 
 	if strings.HasPrefix(strings.ToLower(runtime.GOOS), "windows") {
-		result := m.MatchesPath(strings.ToLower(relp))
-		if !result {
-			result = m.MatchesPath(strings.ToLower(filepath.ToSlash(filepath.Base(path))))
-		}
-		return result
+		return m.MatchesPath(strings.ToLower(relp))
 	}
-	result := m.MatchesPath(relp)
-	if !result {
-		result = m.MatchesPath(filepath.ToSlash(filepath.Base(path)))
-	}
-	return result
+	return m.MatchesPath(relp)
 }
 
 // MatchesPriorityIncludes reports whether the given path matches any negation

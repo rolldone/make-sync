@@ -31,51 +31,40 @@ type SafePushResult struct {
 // 3. Download remote index DB
 // 4. Compare and download changed files by hash
 func RunSafePull(cfg *config.Config, sshClient *sshclient.SSHClient) SafePullResult {
-	util.Default.Println("🔁 safe_pull_sync selected — building and deploying agent for remote indexing...")
+	util.Default.Println("🔁 safe_pull_sync selected — checking remote agent status...")
 
 	// Determine target OS from config
 	targetOS := cfg.Devsync.OSTarget
 	if targetOS == "" {
-		targetOS = "linux" // Default to linux
+		targetOS = "linux"
 	}
 
-	// Get project root - handles both development (go run) and production modes
-	projectRoot, err := util.GetProjectRoot()
-	if err != nil {
-		util.Default.Printf("❌ Failed to get project root: %v\n", err)
-		return SafePullResult{Success: false, Error: err}
+	projectRoot, projectErr := util.GetProjectRoot()
+	if projectErr != nil {
+		util.Default.Printf("❌ Failed to get project root: %v\n", projectErr)
+		return SafePullResult{Success: false, Error: projectErr}
 	}
 
-	// Create SSH adapter (assuming sshClient is *sshclient.SSHClient)
 	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
-
-	// Try to build agent first
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
 		TargetOS:    targetOS,
-		SSHClient:   sshAdapter, // For remote architecture detection
-		Config:      cfg,        // Pass config for unique agent naming
+		SSHClient:   sshAdapter,
+		Config:      cfg,
 	}
-
-	agentPath, err := deployagent.BuildAgentForTarget(buildOpts)
-	if err != nil {
-		util.Default.Printf("⚠️  Build failed for agent: %v\n", err)
-
-		// Try fallback using deployagent's fallback detection
+	agentPath, buildErr := deployagent.BuildAgentForTarget(buildOpts)
+	if buildErr != nil {
+		util.Default.Printf("⚠️  Build failed for agent: %v\n", buildErr)
 		fallbackPath := deployagent.FindFallbackAgent(projectRoot, targetOS)
 		if fallbackPath != "" {
 			util.Default.Printf("ℹ️  Using fallback agent binary: %s\n", fallbackPath)
 			agentPath = fallbackPath
 		} else {
-			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", err)
-			return SafePullResult{Success: false, Error: err}
+			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", buildErr)
+			return SafePullResult{Success: false, Error: buildErr}
 		}
 	}
-
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
-
-	// Deploy agent+config and run remote indexing
-	// No prefixes provided for full indexing
 	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, false, nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
@@ -145,7 +134,7 @@ func RunSafePull(cfg *config.Config, sshClient *sshclient.SSHClient) SafePullRes
 // strategy based on mode. mode strings expected to contain substrings:
 // "Force" (enable delete semantics), "Bypass" (bypass local ignore patterns).
 func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode string) SafePullResult {
-	util.Default.Println("🔁 pull selected — building and deploying agent for remote indexing...")
+	util.Default.Println("🔁 pull selected — checking remote agent status...")
 
 	// Determine target OS from config
 	targetOS := cfg.Devsync.OSTarget
@@ -153,14 +142,15 @@ func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 		targetOS = "linux"
 	}
 
+	bypassIgnore := strings.Contains(mode, "Bypass")
+
 	// Get project root
-	projectRoot, err := util.GetProjectRoot()
-	if err != nil {
-		util.Default.Printf("❌ Failed to get project root: %v\n", err)
-		return SafePullResult{Success: false, Error: err}
+	projectRoot, projectErr := util.GetProjectRoot()
+	if projectErr != nil {
+		util.Default.Printf("❌ Failed to get project root: %v\n", projectErr)
+		return SafePullResult{Success: false, Error: projectErr}
 	}
 
-	// Build agent
 	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
@@ -168,25 +158,21 @@ func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 		SSHClient:   sshAdapter,
 		Config:      cfg,
 	}
-	agentPath, err := deployagent.BuildAgentForTarget(buildOpts)
-	if err != nil {
-		util.Default.Printf("⚠️  Build failed for agent: %v\n", err)
+	agentPath, buildErr := deployagent.BuildAgentForTarget(buildOpts)
+	if buildErr != nil {
+		util.Default.Printf("⚠️  Build failed for agent: %v\n", buildErr)
 		fallbackPath := deployagent.FindFallbackAgent(projectRoot, targetOS)
 		if fallbackPath != "" {
 			util.Default.Printf("ℹ️  Using fallback agent binary: %s\n", fallbackPath)
 			agentPath = fallbackPath
 		} else {
-			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", err)
-			return SafePullResult{Success: false, Error: err}
+			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", buildErr)
+			return SafePullResult{Success: false, Error: buildErr}
 		}
 	}
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
-	// Run remote indexing for full project (no prefixes)
-	// Pass nil prefixes to indicate full indexing (avoid sending an empty
-	// --manual-transfer argument which can cause the agent to load configured
-	// manual_transfer prefixes unexpectedly).
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, strings.Contains(mode, "Bypass"), nil)
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, bypassIgnore, nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)
@@ -270,7 +256,7 @@ func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 // 3. Download remote index DB
 // 4. Compare and upload changed files by hash
 func RunSafePush(cfg *config.Config, sshClient *sshclient.SSHClient) SafePushResult {
-	util.Default.Println("🔁 safe_push_sync selected — building and deploying agent for remote indexing...")
+	util.Default.Println("🔁 safe_push_sync selected — checking remote agent status...")
 
 	// Determine target OS from config
 	targetOS := cfg.Devsync.OSTarget
@@ -278,40 +264,32 @@ func RunSafePush(cfg *config.Config, sshClient *sshclient.SSHClient) SafePushRes
 		targetOS = "linux"
 	}
 
-	// Get project root - handles both development (go run) and production modes
-	projectRoot, err := util.GetProjectRoot()
-	if err != nil {
-		util.Default.Printf("❌ Failed to get project root: %v\n", err)
-		return SafePushResult{Success: false, Error: err}
+	projectRoot, projectErr := util.GetProjectRoot()
+	if projectErr != nil {
+		util.Default.Printf("❌ Failed to get project root: %v\n", projectErr)
+		return SafePushResult{Success: false, Error: projectErr}
 	}
 
 	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
-
-	// Try to build agent first
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
 		TargetOS:    targetOS,
 		SSHClient:   sshAdapter,
 		Config:      cfg,
 	}
-
-	agentPath, err := deployagent.BuildAgentForTarget(buildOpts)
-	if err != nil {
-		util.Default.Printf("⚠️  Build failed for agent: %v\n", err)
+	agentPath, buildErr := deployagent.BuildAgentForTarget(buildOpts)
+	if buildErr != nil {
+		util.Default.Printf("⚠️  Build failed for agent: %v\n", buildErr)
 		fallbackPath := deployagent.FindFallbackAgent(projectRoot, targetOS)
 		if fallbackPath != "" {
 			util.Default.Printf("ℹ️  Using fallback agent binary: %s\n", fallbackPath)
 			agentPath = fallbackPath
 		} else {
-			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", err)
-			return SafePushResult{Success: false, Error: err}
+			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", buildErr)
+			return SafePushResult{Success: false, Error: buildErr}
 		}
 	}
-
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
-
-	// Run remote indexing and download DB
-	// No prefixes provided for full indexing
 	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, false, nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
@@ -378,7 +356,7 @@ func RunSafePush(cfg *config.Config, sshClient *sshclient.SSHClient) SafePushRes
 // strategy based on mode. mode strings expected to contain substrings:
 // "Force" (enable delete semantics), "Bypass" (bypass local ignore patterns).
 func RunPushWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode string) SafePushResult {
-	util.Default.Println("🔁 push selected — building and deploying agent for remote indexing...")
+	util.Default.Println("🔁 push selected — checking remote agent status...")
 
 	// Determine target OS from config
 	targetOS := cfg.Devsync.OSTarget
@@ -386,11 +364,13 @@ func RunPushWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 		targetOS = "linux"
 	}
 
-	// Get project root
-	projectRoot, err := util.GetProjectRoot()
-	if err != nil {
-		util.Default.Printf("❌ Failed to get project root: %v\n", err)
-		return SafePushResult{Success: false, Error: err}
+	bypassIgnore := strings.Contains(mode, "Bypass")
+
+	// Build + upload + index
+	projectRoot, projectErr := util.GetProjectRoot()
+	if projectErr != nil {
+		util.Default.Printf("❌ Failed to get project root: %v\n", projectErr)
+		return SafePushResult{Success: false, Error: projectErr}
 	}
 
 	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
@@ -400,25 +380,21 @@ func RunPushWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 		SSHClient:   sshAdapter,
 		Config:      cfg,
 	}
-	agentPath, err := deployagent.BuildAgentForTarget(buildOpts)
-	if err != nil {
-		util.Default.Printf("⚠️  Build failed for agent: %v\n", err)
+	agentPath, buildErr := deployagent.BuildAgentForTarget(buildOpts)
+	if buildErr != nil {
+		util.Default.Printf("⚠️  Build failed for agent: %v\n", buildErr)
 		fallbackPath := deployagent.FindFallbackAgent(projectRoot, targetOS)
 		if fallbackPath != "" {
 			util.Default.Printf("ℹ️  Using fallback agent binary: %s\n", fallbackPath)
 			agentPath = fallbackPath
 		} else {
-			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", err)
-			return SafePushResult{Success: false, Error: err}
+			util.Default.Printf("❌ No fallback agent found and build failed: %v\n", buildErr)
+			return SafePushResult{Success: false, Error: buildErr}
 		}
 	}
 	util.Default.Printf("✅ Agent ready: %s\n", agentPath)
 
-	// Run remote indexing for full project (no prefixes)
-	// Pass nil prefixes to indicate full indexing (avoid sending an empty
-	// --manual-transfer argument which can cause the agent to load configured
-	// manual_transfer prefixes unexpectedly).
-	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, strings.Contains(mode, "Bypass"), nil)
+	_, out, err := RunAgentIndexingFlow(cfg, []string{agentPath}, bypassIgnore, nil)
 	if err != nil {
 		util.Default.Printf("❌ Remote indexing failed: %v\n", err)
 		util.Default.Printf("🔍 Remote output (partial): %s\n", out)

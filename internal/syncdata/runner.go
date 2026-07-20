@@ -15,6 +15,7 @@ import (
 
 	"database/sql"
 	"make-sync/internal/config"
+	"make-sync/internal/deployagent"
 	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
 
@@ -89,8 +90,18 @@ func collectPreprocessedIgnores(root string) ([]string, error) {
 	for k := range found {
 		out = append(out, k)
 	}
-	// sort for deterministic output
+	// sort for deterministic output, then put negations last so they override positive patterns
 	sort.Strings(out)
+	positives := make([]string, 0, len(out))
+	negations := make([]string, 0, len(out))
+	for _, p := range out {
+		if strings.HasPrefix(p, "!") {
+			negations = append(negations, p)
+		} else {
+			positives = append(positives, p)
+		}
+	}
+	out = append(positives, negations...)
 	return out, nil
 }
 
@@ -543,6 +554,16 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIg
 		return "", "", fmt.Errorf("ssh connect failed: %v", err)
 	}
 	defer sshCli.Close()
+
+	// Kill existing agent process before uploading new binary
+	localCfg, err := config.GetOrCreateLocalConfig()
+	if err == nil {
+		if err := deployagent.KillExistingAgent(sshCli, localCfg.Devsync.AgentName, osTarget); err != nil {
+			util.Default.Printf("⚠️  Kill existing agent failed: %v\n", err)
+		}
+	}
+	// Brief wait for OS to release file handles
+	time.Sleep(500 * time.Millisecond)
 
 	// Upload agent binary into remoteSyncTemp
 	if err := UploadAgentBinary(sshCli, localBinary, remoteSyncTemp, osTarget); err != nil {

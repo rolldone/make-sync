@@ -5,30 +5,37 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	ig "github.com/sabhiram/go-gitignore"
 )
 
-// SimpleIgnoreCache provides per-directory cascading .sync_ignore support for the agent.
-// This is a lightweight implementation (no external deps) that supports:
-// - comments (#) and empty lines
-// - negation with leading '!'
-// - simple glob patterns and basename fallback
-// - preprocessing of patterns like '*.log' to also match '**/*.log'
-// It's intentionally conservative and matches the client's semantics closely enough.
+// defaultIgnores are always applied on top of any ignore rules.
+var defaultIgnores = []string{
+	".sync_temp",
+	"make-sync.yaml",
+	".sync_ignore",
+	".sync_collections",
+}
+
+// SimpleIgnoreCache provides ignore matching for the agent using go-gitignore,
+// consistent with the make-sync client. It reads patterns from either
+// .sync_temp/config.json (authoritative) or by scanning .sync_ignore files on disk.
 type SimpleIgnoreCache struct {
-	Root string
-	raw  map[string][]string // directory -> preprocessed lines
-	// if authoritative is true, use only c.raw[Root] and do not scan disk for .sync_ignore
-	authoritative bool
-	// manualTransfer contains paths that should not be ignored even if they match ignore patterns
+	Root    string
+	matcher *ig.GitIgnore
+	// manualTransfer contains paths that should not be ignored even if they'd match
 	manualTransfer []string
 }
 
+// NewSimpleIgnoreCache creates a cache for the given root directory.
 func NewSimpleIgnoreCache(root string) *SimpleIgnoreCache {
-	c := &SimpleIgnoreCache{Root: root, raw: map[string][]string{}}
-	// attempt to read preprocessed ignores from .sync_temp/config.json under root
+	c := &SimpleIgnoreCache{Root: root}
+
+	var ignoreLines []string
+
+	// Try authoritative ignores from .sync_temp/config.json
 	cfgPath := filepath.Join(root, ".sync_temp", "config.json")
 	if data, err := os.ReadFile(cfgPath); err == nil {
-		// try to parse JSON structure with ignores and manual_transfer
 		type devsyncCfg struct {
 			Devsync struct {
 				Ignores        []string `json:"ignores"`
@@ -36,191 +43,107 @@ func NewSimpleIgnoreCache(root string) *SimpleIgnoreCache {
 			} `json:"devsync"`
 		}
 		var dc devsyncCfg
-		if jerr := json.Unmarshal(data, &dc); jerr == nil {
+		if json.Unmarshal(data, &dc) == nil {
 			if len(dc.Devsync.Ignores) > 0 {
-				// store into raw for root directory so they are applied globally
-				c.raw[root] = append(c.raw[root], dc.Devsync.Ignores...)
-				// mark authoritative so we do not scan per-directory .sync_ignore files
-				c.authoritative = true
+				ignoreLines = dc.Devsync.Ignores
 			}
-			// store manual transfer paths
 			c.manualTransfer = dc.Devsync.ManualTransfer
 		}
 	}
+
+	// Fallback: scan .sync_ignore files on disk
+	if len(ignoreLines) == 0 {
+		ignoreLines = collectSyncIgnoreFiles(root)
+	}
+
+	// Ensure negations come last so they override positive patterns (gitignore semantics: last match wins)
+	ignoreLines = negationsLast(ignoreLines)
+
+	// Default ignores always go first; config/disk patterns override as last-match-wins
+	allLines := append(defaultIgnores, ignoreLines...)
+	c.matcher = ig.CompileIgnoreLines(allLines...)
 	return c
 }
 
-// Match returns true if path should be ignored. path may be absolute or relative.
-func (c *SimpleIgnoreCache) Match(path string, isDir bool) bool {
-	// default ignores
-	defaults := []string{".sync_temp", "make-sync.yaml", ".sync_ignore", ".sync_collections"}
-	base := filepath.Base(path)
-	for _, d := range defaults {
-		if strings.EqualFold(d, base) {
-			return true
+// collectSyncIgnoreFiles walks root and aggregates all .sync_ignore patterns,
+// skipping .sync_temp and .git subtrees.
+func collectSyncIgnoreFiles(root string) []string {
+	var all []string
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
 		}
-	}
-
-	// determine directory to look up .sync_ignore (if path is file, use its dir)
-	dir := path
-	if !isDir {
-		dir = filepath.Dir(path)
-	}
-
-	// build ancestor list from root -> dir
-	var ancestors []string
-	cur := dir
-	for {
-		ancestors = append(ancestors, cur)
-		if cur == c.Root || cur == string(os.PathSeparator) {
-			break
+		base := filepath.Base(path)
+		if base == ".sync_temp" || base == ".git" {
+			return filepath.SkipDir
 		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			break
+		sp := filepath.Join(path, ".sync_ignore")
+		data, rerr := os.ReadFile(sp)
+		if rerr != nil {
+			return nil
 		}
-		cur = parent
-	}
-	// reverse to root->dir
-	for i, j := 0, len(ancestors)-1; i < j; i, j = i+1, j-1 {
-		ancestors[i], ancestors[j] = ancestors[j], ancestors[i]
-	}
-
-	// collect cumulative rules
-	cumulative := []string{}
-	if c.authoritative {
-		// if authoritative list is present, only use root-level rules
-		if lines, ok := c.raw[c.Root]; ok {
-			cumulative = append(cumulative, lines...)
-		}
-	} else {
-		for _, a := range ancestors {
-			if lines, ok := c.raw[a]; ok {
-				cumulative = append(cumulative, lines...)
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
-			syncPath := filepath.Join(a, ".sync_ignore")
-			if _, err := os.Stat(syncPath); err == nil {
-				data, rerr := os.ReadFile(syncPath)
-				if rerr == nil {
-					raw := strings.Split(string(data), "\n")
-					// preprocess
-					lines := []string{}
-					for _, ln := range raw {
-						l := strings.TrimSpace(ln)
-						if l == "" || strings.HasPrefix(l, "#") {
-							continue
-						}
-						neg := false
-						if strings.HasPrefix(l, "!") {
-							neg = true
-							l = strings.TrimPrefix(l, "!")
-						}
-						// if pattern contains slash or ** keep as-is
-						if strings.Contains(l, "/") || strings.Contains(l, "**") {
-							if neg {
-								lines = append(lines, "!"+l)
-							} else {
-								lines = append(lines, l)
-							}
-							continue
-						}
-						// otherwise add both forms: pattern and **/pattern
-						if neg {
-							lines = append(lines, "!"+l)
-							lines = append(lines, "!**/"+l)
-						} else {
-							lines = append(lines, l)
-							lines = append(lines, "**/"+l)
-						}
-					}
-					c.raw[a] = lines
-					cumulative = append(cumulative, lines...)
-					continue
-				}
-			}
-			c.raw[a] = nil
+			all = append(all, line)
 		}
-	}
-
-	if len(cumulative) == 0 {
-		return false
-	}
-
-	// rel path relative to each directory will be tested; we'll compute rel to root
-	relToRoot, err := filepath.Rel(c.Root, path)
-	if err != nil {
-		relToRoot = path
-	}
-	relToRoot = filepath.ToSlash(relToRoot)
-	baseName := filepath.ToSlash(filepath.Base(path))
-
-	// last matching rule wins
-	matched := false
-	for _, pat := range cumulative {
-		neg := false
-		p := pat
-		if strings.HasPrefix(p, "!") {
-			neg = true
-			p = strings.TrimPrefix(p, "!")
-		}
-		// direct match against rel
-		ok := false
-		if matchedGlob(p, relToRoot) || matchedGlob(p, baseName) {
-			ok = true
-		}
-		if ok {
-			if neg {
-				matched = false
-			} else {
-				matched = true
-			}
-		}
-	}
-	return matched
+		return nil
+	})
+	return all
 }
 
-// MatchWithManualTransfer returns true if path should be ignored, but respects manual_transfer context.
-// If path belongs to a manual transfer endpoint, it will not be ignored even if it matches ignore patterns.
-func (c *SimpleIgnoreCache) MatchWithManualTransfer(path string, isDir bool) bool {
-	// Check if path belongs to manual transfer endpoint
-	for _, endpoint := range c.manualTransfer {
-		// Normalize endpoint to use forward slashes
-		endpoint = filepath.ToSlash(endpoint)
-
-		// Check if path is the endpoint itself or sub-path of endpoint
-		pathRel, err := filepath.Rel(c.Root, path)
-		if err != nil {
-			pathRel = path
+// negationsLast moves all negation patterns (starting with !) to the end of the slice.
+// This ensures gitignore semantics: negations override earlier positive patterns.
+func negationsLast(lines []string) []string {
+	pos := make([]string, 0, len(lines))
+	neg := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.HasPrefix(l, "!") {
+			neg = append(neg, l)
+		} else {
+			pos = append(pos, l)
 		}
-		pathRel = filepath.ToSlash(pathRel)
+	}
+	return append(pos, neg...)
+}
 
-		// If path is endpoint itself or starts with endpoint/
-		if pathRel == endpoint || strings.HasPrefix(pathRel, endpoint+"/") {
-			// Belongs to manual transfer - don't ignore
+// Match returns true if path should be ignored.
+// path may be absolute; it will be resolved relative to Root.
+// When isDir is true, also checks with trailing "/" so patterns like !/app/
+// can correctly negate directory ignores.
+func (c *SimpleIgnoreCache) Match(path string, isDir bool) bool {
+	rel, err := filepath.Rel(c.Root, path)
+	if err != nil {
+		rel = path
+	}
+	rel = filepath.ToSlash(rel)
+	if c.matcher.MatchesPath(rel) {
+		// If it's a directory, also check with trailing "/" — a negation
+		// like !/app/ should be able to recover the directory.
+		if isDir {
+			return c.matcher.MatchesPath(rel + "/")
+		}
+		return true
+	}
+	return false
+}
+
+// MatchWithManualTransfer returns true if path should be ignored, unless it
+// belongs to a manual_transfer endpoint.
+func (c *SimpleIgnoreCache) MatchWithManualTransfer(path string, isDir bool) bool {
+	// manual transfer override: never ignore files inside a manual_transfer endpoint
+	for _, endpoint := range c.manualTransfer {
+		endpoint = filepath.ToSlash(endpoint)
+		rel, err := filepath.Rel(c.Root, path)
+		if err != nil {
+			rel = path
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == endpoint || strings.HasPrefix(rel, endpoint+"/") {
 			return false
 		}
 	}
-
-	// Not in manual transfer - use normal ignore logic
 	return c.Match(path, isDir)
-}
-
-// matchedGlob is a helper that tries filepath.Match with pattern variants.
-func matchedGlob(pattern, target string) bool {
-	// Use filepath.Match which treats path separator as '/' on unix; ensure slashes
-	p := filepath.ToSlash(pattern)
-	t := filepath.ToSlash(target)
-	m, _ := filepath.Match(p, t)
-	if m {
-		return true
-	}
-	// also try match where pattern may start with **/
-	if strings.HasPrefix(p, "**/") {
-		m2, _ := filepath.Match(strings.TrimPrefix(p, "**/"), t)
-		if m2 {
-			return true
-		}
-	}
-	return false
 }

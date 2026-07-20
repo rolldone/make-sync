@@ -82,7 +82,7 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 	if err != nil {
 		return "", fmt.Errorf("failed to load local config: %v", err)
 	}
-	if err := killExistingAgent(opts.SSHClient, localConfig.Devsync.AgentName, targetOS); err != nil {
+	if err := KillExistingAgent(opts.SSHClient, localConfig.Devsync.AgentName, targetOS); err != nil {
 		util.Default.Printf("⚠️  Failed to kill existing agent: %v\n", err)
 		// Continue with deployment even if kill fails
 	}
@@ -257,8 +257,8 @@ func uploadConfigJSON(client *sshclient.SSHClient, cfg *config.Config, remoteSyn
 	return nil
 }
 
-// killExistingAgent kills any running agent with the same agent name before deployment
-func killExistingAgent(client *sshclient.SSHClient, agentName, targetOS string) error {
+// KillExistingAgent kills any running agent with the same agent name before deployment
+func KillExistingAgent(client *sshclient.SSHClient, agentName, targetOS string) error {
 	if agentName == "" {
 		return nil // No agent name to kill
 	}
