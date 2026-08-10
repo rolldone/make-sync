@@ -28,43 +28,6 @@ go build ./...
 
 Jika ingin menjalankan seluruh test (yang ada):
 
-```
-## Troubleshooting
-```
-
-#### Use Cases
-```bash
-# Review output after execution
-# make-sync
-
-CLI untuk sinkronisasi file/devsync via SSH, dengan mode aman (safe pull/push), menu interaktif, dan dukungan manual sync berbasis path terdaftar serta ignore per-item di `devsync.manual_transfer`.
-
-**PERINGATAN:** Fitur "Pipeline System" telah dihapus dari rilis saat ini. Jika Anda mencari dokumentasi lama tentang pipeline, silakan lihat arsip internal atau hubungi tim — fitur tersebut tidak lagi didukung.
-
-## Fitur Utama
-- Safe Pull/Push: indeks remote (SQLite) dibuat dulu, lalu bandingkan hash untuk unduh/unggah yang berubah saja.
-- Manual/Single Sync Menu:
-  - Download/Upload
-  - Pilih folder: salah satu path terdaftar atau semua yang terdaftar
-  - Ignore per folder ditentukan di `devsync.manual_transfer` (string = path saja, object = path + ignores)
-  - Mode: Soft (tanpa delete) atau Force (dengan delete terbatas scope)
-  - Catatan: opsi "Bypass" telah dihapus dari menu top-level Pull/Push. Opsi bypass-ignore masih tersedia sebagai flag CLI/agent untuk pengguna lanjutan, tetapi tidak ditampilkan pada menu interaktif utama untuk mencegah penghapusan tak sengaja.
-- Force Mode (Rsync-like delete):
-  - Download Force: hapus file lokal yang tidak ada di DB remote dalam scope pilihan
-  - Upload Force: hapus file remote yang tidak ada di lokal (gunakan kolom `checked` di DB bila ada)
-  - Global `.sync_ignore` cerdas: menghormati `.sync_temp` dan pola wildcard (termasuk `**`) untuk flow global; Single/Manual Sync memakai ignore per-item di `devsync.manual_transfer`.
-- SSH Agent Remote: otomatis build atau pakai fallback binary, jalankan indexing di remote, unduh DB.
-
-## Instalasi & Build
-- Butuh Go 1.24+.
-- Jalankan:
-
-```bash
-go build ./...
-```
-
-Jika ingin menjalankan seluruh test (yang ada):
-
 ```bash
 go test ./...
 ```
@@ -174,7 +137,7 @@ Selama Download/Upload:
 
 ## Eksekusi Perintah Remote (exec)
 
-Jalankan perintah langsung di host remote tanpa PTY. Output di-stream real-time; proses akan mengembalikan exit status remote.
+Jalankan perintah langsung di host remote. Output di-stream real-time; proses akan mengembalikan exit status remote.
 
 Penggunaan:
 
@@ -182,41 +145,45 @@ Penggunaan:
 make-sync exec <command...>
 ```
 
-Perubahan perilaku penting (2025):
-- Perintah non-interactive sekarang dikirim ke remote dengan cara yang lebih andal untuk menghindari masalah quoting/escaping. Semua argumen setelah `exec` digabung menjadi satu command string lalu di-encode dengan base64. Di remote, payload didecode dan dijalankan oleh shell (`bash -s`) sehingga Anda tidak perlu menambah escape ekstra pada kutipan atau karakter khusus.
+### Cara Kerja (POSIX / Linux / Unix)
 
-Perilaku detil:
-- Bekerja dari direktori kerja remote: `devsync.auth.remote_path` (fallback `remote_path`). Jika diisi, client akan menjalankan `cd <remotePath> && <decoded payload>` di remote.
-- Non-interactive only: pendekatan ini tidak mendukung TTY/interactive sessions (gunakan SSH langsung untuk itu).
-- Eksekusi POSIX: default mencoba menjalankan payload di `bash` via `echo '<BASE64>' | base64 -d | bash -s`.
-- Fallback Windows: jika remote tidak menyediakan POSIX shell, client mencoba menjalankan perintah dengan `cmd.exe /C` sebagai fallback.
-- Tidak ada parsing flag lokal untuk `exec`; semua token setelah `exec` dianggap bagian dari perintah remote.
+Semua token setelah `exec` digabung menjadi satu command string lalu diteruskan **secara mentah** ke remote. Di remote, command dijalankan oleh `bash -lc` (bukan lagi `base64`/`bash -s`), sehingga kutipan (tunggal/ganda/tanpa kutip), variabel, dan operator (`&&`, `|`, `>`, dsb.) diinterpretasikan secara natural — persis seperti Anda mengetik langsung di terminal server.
 
-Kelebihan:
-- Anda dapat menulis perintah natural tanpa menambahkan escape ekstra, contoh:
+Jika `devsync.auth.remote_path` (fallback `remote_path`) diisi, command dibungkus dengan prefix `cd <remotePath> &&` sehingga Anda otomatis bekerja dari direktori kerja remote.
 
-```
-make-sync exec docker compose exec app bash -c "ping google.co.id"
-```
+Untuk remote Windows, client mencoba fallback `cmd.exe /C`.
 
-Keterbatasan & Prasyarat:
-- Remote harus menyediakan `base64` dan `bash`/`sh` untuk jalur POSIX agar metode ini bekerja (umum pada Linux hosts). Jika tidak ada, client akan mencoba fallback Windows `cmd.exe` style.
-- Tidak untuk perintah interaktif atau yang memerlukan TTY.
-- Jika Anda butuh behavior lain (mis. bypass quoting rules), saat ini tidak ada flag `--raw`; silakan gunakan SSH langsung.
+### Mode Interaktif (PTY)
 
-Contoh penggunaan:
+`exec` mendeteksi kebutuhan sesi interaktif secara otomatis:
+
+- Perintah yang mengandung `-it` / `-ti` / `-t` (mis. `docker compose exec -it app bash`) atau diakhiri `bash`/`sh`/`zsh` tanpa `-c` dianggap interaktif.
+- Anda juga bisa memaksa mode interaktif dengan flag `-it` / `--it` / `-i` / `--interactive` setelah `exec`, mis. `make-sync exec -it <cmd>`.
+
+Saat mode interaktif aktif, sesi PTY akan dibuka di remote. Ketik `exit` untuk keluar; jika masuk ke container (mis. via `docker compose exec`), `exit` akan kembali ke shell host sebelum sesi berakhir.
+
+> **Catatan:** Mode interaktif membutuhkan TTY nyata di lokal. Jika stdin Anda di-pipe (bukan terminal), sesi interaktif tidak dapat dibuka — gunakan perintah non-interactive.
+
+### Contoh Penggunaan
+
 - Tampilkan file tersembunyi (Linux/Unix):
   - `make-sync exec ls -a -l`
-- Docker compose restart (tanpa perlu escaping tambahan):
+- Docker compose restart (tanpa escaping tambahan):
   - `make-sync exec docker compose down && docker compose up`
-- Menjalankan perintah dengan kutipan dan spasi:
-  - `make-sync exec bash -c "printf 'line1\\nline2'"`
+- Kutipan dan variabel bekerja natural:
+  - `make-sync exec echo 'halo dunia'`
+  - `make-sync exec echo $HOME`
+- Masuk ke shell interaktif di dalam container:
+  - `make-sync exec docker compose exec -it app bash`
 
-Tips quoting:
-- Windows: operator seperti `&&`, `|`, atau path dengan spasi tetap didukung karena dibungkus `cmd.exe /C`. Jika ada karakter kutip ganda di command, pertimbangkan untuk mengutip ulang bagian terkait.
-- Linux/Unix: command dibungkus ke `bash -lc '...'`. Jika Anda perlu menyertakan `'` di dalam command, gunakan escape `\\'\\'\\'` atau beralih ke kutip ganda dengan hati-hati.
+### Keterbatasan & Prasyarat
 
-Troubleshooting:
+- POSIX: remote harus menyediakan `bash`/`sh`. **Tidak lagi membutuhkan `base64`.**
+- Windows: remote harus menyediakan `cmd.exe`.
+- Tidak ada parsing flag lokal untuk `exec`; semua token setelah `exec` dianggap bagian dari perintah remote.
+
+### Troubleshooting
+
 - "command not found": pastikan perintah tersedia di PATH remote, atau gunakan path absolut/bin yang tepat.
 - Salah direktori kerja: set `devsync.auth.remote_path` (atau `remote_path`) pada config agar `cd` otomatis ke root project di remote.
 
