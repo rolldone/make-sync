@@ -29,14 +29,18 @@ Modes:
   make-sync pull                  Soft pull — download only changed files (safe, no deletes)
   make-sync pull --force          Force pull — download + delete local files not present on remote
   make-sync pull --path <path>    Scoped pull — only sync specific files/folders (repeatable)
-  make-sync pull --git-changes    Git-aware pull — sync only files modified in git working tree
-  make-sync pull --bypass-ignore  Bypass .sync_ignore filtering for --git-changes (include ignored files)
+  make-sync pull --bypass-ignore  Bypass .sync_ignore filtering (include ignored files)
 
-Flags can be combined:
-  make-sync pull --force --git-changes        Force pull only git-modified files
-  make-sync pull --path src --git-changes     Intersection: git-modified files inside src/
-  make-sync pull --git-changes --bypass-ignore  Git-modified files including ignored/untracked ones`,
+Catatan:
+  --git-changes sementara dinonaktifkan. Gunakan --path <path> untuk scope
+  file/folder tertentu, atau tanpa flag scope untuk full project sync.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// --git-changes sementara dinonaktifkan
+		if pullGitChanges {
+			fmt.Fprintln(os.Stderr, "❌ --git-changes sementara dinonaktifkan. Gunakan --path <path> untuk scope, atau tanpa flag untuk full project sync.")
+			os.Exit(1)
+		}
+
 		// Validate config exists
 		if !config.ConfigExists() {
 			fmt.Fprintln(os.Stderr, "Config file not found. Run 'make-sync init' first.")
@@ -151,7 +155,7 @@ Flags can be combined:
 
 func init() {
 	pullCmd.Flags().BoolVar(&pullForce, "force", false, "Force mode — may delete local files not present on remote")
-	pullCmd.Flags().BoolVar(&pullGitChanges, "git-changes", false, "Sync only files modified in git working tree (Modified, Added, Untracked)")
+	pullCmd.Flags().BoolVar(&pullGitChanges, "git-changes", false, "Sementara dinonaktifkan — akan ditolak jika dipakai")
 	pullCmd.Flags().BoolVar(&pullBypassIgnore, "bypass-ignore", false, "Bypass .sync_ignore filtering (include ignored/untracked files)")
 	pullCmd.Flags().StringSliceVar(&pullPaths, "path", nil, "Scope to specific file/folder (repeatable, e.g. --path src/index.php --path public)")
 }

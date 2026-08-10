@@ -29,14 +29,18 @@ Modes:
   make-sync push                  Soft push — upload only changed files (safe, no deletes)
   make-sync push --force          Force push — upload + delete remote files not present locally
   make-sync push --path <path>    Scoped push — only sync specific files/folders (repeatable)
-  make-sync push --git-changes    Git-aware push — sync only files modified in git working tree
-  make-sync push --bypass-ignore  Bypass .sync_ignore filtering for --git-changes (include ignored files)
+  make-sync push --bypass-ignore  Bypass .sync_ignore filtering (include ignored files)
 
-Flags can be combined:
-  make-sync push --force --git-changes        Force push only git-modified files
-  make-sync push --path src --git-changes     Intersection: git-modified files inside src/
-  make-sync push --git-changes --bypass-ignore  Git-modified files including ignored/untracked ones`,
+Catatan:
+  --git-changes sementara dinonaktifkan. Gunakan --path <path> untuk scope
+  file/folder tertentu, atau tanpa flag scope untuk full project sync.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// --git-changes sementara dinonaktifkan
+		if pushGitChanges {
+			fmt.Fprintln(os.Stderr, "❌ --git-changes sementara dinonaktifkan. Gunakan --path <path> untuk scope, atau tanpa flag untuk full project sync.")
+			os.Exit(1)
+		}
+
 		// Validate config exists
 		if !config.ConfigExists() {
 			fmt.Fprintln(os.Stderr, "Config file not found. Run 'make-sync init' first.")
@@ -151,7 +155,7 @@ Flags can be combined:
 
 func init() {
 	pushCmd.Flags().BoolVar(&pushForce, "force", false, "Force mode — may delete remote files not present locally")
-	pushCmd.Flags().BoolVar(&pushGitChanges, "git-changes", false, "Sync only files modified in git working tree (Modified, Added, Untracked)")
+	pushCmd.Flags().BoolVar(&pushGitChanges, "git-changes", false, "Sementara dinonaktifkan — akan ditolak jika dipakai")
 	pushCmd.Flags().BoolVar(&pushBypassIgnore, "bypass-ignore", false, "Bypass .sync_ignore filtering (include ignored/untracked files)")
 	pushCmd.Flags().StringSliceVar(&pushPaths, "path", nil, "Scope to specific file/folder (repeatable, e.g. --path src/index.php --path public)")
 }
