@@ -28,6 +28,13 @@ func NewIgnoreCache(absRoot string) *IgnoreCache {
 // Match returns true if the given path (absolute or relative) should be ignored.
 // isDir indicates whether the path refers to a directory.
 func (c *IgnoreCache) Match(path string, isDir bool) bool {
+	// The project root itself must never be treated as ignored. When path equals
+	// Root, the relative path becomes "." which can spuriously match broad
+	// patterns like "/.*", causing the whole project walk to be skipped.
+	if filepath.Clean(path) == c.Root {
+		return false
+	}
+
 	// PRIORITY CHECK: If file matches any negation pattern (!), include immediately
 	if c.matchesPriorityIncludes(path, isDir) {
 		return false // Not ignored - priority include
