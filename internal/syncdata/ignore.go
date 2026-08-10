@@ -350,3 +350,29 @@ func (c *IgnoreCache) GetAllPatterns() []string {
 
 	return out
 }
+
+// FilterPathsByIgnore returns only the paths (relative to absRoot, forward-slash)
+// that are NOT ignored by .sync_ignore rules. It is used to scope git-changes
+// candidates so untracked/modified files that match ignore patterns (e.g.
+// .sync_collections/**) are excluded from the sync set.
+func FilterPathsByIgnore(absRoot string, paths []string) []string {
+	ic := NewIgnoreCache(absRoot)
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = filepath.ToSlash(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		abs := p
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(absRoot, filepath.FromSlash(p))
+		}
+		// Only files are candidates here (git status entries are files);
+		// directories inside an ignored subtree will be excluded via their files.
+		if ic.Match(abs, false) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}

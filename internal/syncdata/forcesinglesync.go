@@ -26,7 +26,9 @@ func normalizeManualPrefix(prefix string) string {
 	return prefix
 }
 
-func buildManualIgnoreProfilesForSelection(cfg *config.Config, absRoot string, selectedPrefixes []string) map[string][]string {
+// BuildManualIgnoreProfilesForSelection returns per-prefix ignore profiles based on
+// selectedPrefixes intersected with cfg.Devsync.ManualTransferIgnores.
+func BuildManualIgnoreProfilesForSelection(cfg *config.Config, absRoot string, selectedPrefixes []string) map[string][]string {
 	out := make(map[string][]string)
 	if cfg == nil || len(cfg.Devsync.ManualTransferIgnores) == 0 || len(selectedPrefixes) == 0 {
 		return out
@@ -38,7 +40,7 @@ func buildManualIgnoreProfilesForSelection(cfg *config.Config, absRoot string, s
 	}
 
 	for rawPath, rules := range cfg.Devsync.ManualTransferIgnores {
-		rels := normalizeToRelativePrefixes(absRoot, []string{rawPath})
+		rels := NormalizeToRelativePrefixes(absRoot, []string{rawPath})
 		for _, rel := range rels {
 			rel = normalizeManualPrefix(rel)
 			if _, ok := selected[rel]; !ok {
@@ -130,7 +132,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			switch folderChoice {
 			case "All data registered in manual_sync only":
 				// normalize registered paths into prefixes relative to localRoot
-				prefixes = normalizeToRelativePrefixes(absRoot, registered)
+				prefixes = NormalizeToRelativePrefixes(absRoot, registered)
 				if len(prefixes) == 0 {
 					util.Default.Println("ℹ️  No registered paths found.")
 					continue
@@ -142,7 +144,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 					util.Default.Println("ℹ️  Empty selection")
 					continue
 				}
-				prefixes = normalizeToRelativePrefixes(absRoot, []string{single})
+				prefixes = NormalizeToRelativePrefixes(absRoot, []string{single})
 				if len(prefixes) == 0 {
 					util.Default.Println("ℹ️  Selected path is outside project root or invalid.")
 					continue
@@ -165,7 +167,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 			// execute selected action
 			// small debug: show prefixes used
 			util.Default.Printf("🔎 Using prefixes: %v\n", prefixes)
-			manualProfiles := buildManualIgnoreProfilesForSelection(cfg, absRoot, prefixes)
+			manualProfiles := BuildManualIgnoreProfilesForSelection(cfg, absRoot, prefixes)
 
 			func() {
 				if isBypassMode(modeChoice) {
@@ -181,7 +183,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 				case "Download":
 					util.Default.Printf("🔁 Running Download (%s) for prefixes: %v\n", modeChoice, prefixes)
 					// Single-sync indexing intentionally bypasses remote .sync_ignore.
-					if err := runRemoteIndexingForPull(cfg, true, prefixes); err != nil {
+					if err := RunRemoteIndexingForPull(cfg, true, prefixes); err != nil {
 						util.Default.Printf("❌ Remote indexing (safe_pull) failed: %v\n", err)
 						return
 					}
@@ -219,7 +221,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 				case "Upload":
 					util.Default.Printf("🔁 Running Upload (%s) for prefixes: %v\n", modeChoice, prefixes)
 					// Single-sync indexing intentionally bypasses remote .sync_ignore.
-					if err := runRemoteIndexingForPull(cfg, true, prefixes); err != nil {
+					if err := RunRemoteIndexingForPull(cfg, true, prefixes); err != nil {
 						util.Default.Printf("❌ Remote indexing (safe_push) failed: %v\n", err)
 						return
 					}
@@ -263,7 +265,10 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 // runRemoteIndexingForPull mirrors the safe_pull_sync flow: it builds the agent
 // (with fallback) using remote detection, uploads agent and config, and runs
 // remote indexing so the DB is fresh before pulling.
-func runRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool, prefixes []string) error {
+// RunRemoteIndexingForPull builds the agent (with fallback), uploads it to remote,
+// and runs remote indexing so the DB is fresh before pulling/pushing with the given prefixes.
+// If bypassIgnore is true, remote .sync_ignore is skipped.
+func RunRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool, prefixes []string) error {
 	// Determine target OS
 	targetOS := cfg.Devsync.OSTarget
 	if strings.TrimSpace(targetOS) == "" {
@@ -321,9 +326,9 @@ func runRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool, prefixes []
 	return nil
 }
 
-// normalizeToRelativePrefixes converts a list of configured paths (absolute or relative)
+// NormalizeToRelativePrefixes converts a list of configured paths (absolute or relative)
 // into relative forward-slash prefixes under absRoot. Entries outside absRoot are skipped.
-func normalizeToRelativePrefixes(absRoot string, paths []string) []string {
+func NormalizeToRelativePrefixes(absRoot string, paths []string) []string {
 	dedup := make(map[string]struct{})
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
