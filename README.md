@@ -6,7 +6,7 @@ PERINGATAN: Fitur "Pipeline System" telah dihapus dari rilis saat ini. Bagian pi
 
 ## Fitur Utama
 - Safe Pull/Push: indeks remote (SQLite) dibuat dulu, lalu bandingkan hash untuk unduh/unggah yang berubah saja.
-- One-Shot Push/Pull (CLI): perintah `make-sync push` / `make-sync pull` untuk sinkronisasi sekali jalan — mendukung `--path` (scoped), `--force`, `--git-changes` (git-aware), dan `--bypass-ignore`.
+- One-Shot Push/Pull (CLI): perintah `make-sync push` / `make-sync pull` untuk sinkronisasi sekali jalan — mendukung `--path` (scoped), `--force`, dan `--bypass-ignore`. (`--git-changes` sementara dinonaktifkan.)
 - Manual/Single Sync Menu:
   - Download/Upload
   - Pilih folder: salah satu path terdaftar atau semua yang terdaftar
@@ -144,7 +144,6 @@ Selain menu interaktif, tersedia perintah one-shot `push` dan `pull` untuk sinkr
 make-sync push                  # Soft push — unggah file yang berubah saja (aman, tanpa delete)
 make-sync push --force          # Force push — unggah + hapus file remote yang tidak ada di lokal
 make-sync push --path <path>    # Scoped push — hanya path tertentu (bisa diulang)
-make-sync push --git-changes    # Git-aware push — hanya file Modified/Added/Untracked di working tree
 make-sync push --bypass-ignore  # Lewati filter .sync_ignore (termasuk file yang di-ignore)
 ```
 
@@ -152,25 +151,21 @@ make-sync push --bypass-ignore  # Lewati filter .sync_ignore (termasuk file yang
 make-sync pull                  # Soft pull — unduh file yang berubah saja (aman, tanpa delete)
 make-sync pull --force          # Force pull — unduh + hapus file lokal yang tidak ada di remote
 make-sync pull --path <path>    # Scoped pull — hanya path tertentu (bisa diulang)
-make-sync pull --git-changes    # Git-aware pull — hanya file Modified/Added/Untracked di working tree
 make-sync pull --bypass-ignore  # Lewati filter .sync_ignore (termasuk file yang di-ignore)
 ```
 
 Kombinasi flag:
 
 ```bash
-make-sync push --force --git-changes          # Force push hanya file git-modified
-make-sync push --path src --git-changes       # Interseksi: file git-modified di dalam src/
-make-sync push --git-changes --bypass-ignore  # Git-modified termasuk ignored/untracked
-make-sync pull --path data --bypass-ignore    # Pull scoped + bypass
+make-sync push --force --path src   # Force push hanya dalam scope src/
+make-sync pull --path data --bypass-ignore  # Pull scoped + bypass
 ```
 
 Catatan perilaku:
-- `--git-changes` membaca status working tree via git (Modified, Added, Untracked). File `Deleted` tidak disertakan — perlu `--force`.
-- Tanpa `--bypass-ignore`, kandidat `--git-changes` yang match pola `.sync_ignore` otomatis dibuang.
+- `--git-changes` sementara dinonaktifkan — jika dipakai, perintah ditolak dengan pesan error. Gunakan `--path` untuk scope.
 - `--bypass-ignore` menonaktifkan seluruh filter ignore — hati-hati karena file sensitif (mis. `.env`, `.ssh_encrypto`, `.sync_collections/**`) ikut ditransfer.
 - `--force` selalu dilindungi konfirmasi captcha untuk mencegah penghapusan tidak sengaja.
-- Tanpa flag scope (`--path`/`--git-changes`), perintah berjalan sebagai full-project sync memakai mode Safe/Bypass/Force dari mesin pull/push.
+- Tanpa flag scope (`--path`), perintah berjalan sebagai full-project sync memakai mode Safe/Bypass/Force dari mesin pull/push.
 
 ## Eksekusi Perintah Remote (exec)
 
