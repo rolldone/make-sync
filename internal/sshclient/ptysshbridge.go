@@ -383,9 +383,15 @@ func (bridge *PTYSSHBridge) StartInteractiveShell() error {
 	bridge.exitingMu.Unlock()
 
 	// Notify registered exit listener (if any). Protect invocation with mutex
+	// and guard against nil so the bridge never panics when no listener is set.
+	bridge.exitMu.Lock()
+	el := bridge.exitListener
+	bridge.exitMu.Unlock()
 	util.Default.Print("PTYSSHBridge: invoking exit listener")
 	util.Default.ClearLine()
-	bridge.exitListener()
+	if el != nil {
+		el()
+	}
 	log.Println("PTYSSHBridge : SetOnExitListener exit listener done")
 	return nil
 }

@@ -635,6 +635,17 @@ func RenderTemplateVariables(cfg *Config) error {
 
 // LoadAndRenderConfig loads config, validates it, and renders template variables in memory
 func LoadAndRenderConfig() (*Config, error) {
+	return loadAndRenderConfig(false)
+}
+
+// LoadAndRenderConfigQuiet loads and renders the config but suppresses the
+// informational renderer messages (e.g. "No template references found ...").
+// Used by `make-sync exec` so those status lines don't clutter streamed output.
+func LoadAndRenderConfigQuiet() (*Config, error) {
+	return loadAndRenderConfig(true)
+}
+
+func loadAndRenderConfig(quiet bool) (*Config, error) {
 	// First load and validate
 	cfg, err := LoadAndValidateConfig()
 	if err != nil {
@@ -642,7 +653,7 @@ func LoadAndRenderConfig() (*Config, error) {
 	}
 
 	// Then render template variables in memory (advanced)
-	renderedCfg, err := RenderTemplateVariablesInMemory(cfg)
+	renderedCfg, err := renderTemplateVariablesInMemory(cfg, quiet)
 	if err != nil {
 		return nil, fmt.Errorf("template rendering failed: %v", err)
 	}
@@ -673,6 +684,10 @@ func LoadAndRenderConfig() (*Config, error) {
 
 // RenderTemplateVariablesInMemory renders template variables without writing to file
 func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
+	return renderTemplateVariablesInMemory(cfg, false)
+}
+
+func renderTemplateVariablesInMemory(cfg *Config, quiet bool) (*Config, error) {
 	// Create a copy of the config for rendering
 	renderedCfg := *cfg
 
@@ -810,10 +825,12 @@ func RenderTemplateVariablesInMemory(cfg *Config) (*Config, error) {
 		}
 	}
 
-	if renderCount > 0 {
-		printer.Printf("✅ Template rendering completed: %d references resolved\n", renderCount)
-	} else {
-		printer.Println("ℹ️  No template references found in configuration")
+	if !quiet {
+		if renderCount > 0 {
+			printer.Printf("✅ Template rendering completed: %d references resolved\n", renderCount)
+		} else {
+			printer.Println("ℹ️  No template references found in configuration")
+		}
 	}
 
 	return &renderedCfg, nil

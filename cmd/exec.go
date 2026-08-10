@@ -2,14 +2,15 @@ package cmd
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 
 	"make-sync/internal/config"
+	"make-sync/internal/sshclient"
 	"make-sync/internal/syncdata"
+	"make-sync/internal/util"
 
 	"github.com/spf13/cobra"
 )
@@ -34,9 +35,37 @@ var execCmd = &cobra.Command{
 	DisableFlagParsing: true,
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Usage: make-sync exec <command...>")
+			fmt.Fprintln(os.Stderr, "Usage: make-sync exec [-it] <command...>")
 			os.Exit(1)
 			return
+		}
+
+		// Detect interactive mode. Supports BOTH:
+		//  1. Explicit leading flag: make-sync exec -it <command...>  (or --it / -i)
+		//  2. Auto-detect: the command clearly wants a shell/TTY (e.g. ends with
+		//     `bash`/`sh`/`zsh` or contains `-it`/`-ti`/`-t`), which is exactly the
+		//     "type directly into the server" behavior the user wants. For example
+		//     `docker compose exec -it app bash` should open an interactive PTY
+		//     automatically, while `bash -c 'echo hi'` stays a one-shot command.
+		//
+		// Because DisableFlagParsing is true, cobra hands us everything verbatim,
+		// so we strip leading interactive flags manually and keep the rest as the
+		// command to run.
+		interactive := false
+		var restArgs []string
+		for len(args) > 0 {
+			switch args[0] {
+			case "-it", "--it", "-i", "--interactive":
+				interactive = true
+				args = args[1:]
+			default:
+				restArgs = args
+				args = nil
+			}
+		}
+
+		if !interactive && wantsInteractiveShell(restArgs) {
+			interactive = true
 		}
 
 		// Load config
@@ -45,7 +74,7 @@ var execCmd = &cobra.Command{
 			os.Exit(1)
 			return
 		}
-		cfg, err := config.LoadAndRenderConfig()
+		cfg, err := config.LoadAndRenderConfigQuiet()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Failed to load config: %v\n", err)
 			os.Exit(1)
@@ -55,38 +84,32 @@ var execCmd = &cobra.Command{
 		// Determine remote working directory
 		remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemotePath)
 
-		// Build raw command to execute (reconstruct from argv)
-		// For the POSIX/base64 path we must preserve argument literalness (quotes/backslashes).
-		// Reconstruct a POSIX-safe command by single-quoting each arg so the remote shell
-		// receives the same argument values the local shell passed to us.
-		var quotedArgs []string
-		for _, a := range args {
-			quotedArgs = append(quotedArgs, shellEscapePOSIX(a))
-		}
-		posixCmd := strings.Join(quotedArgs, " ")
-		// Keep a raw, unquoted join for Windows fallback
-		rawCmd := strings.Join(args, " ")
-
-		// We'll send the command payload as base64 to avoid quoting issues when
-		// executing on the remote shell. This is non-interactive only.
-		// Encode payload
-		// Note: base64 output contains only A-Za-z0-9+/= characters which are
-		// safe to wrap in single quotes for POSIX shells.
-		// Encode the POSIX-quoted command so that when decoded on the remote side
-		// and executed by `bash -s`, argument quoting is preserved and backslashes
-		// (e.g. psql meta-commands like `\dt`) are passed through correctly.
-		encoded := base64.StdEncoding.EncodeToString([]byte(posixCmd))
+		// --- Teruskan mentah (forward raw) ---
+		// User memilih: teks setelah 'exec' diperlakukan persis seperti diketik
+		// langsung ke terminal server (bebas pakai petik tunggal/ganda, $var,
+		// perintah majemuk, dll). Cobra dengan DisableFlagParsing memberi kita
+		// args yang nilainya sudah dipecah oleh shell lokal (petik asli dibuang,
+		// nilai arg sudah benar). Kita gabung dengan spasi menjadi satu baris
+		// perintah, lalu serahkan ke remote `bash -lc '<baris>'`. Bash remote-lah
+		// yang menginterpretasi petik/variabel/operator secara natural.
+		//
+		// Catatan: kami TIDAK lagi memakai base64 + `bash -s`. Uji nyata
+		// menunjukkan `bash -s` (script via stdin) gagal untuk `'bash -c echo hi'`
+		// dan `'ls && echo done'` karena seluruh perintah dibungkus petik tunggal
+		// menjadi satu kata (command not found). Sebaliknya `bash -lc '<raw>'`
+		// memenuhi persis perilaku "seperti akses server langsung".
+		rawCmd := strings.Join(restArgs, " ")
 
 		// Build both POSIX and Windows variants so we can run regardless of remote OS
 		buildPosix := func() string {
-			// echo 'BASE64' | base64 -d | bash -s
+			// bash -lc '<combined>' — seluruh baris dibungkus petik tunggal aman via
+			// shellEscapePOSIX. Bash remote-lah yang menginterpretasi petik/variabel
+			// yang diketik user, persis seperti terminal langsung.
+			combined := rawCmd
 			if remotePath != "" {
-				// cd into remotePath then run decoded payload; ensure remotePath and payload are shell-escaped
-				combined := fmt.Sprintf("cd %s && echo %s | base64 -d | bash -s", shellEscapePOSIX(remotePath), shellEscapePOSIX(encoded))
-				return fmt.Sprintf("bash -lc %s", shellEscapePOSIX(combined))
+				combined = "cd " + shellEscapePOSIX(remotePath) + " && " + rawCmd
 			}
-			combined := fmt.Sprintf("echo %s | base64 -d | bash -s", shellEscapePOSIX(encoded))
-			return fmt.Sprintf("bash -lc %s", shellEscapePOSIX(combined))
+			return "bash -lc " + shellEscapePOSIX(combined)
 		}
 		buildWindows := func() string {
 			if remotePath != "" {
@@ -110,6 +133,59 @@ var execCmd = &cobra.Command{
 			os.Exit(1)
 			return
 		}
+
+		// --- Interactive mode (exec -it) ---
+		// Gives the user a real PTY bridge: local stdin is forwarded to the remote
+		// shell so they can `docker compose exec -it app bash` and interact like a
+		// direct terminal. Falls back through Pause/Resume/Close automatically.
+		if interactive {
+			oldState, err := util.NewRaw()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "❌ Failed to enter raw terminal mode: %v\n", err)
+				sshCli.Close()
+				os.Exit(1)
+				return
+			}
+
+			userCmd := strings.TrimSpace(strings.Join(restArgs, " "))
+			// Build the command that lands in remotePath (and runs the user's command if any).
+			var initCmd string
+			switch {
+			case remotePath != "" && userCmd != "":
+				initCmd = "cd " + shellEscapePOSIX(remotePath) + " && " + userCmd
+			case remotePath != "" && userCmd == "":
+				initCmd = "cd " + shellEscapePOSIX(remotePath) + " && exec bash -l"
+			case userCmd != "":
+				initCmd = userCmd
+			default:
+				initCmd = "exec bash -l"
+			}
+
+			fmt.Fprintf(os.Stdout, "🔗 Interactive shell (make-sync exec). Type 'exit' to quit.\n")
+			bridge, err := sshclient.NewPTYSSHBridgeWithCommand(sshCli, initCmd)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "❌ Failed to create PTY bridge: %v\n", err)
+				util.ResetRaw(oldState)
+				sshCli.Close()
+				os.Exit(1)
+				return
+			}
+
+			// Mark the shell as done/closed on exit so we can restore the terminal
+			// cleanly after the user exits the remote shell.
+			bridge.SetOnExitListener(func() {
+				// nothing extra needed here; cleanup happens after StartInteractiveShell returns
+			})
+
+			if err := bridge.StartInteractiveShell(); err != nil {
+				fmt.Fprintf(os.Stderr, "❌ Interactive shell ended with error: %v\n", err)
+			}
+			bridge.Close()
+			sshCli.Close()
+			util.ResetRaw(oldState)
+			return
+		}
+
 		defer sshCli.Close()
 
 		// Heuristic matcher for "shell not found" so we can transparently try the other OS style
@@ -181,4 +257,50 @@ var execCmd = &cobra.Command{
 			return
 		}
 	},
+}
+
+// wantsInteractiveShell reports whether the given command clearly asks for an
+// interactive shell / TTY. It returns true when:
+//   - the command contains an explicit interactive flag like `-it`, `-ti`, or `-t`
+//     (e.g. `docker compose exec -it app bash`), OR
+//   - the command ends with a bare interactive shell binary (`bash`, `sh`, `zsh`)
+//     with no `-c`/`-lc` (so `bash -c 'echo hi'` is correctly treated as one-shot).
+//
+// This gives the "type directly into the server" experience: when the user writes
+// something that needs a TTY, we automatically open a PTY bridge.
+func wantsInteractiveShell(args []string) bool {
+	cmdText := strings.Join(args, " ")
+
+	// Bail out for obvious one-shot forms first.
+	// `bash -c '...'`, `bash -lc '...'`, `-l -c`, `sh -c`, etc.
+	for _, w := range strings.Fields(cmdText) {
+		switch w {
+		case "-c", "-lc", "-l -c":
+			return false
+		}
+	}
+
+	// Explicit interactive flag present somewhere in the command.
+	if strings.Contains(cmdText, " -it ") ||
+		strings.Contains(cmdText, " -ti ") ||
+		strings.HasSuffix(cmdText, " -it") ||
+		strings.HasSuffix(cmdText, " -ti") ||
+		strings.Contains(cmdText, " -t ") ||
+		strings.HasSuffix(cmdText, " -t") {
+		return true
+	}
+
+	// Ends with a bare interactive shell binary (no -c). e.g. "... app bash"
+	last := ""
+	if len(args) > 0 {
+		last = strings.TrimSpace(args[len(args)-1])
+	}
+	switch last {
+	case "bash", "sh", "zsh", "bash -l", "sh -l", "zsh -l", "bash --login", "sh --login":
+		// The single-token cases are covered by the switch; the " -l" variants
+		// arrive as a single token when quoted ("bash -l") so include them above.
+		return true
+	}
+
+	return false
 }
