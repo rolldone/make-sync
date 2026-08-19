@@ -280,7 +280,8 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 
 	// Set permissions on Unix (like watcher does)
 	if !strings.Contains(strings.ToLower(osTarget), "win") {
-		chmodCmd := fmt.Sprintf("chmod +x %s", remoteAgentPath)
+		// Quote the path so spaces/special chars in the remote path are safe in bash.
+		chmodCmd := fmt.Sprintf("chmod +x '%s'", strings.ReplaceAll(remoteAgentPath, "'", "'\\''"))
 		log.Println("[runner.go] DEBUG: Running chmod command:", chmodCmd)
 		if err := client.RunCommand(chmodCmd); err != nil {
 			log.Println("[runner.go] DEBUG: chmod command failed:", err)

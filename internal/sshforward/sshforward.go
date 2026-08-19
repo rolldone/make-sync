@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"make-sync/internal/util"
@@ -147,25 +146,25 @@ func (r *Runner) StartForwards(ctx context.Context, specs []ForwardSpec) ([]*Act
 		// verify ssh process is alive shortly after start. If it exited immediately
 		// treat that as a failure and abort with log path for debugging.
 		alive := false
-		// Poll process existence using syscall.Kill(pid, 0)
+		// Poll process existence using processAlive (cross-platform helper).
 		for i := 0; i < 15; i++ {
 			if af.Cmd == nil || af.Cmd.Process == nil {
 				break
 			}
 			pid := af.Cmd.Process.Pid
-			err := syscall.Kill(pid, 0)
-			if err == nil || err == syscall.EPERM {
+			ok, herr := processAlive(pid)
+			if herr != nil {
+				// lookup error: process may not be fully started yet, keep polling
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			if ok {
 				alive = true
 				break
 			}
-			if err == syscall.ESRCH {
-				// process does not exist -> exited
-				// ensure logfile flushed
-				_ = af.LogPath
-				r.stopMany(started)
-				return nil, fmt.Errorf("ssh process for %s exited immediately; see log: %s", hostAlias, af.LogPath)
-			}
-			time.Sleep(100 * time.Millisecond)
+			// process does not exist -> exited immediately
+			r.stopMany(started)
+			return nil, fmt.Errorf("ssh process for %s exited immediately; see log: %s", hostAlias, af.LogPath)
 		}
 		if !alive {
 			r.stopMany(started)

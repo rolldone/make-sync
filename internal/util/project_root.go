@@ -1,7 +1,6 @@
 package util
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -89,25 +88,7 @@ func GetProjectRoot() (string, error) {
 		// fmt.Printf("DEBUG: Production mode final root: %s\n", projectRoot)
 	}
 
-	return projectRoot, nil // Production mode: project root is the directory containing the executable
-	// After symlink resolution, this should now point to the actual project location
-	root := filepath.Dir(exePath)
-
-	// Additional safety check: if we resolved a symlink and the resolved path
-	// doesn't contain go.mod, try searching upward from the resolved location
-	if originalExePath != exePath {
-		if _, err := os.Stat(filepath.Join(root, "go.mod")); os.IsNotExist(err) {
-			// Symlink was resolved but go.mod not found at executable location
-			// Try searching upward from resolved path
-			if foundRoot, err := findProjectRootFromPath(root); err == nil {
-				root = foundRoot
-			}
-		}
-	}
-
-	// Debug: uncomment to see path detection
-	fmt.Printf("DEBUG: Production mode detected. Original: %s, Resolved: %s, Project root: %s\n", originalExePath, exePath, root)
-	return root, nil
+	return projectRoot, nil
 }
 
 // isDevelopmentMode checks if the executable path indicates we're running via "go run"

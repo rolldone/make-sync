@@ -14,8 +14,6 @@ import (
 
 	"strings"
 
-	gspt "github.com/erikdubbelboer/gspt"
-
 	"golang.org/x/term"
 )
 
@@ -73,7 +71,7 @@ func main() {
 	procTitle = strings.Join(strings.Fields(procTitle), "-")
 	// PR_SET_NAME (Linux comm) limited to 16 bytes including NUL, so keep ~15 bytes
 	procTitle = truncateToBytes(procTitle, 15)
-	gspt.SetProcTitle(procTitle)
+	util.SetProcTitle(procTitle)
 
 	// Capture original terminal state (if stdin is a TTY) so we can restore on forced exit.
 	var origState *term.State

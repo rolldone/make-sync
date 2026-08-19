@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -139,7 +140,8 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 	if strings.Contains(strings.ToLower(targetOS), "win") {
 		remoteAgentPath = remoteSyncTemp + "\\" + remoteExecName
 	} else {
-		remoteAgentPath = filepath.Join(remoteSyncTemp, remoteExecName)
+		// path.Join always uses forward slashes, matching the POSIX remote path.
+		remoteAgentPath = path.Join(remoteSyncTemp, remoteExecName)
 	}
 
 	return remoteAgentPath, nil
@@ -184,7 +186,8 @@ func uploadAgentBinary(client *sshclient.SSHClient, localAgentPath, remoteSyncTe
 	if strings.Contains(strings.ToLower(targetOS), "win") {
 		remoteAgentPath = remoteSyncTemp + "\\" + localFileName
 	} else {
-		remoteAgentPath = filepath.Join(remoteSyncTemp, localFileName)
+		// path.Join always uses forward slashes, matching the POSIX remote path.
+		remoteAgentPath = path.Join(remoteSyncTemp, localFileName)
 	}
 
 	util.Default.Printf("📦 Uploading agent: %s -> %s\n", absAgentPath, remoteAgentPath)
@@ -196,7 +199,12 @@ func uploadAgentBinary(client *sshclient.SSHClient, localAgentPath, remoteSyncTe
 
 	// Set execute permission on Unix
 	if !strings.Contains(strings.ToLower(targetOS), "win") {
-		chmodCmd := fmt.Sprintf("chmod +x %s", remoteAgentPath)
+		// Use path.Join (not filepath.Join) so the remote POSIX path always uses
+		// forward slashes even when running on Windows. filepath.Join on Windows would
+		// produce backslashes which break the remote `chmod +x` command.
+		remoteAgentPath = path.Join(remoteSyncTemp, localFileName)
+		// Quote the path so spaces/special chars in the remote path are safe in bash.
+		chmodCmd := fmt.Sprintf("chmod +x '%s'", strings.ReplaceAll(remoteAgentPath, "'", "'\\''"))
 		log.Println("[deployagent_unified.go] DEBUG: Running chmod command:", chmodCmd)
 		if err := client.RunCommand(chmodCmd); err != nil {
 			log.Println("[deployagent_unified.go] DEBUG: chmod command failed:", err)
@@ -245,7 +253,7 @@ func uploadConfigJSON(client *sshclient.SSHClient, cfg *config.Config, remoteSyn
 	if strings.Contains(strings.ToLower(targetOS), "win") {
 		remoteConfigPath = remoteSyncTemp + "\\config.json"
 	} else {
-		remoteConfigPath = filepath.Join(remoteSyncTemp, "config.json")
+		remoteConfigPath = path.Join(remoteSyncTemp, "config.json")
 	}
 
 	// Upload config to remote
