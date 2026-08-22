@@ -370,11 +370,12 @@ func showWorkspaceSubMenu(path string) string {
 		}
 		// Spawn new shell in the target directory
 		var cmd *exec.Cmd
-		quotedPath := fmt.Sprintf("\"%s\"", path) // Quote path to handle spaces
 		if runtime.GOOS == "windows" {
-			cmd = exec.Command("cmd", "/c", fmt.Sprintf("cd /d %s && cmd", quotedPath))
+			cmd = exec.Command("cmd")
+			cmd.Dir = path
 		} else {
 			// Linux, macOS, etc.
+			quotedPath := fmt.Sprintf("\"%s\"", path) // Quote path to handle spaces
 			cmd = exec.Command("bash", "-c", fmt.Sprintf("cd %s && exec bash", quotedPath))
 		}
 		cmd.Stdout = os.Stdout

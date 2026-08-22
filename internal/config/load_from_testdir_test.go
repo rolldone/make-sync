@@ -42,6 +42,21 @@ func TestLoadConfigFromTestFolderUsingDotEnv(t *testing.T) {
 				break
 			}
 		}
+		// If MAKE_SYNC_HOST was not found in the existing .env, use the default
+		if expected == "" {
+			defaultIP := "10.11.12.13"
+			// Append to the existing .env so LoadAndValidateConfig can find it
+			f, err := os.OpenFile(envPath, os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				t.Fatalf("failed to append to test .env: %v", err)
+			}
+			if _, err := f.WriteString("\nMAKE_SYNC_HOST=" + defaultIP + "\n"); err != nil {
+				f.Close()
+				t.Fatalf("failed to write MAKE_SYNC_HOST to test .env: %v", err)
+			}
+			f.Close()
+			expected = defaultIP
+		}
 	}
 
 	// change cwd to test dir

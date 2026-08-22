@@ -1,0 +1,9 @@
+make-sync pull src --force
+make-sync pull src --bypass --force
+make-sync push src --bypass --force
+
+make-sync watch --bypass
+make-sync ssh
+
+make-sync cmd "docker compose down && docker compose up"
+make-sync cmd 

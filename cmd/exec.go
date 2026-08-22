@@ -21,10 +21,60 @@ func shellEscapePOSIX(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// shellQuoteArgsPOSIX re-quotes each argument for safe inclusion in a POSIX
+// shell command string. Special characters that have meaning in shell (spaces,
+// semicolons, single-quotes, pipes, etc.) are wrapped via shellEscapePOSIX.
+// Plain tokens without special chars pass through unchanged.
+func shellQuoteArgsPOSIX(args []string) string {
+	var parts []string
+	for _, a := range args {
+		needsQuote := false
+		for _, c := range a {
+			if c == ' ' || c == '\t' || c == '\'' || c == '"' || c == ';' ||
+				c == '|' || c == '&' || c == '(' || c == ')' || c == '<' ||
+				c == '>' || c == '$' || c == '`' || c == '\\' || c == '!' ||
+				c == '*' || c == '?' || c == '#' || c == '~' || c == '\n' {
+				needsQuote = true
+				break
+			}
+		}
+		if needsQuote {
+			parts = append(parts, shellEscapePOSIX(a))
+		} else {
+			parts = append(parts, a)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // quoteWindows wraps a string in double quotes for cmd.exe and escapes embedded quotes by doubling them.
 // In cmd.exe, the way to include a literal double quote inside a quoted string is to double it: "".
 func quoteWindows(s string) string {
 	return "\"" + strings.ReplaceAll(s, "\"", "\"\"") + "\""
+}
+
+// shellQuoteArgsWindows re-quotes each argument for safe inclusion in a
+// cmd.exe /C command string. Arguments containing spaces, special cmd.exe
+// characters (semicolons, pipes, etc.) are wrapped in double quotes.
+func shellQuoteArgsWindows(args []string) string {
+	var parts []string
+	for _, a := range args {
+		needsQuote := false
+		for _, c := range a {
+			if c == ' ' || c == '\t' || c == '"' || c == '&' || c == '|' ||
+				c == '<' || c == '>' || c == '^' || c == '%' || c == '!' ||
+				c == '(' || c == ')' || c == ';' || c == '\n' {
+				needsQuote = true
+				break
+			}
+		}
+		if needsQuote {
+			parts = append(parts, quoteWindows(a))
+		} else {
+			parts = append(parts, a)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 var execCmd = &cobra.Command{
@@ -98,7 +148,14 @@ var execCmd = &cobra.Command{
 		// dan `'ls && echo done'` karena seluruh perintah dibungkus petik tunggal
 		// menjadi satu kata (command not found). Sebaliknya `bash -lc '<raw>'`
 		// memenuhi persis perilaku "seperti akses server langsung".
-		rawCmd := strings.Join(restArgs, " ")
+		//
+		// Kita menggunakan shellQuoteArgsPOSIX/Windows untuk merekonstruksi
+		// command dengan benar: setiap arg yang mengandung karakter spesial
+		// (spasi, semicolon, kutip, pipe, dll) akan di-quote ulang agar
+		// boundary antar argumen tetap terjaga di remote shell.
+		// Contoh: php -r "echo 'PHP_OK';" → php -r 'echo '"'"'PHP_OK'"'"';'
+		// sehingga remote menerima arg persis seperti yang user ketik.
+		rawCmd := shellQuoteArgsPOSIX(restArgs)
 
 		// Build both POSIX and Windows variants so we can run regardless of remote OS
 		buildPosix := func() string {
@@ -112,10 +169,11 @@ var execCmd = &cobra.Command{
 			return "bash -lc " + shellEscapePOSIX(combined)
 		}
 		buildWindows := func() string {
+			winCmd := shellQuoteArgsWindows(restArgs)
 			if remotePath != "" {
-				return fmt.Sprintf("cmd.exe /C cd /d %s && %s", quoteWindows(remotePath), rawCmd)
+				return fmt.Sprintf("cmd.exe /C cd /d %s && %s", quoteWindows(remotePath), winCmd)
 			}
-			return fmt.Sprintf("cmd.exe /C %s", rawCmd)
+			return fmt.Sprintf("cmd.exe /C %s", winCmd)
 		}
 
 		// Prefer order based on config, but fall back to the other if the shell is unavailable.
@@ -147,7 +205,10 @@ var execCmd = &cobra.Command{
 				return
 			}
 
-			userCmd := strings.TrimSpace(strings.Join(restArgs, " "))
+			// For interactive PTY, we pass args joined with proper quoting
+			// to preserve argument boundaries (e.g. semicolons in php -r "echo 'OK';")
+			userCmd := shellQuoteArgsPOSIX(restArgs)
+			userCmd = strings.TrimSpace(userCmd)
 			// Build the command that lands in remotePath (and runs the user's command if any).
 			var initCmd string
 			switch {
