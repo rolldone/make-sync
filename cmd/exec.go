@@ -77,6 +77,44 @@ func shellQuoteArgsWindows(args []string) string {
 	return strings.Join(parts, " ")
 }
 
+type shellKind int
+
+const (
+	shellPOSIX shellKind = iota
+	shellWindows
+)
+
+var (
+	posixShellMissingRE     = regexp.MustCompile(`(?i)^(?:bash|sh|/[^:[:space:]]*/(?:bash|sh)):\s*(?:command not found|not found)$`)
+	posixWrapperMissingRE   = regexp.MustCompile(`(?i)^(?:bash|sh|/[^:[:space:]]*/(?:bash|sh)):\s*(?:[0-9]+:\s*)?(?:line [0-9]+:\s*)?(?:bash|/[^:[:space:]]*/bash):\s*(?:command not found|not found)$`)
+	posixWindowsMissingRE   = regexp.MustCompile(`(?i)^(?:'?(?:bash|sh)(?:\.exe)?'?) is not recognized as an internal or external command(?:,.*)?$`)
+	windowsShellMissingRE   = regexp.MustCompile(`(?i)^(?:'cmd(?:\.exe)?'|"cmd(?:\.exe)?"|cmd(?:\.exe)?) is not recognized as an internal or external command(?:,.*)?$`)
+	windowsWrapperMissingRE = regexp.MustCompile(`(?i)^(?:bash|sh|/[^:[:space:]]*/(?:bash|sh)):\s*(?:[0-9]+:\s*)?(?:line [0-9]+:\s*)?(?:cmd(?:\.exe)?|/[^:[:space:]]*/cmd(?:\.exe)?):\s*(?:command not found|not found)$`)
+)
+
+// isShellUnavailable reports whether stderr explicitly says that the wrapper
+// shell used for this candidate is unavailable. It intentionally rejects
+// ordinary command-not-found diagnostics such as "bash: docker: command not found".
+func isShellUnavailable(stderr string, attempted shellKind) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		switch attempted {
+		case shellPOSIX:
+			if posixShellMissingRE.MatchString(line) || posixWrapperMissingRE.MatchString(line) || posixWindowsMissingRE.MatchString(line) {
+				return true
+			}
+		case shellWindows:
+			if windowsShellMissingRE.MatchString(line) || windowsWrapperMissingRE.MatchString(line) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 var execCmd = &cobra.Command{
 	Use:   "exec",
 	Short: "Execute a command on the remote host",
@@ -180,8 +218,10 @@ var execCmd = &cobra.Command{
 		// If user wants to ignore os_target, we still use it only as a hint for the first try.
 		osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
 		tryOrder := []string{buildPosix(), buildWindows()}
+		shellKinds := []shellKind{shellPOSIX, shellWindows}
 		if strings.Contains(osTarget, "win") {
 			tryOrder = []string{buildWindows(), buildPosix()}
+			shellKinds = []shellKind{shellWindows, shellPOSIX}
 		}
 
 		// Connect SSH
@@ -249,9 +289,6 @@ var execCmd = &cobra.Command{
 
 		defer sshCli.Close()
 
-		// Heuristic matcher for "shell not found" so we can transparently try the other OS style
-		shellMissingRe := regexp.MustCompile(`(?i)(bash|sh|cmd\.exe|cmd)(:|\sis\snot\srecognized|: not found)`) // covers common messages
-
 		var lastErr bytes.Buffer
 		for i, candidate := range tryOrder {
 			// Stream output
@@ -308,8 +345,9 @@ var execCmd = &cobra.Command{
 				return
 			}
 
-			// If shell seems missing, try next candidate; otherwise stop here
-			if i < len(tryOrder)-1 && shellMissingRe.MatchString(stderrBuf.String()) {
+			// Only retry when stderr identifies the wrapper shell attempted for this
+			// candidate as unavailable; command-level failures must stop here.
+			if i < len(tryOrder)-1 && isShellUnavailable(stderrBuf.String(), shellKinds[i]) {
 				continue
 			}
 

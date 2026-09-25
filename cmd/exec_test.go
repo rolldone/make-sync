@@ -113,3 +113,93 @@ func TestShellQuoteArgsWindows(t *testing.T) {
 		})
 	}
 }
+
+func TestIsShellUnavailable(t *testing.T) {
+	tests := []struct {
+		name      string
+		stderr    string
+		attempted shellKind
+		want      bool
+	}{
+		{
+			name:      "bare bash missing",
+			stderr:    "bash: command not found",
+			attempted: shellPOSIX,
+			want:      true,
+		},
+		{
+			name:      "bash not found through sh wrapper",
+			stderr:    "/bin/sh: 1: bash: not found",
+			attempted: shellPOSIX,
+			want:      true,
+		},
+		{
+			name:      "bash path missing through sh wrapper",
+			stderr:    "/bin/sh: 1: /usr/bin/bash: command not found",
+			attempted: shellPOSIX,
+			want:      true,
+		},
+		{
+			name:      "bash unrecognized on Windows",
+			stderr:    "'bash' is not recognized as an internal or external command, operable program or batch file.",
+			attempted: shellPOSIX,
+			want:      true,
+		},
+		{
+			name:      "reported docker compose failure is command-level",
+			stderr:    "bash: docker-compose exec -T app php -v: command not found",
+			attempted: shellPOSIX,
+			want:      false,
+		},
+		{
+			name:      "missing docker command is command-level",
+			stderr:    "bash: line 1: docker-compose: command not found",
+			attempted: shellPOSIX,
+			want:      false,
+		},
+		{
+			name:      "ordinary docker error",
+			stderr:    "Cannot connect to the Docker daemon",
+			attempted: shellPOSIX,
+			want:      false,
+		},
+		{
+			name:      "Windows shell missing",
+			stderr:    "'cmd.exe' is not recognized as an internal or external command, operable program or batch file.",
+			attempted: shellWindows,
+			want:      true,
+		},
+		{
+			name:      "Windows shell missing through POSIX wrapper",
+			stderr:    "bash: line 1: cmd.exe: command not found",
+			attempted: shellWindows,
+			want:      true,
+		},
+		{
+			name:      "POSIX diagnostic does not identify Windows shell missing",
+			stderr:    "bash: command not found",
+			attempted: shellWindows,
+			want:      false,
+		},
+		{
+			name:      "Windows diagnostic does not identify POSIX shell missing",
+			stderr:    "'cmd.exe' is not recognized as an internal or external command",
+			attempted: shellPOSIX,
+			want:      false,
+		},
+		{
+			name:      "mention of bash is not sufficient",
+			stderr:    "application error: bash returned exit status 127",
+			attempted: shellPOSIX,
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isShellUnavailable(tt.stderr, tt.attempted); got != tt.want {
+				t.Errorf("isShellUnavailable(%q, %v) = %t, want %t", tt.stderr, tt.attempted, got, tt.want)
+			}
+		})
+	}
+}
