@@ -463,6 +463,17 @@ func performIndexing(config *AgentConfig, bypassIgnore bool, manualFlagPresent b
 	var idx indexer.IndexMap
 	var ierr error
 
+	// Heartbeat so the parent (and user) can see indexing is alive. Printed
+	// periodically by the indexer while walking/hashing.
+	progress := func(files, dirs int, current string) {
+		util.Default.ClearLine()
+		if current != "" {
+			util.Default.Printf("⏳ Indexing progress: %d files, %d dirs — current: %s\n", files, dirs, current)
+			return
+		}
+		util.Default.Printf("⏳ Indexing progress: %d files, %d dirs\n", files, dirs)
+	}
+
 	// If manual-transfer flag present: either use provided prefixes or read from config
 	if manualFlagPresent {
 		prefixes := manualPrefixes
@@ -498,7 +509,7 @@ func performIndexing(config *AgentConfig, bypassIgnore bool, manualFlagPresent b
 		if len(prefixes) == 0 {
 			util.Default.ClearLine()
 			util.Default.Printf("⚠️  manual-transfer flag present but no prefixes found in flag or config — falling back to full index\n")
-			idx, ierr = indexer.BuildIndex(root, bypassIgnore)
+			idx, ierr = indexer.BuildIndexWithProgress(root, bypassIgnore, progress)
 		} else {
 			// perform per-prefix indexing and merge
 			idx = indexer.IndexMap{}
@@ -509,7 +520,7 @@ func performIndexing(config *AgentConfig, bypassIgnore bool, manualFlagPresent b
 				start := filepath.Join(root, filepath.FromSlash(p))
 				util.Default.ClearLine()
 				util.Default.Printf("🔍 Indexing manual-transfer prefix: %s -> %s\n", pr, start)
-				subIdx, subErr := indexer.BuildIndexSubtree(root, start, bypassIgnore)
+				subIdx, subErr := indexer.BuildIndexSubtreeWithProgress(root, start, bypassIgnore, progress)
 				if subErr != nil {
 					util.Default.ClearLine()
 					util.Default.Printf("⚠️  failed to index prefix %s: %v\n", pr, subErr)
@@ -527,7 +538,7 @@ func performIndexing(config *AgentConfig, bypassIgnore bool, manualFlagPresent b
 			ierr = nil
 		}
 	} else {
-		idx, ierr = indexer.BuildIndex(root, bypassIgnore)
+		idx, ierr = indexer.BuildIndexWithProgress(root, bypassIgnore, progress)
 	}
 	if ierr != nil {
 		util.Default.ClearLine()

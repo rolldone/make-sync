@@ -11,10 +11,17 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultIndexIdleTimeout is the fallback idle timeout applied to remote agent
+// indexing when no threshold is configured. It is intentionally generous: the
+// agent emits a heartbeat while walking/hashing, so only a real hang (no output
+// at all) should ever trip it.
+const DefaultIndexIdleTimeout = 120 * time.Second
 
 var printer = util.Default
 
@@ -49,6 +56,17 @@ type Devsync struct {
 	Concurrency           int                 `yaml:"concurrency,omitempty"`
 	Script                Script              `yaml:"script"`
 	TriggerPerm           TriggerPermission   `yaml:"trigger_permission"`
+	// IndexIdleTimeout is the idle timeout (in seconds) for remote indexing
+	// output. Zero means "use DefaultIndexIdleTimeout".
+	IndexIdleTimeout int `yaml:"index_idle_timeout,omitempty"`
+}
+
+// IndexIdleTimeoutDuration resolves the configured idle timeout.
+func (d Devsync) IndexIdleTimeoutDuration() time.Duration {
+	if d.IndexIdleTimeout <= 0 {
+		return DefaultIndexIdleTimeout
+	}
+	return time.Duration(d.IndexIdleTimeout) * time.Second
 }
 
 // UnmarshalYAML supports dual manual_transfer format:
@@ -56,15 +74,16 @@ type Devsync struct {
 // - object item: { path: "vendor", ignores: ["lib_a", "!lib_a/keep.txt"] }
 func (d *Devsync) UnmarshalYAML(value *yaml.Node) error {
 	type rawDevsync struct {
-		OSTarget    string            `yaml:"os_target"`
-		SizeLimit   int               `yaml:"size_limit,omitempty"`
-		AgentName   string            `yaml:"agent_name,omitempty"`
-		Auth        Auth              `yaml:"auth"`
-		Ignores     []string          `yaml:"ignores"`
-		AgentWatchs []string          `yaml:"agent_watchs"`
-		Concurrency int               `yaml:"concurrency,omitempty"`
-		Script      Script            `yaml:"script"`
-		TriggerPerm TriggerPermission `yaml:"trigger_permission"`
+		OSTarget         string            `yaml:"os_target"`
+		SizeLimit        int               `yaml:"size_limit,omitempty"`
+		AgentName        string            `yaml:"agent_name,omitempty"`
+		Auth             Auth              `yaml:"auth"`
+		Ignores          []string          `yaml:"ignores"`
+		AgentWatchs      []string          `yaml:"agent_watchs"`
+		Concurrency      int               `yaml:"concurrency,omitempty"`
+		Script           Script            `yaml:"script"`
+		TriggerPerm      TriggerPermission `yaml:"trigger_permission"`
+		IndexIdleTimeout int               `yaml:"index_idle_timeout,omitempty"`
 	}
 
 	var raw rawDevsync
@@ -88,6 +107,7 @@ func (d *Devsync) UnmarshalYAML(value *yaml.Node) error {
 	d.Concurrency = raw.Concurrency
 	d.Script = raw.Script
 	d.TriggerPerm = raw.TriggerPerm
+	d.IndexIdleTimeout = raw.IndexIdleTimeout
 
 	return nil
 }

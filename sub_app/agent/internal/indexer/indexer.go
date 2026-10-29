@@ -31,10 +31,51 @@ type FileMeta struct {
 // IndexMap maps relative path -> FileMeta
 type IndexMap map[string]FileMeta
 
+// ProgressFunc receives periodic progress updates while an index is built.
+// files/dirs are running counters and current is the relative path being
+// processed (may be empty at the end of the walk).
+type ProgressFunc func(files int, dirs int, current string)
+
+// defaultProgressInterval is how often progress is reported during a walk.
+const defaultProgressInterval = 2 * time.Second
+
 // BuildIndex walks root and builds an IndexMap. It skips the root itself.
 // bypassIgnore: if true, skip ignore pattern checking and index all files
 func BuildIndex(root string, bypassIgnore bool) (IndexMap, error) {
+	return buildIndex(root, "", bypassIgnore, nil)
+}
+
+// BuildIndexWithProgress behaves like BuildIndex and additionally reports
+// periodic progress through progress.
+func BuildIndexWithProgress(root string, bypassIgnore bool, progress ProgressFunc) (IndexMap, error) {
+	return buildIndex(root, "", bypassIgnore, progress)
+}
+
+// BuildIndexSubtree walks only the subtree starting at 'start' and builds an IndexMap
+// Paths' Rel field are computed relative to root. If start does not exist, return empty map and error.
+func BuildIndexSubtree(root, start string, bypassIgnore bool) (IndexMap, error) {
+	return buildIndex(root, start, bypassIgnore, nil)
+}
+
+// BuildIndexSubtreeWithProgress behaves like BuildIndexSubtree and additionally
+// reports periodic progress through progress.
+func BuildIndexSubtreeWithProgress(root, start string, bypassIgnore bool, progress ProgressFunc) (IndexMap, error) {
+	return buildIndex(root, start, bypassIgnore, progress)
+}
+
+// buildIndex implements both full-tree and subtree indexing. When start is
+// empty the whole root is walked; otherwise only start is walked.
+func buildIndex(root, start string, bypassIgnore bool, progress ProgressFunc) (IndexMap, error) {
 	idx := IndexMap{}
+
+	walkRoot := root
+	if start != "" {
+		// ensure start exists
+		if _, err := os.Stat(start); err != nil {
+			return nil, err
+		}
+		walkRoot = start
+	}
 
 	// create ignore cache only if not bypassing
 	var ic *SimpleIgnoreCache
@@ -42,7 +83,23 @@ func BuildIndex(root string, bypassIgnore bool) (IndexMap, error) {
 		ic = NewSimpleIgnoreCache(root)
 	}
 
-	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	files, dirs := 0, 0
+	lastReport := time.Time{}
+	lastPath := ""
+	report := func(current string, force bool) {
+		if progress == nil {
+			return
+		}
+		now := time.Now()
+		if !force && !lastReport.IsZero() && now.Sub(lastReport) < defaultProgressInterval {
+			return
+		}
+		lastReport = now
+		lastPath = current
+		progress(files, dirs, current)
+	}
+
+	err := filepath.WalkDir(walkRoot, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			// skip problematic entries but continue
 			return nil
@@ -84,6 +141,15 @@ func BuildIndex(root string, bypassIgnore bool) (IndexMap, error) {
 			Rel:     rel,
 		}
 
+		if info.IsDir() {
+			dirs++
+		} else {
+			files++
+		}
+		// Report before hashing so the current path reflects what is being
+		// worked on right now.
+		report(rel, files+dirs == 1)
+
 		if !info.IsDir() {
 			h, err := hashFile(p)
 			if err == nil {
@@ -99,88 +165,8 @@ func BuildIndex(root string, bypassIgnore bool) (IndexMap, error) {
 		return nil
 	})
 
-	return idx, err
-}
-
-// BuildIndexSubtree walks only the subtree starting at 'start' and builds an IndexMap
-// Paths' Rel field are computed relative to root. If start does not exist, return empty map and error.
-func BuildIndexSubtree(root, start string, bypassIgnore bool) (IndexMap, error) {
-	idx := IndexMap{}
-
-	// ensure start exists
-	stInfo, err := os.Stat(start)
-	if err != nil {
-		return nil, err
-	}
-
-	// create ignore cache only if not bypassing
-	var ic *SimpleIgnoreCache
-	if !bypassIgnore {
-		ic = NewSimpleIgnoreCache(root)
-	}
-
-	// Walk starting at start
-	err = filepath.WalkDir(start, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		// compute rel relative to root
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return nil
-		}
-		if rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-
-		// skip ignored entries (only if not bypassing)
-		if !bypassIgnore && ic.MatchWithManualTransfer(p, info.IsDir()) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// compute absolute path
-		abs, err := filepath.Abs(p)
-		if err != nil {
-			abs = p
-		}
-		abs = filepath.ToSlash(abs)
-
-		meta := FileMeta{
-			Size:    info.Size(),
-			ModTime: info.ModTime(),
-			IsDir:   info.IsDir(),
-			Hash:    "",
-			Path:    abs,
-			Rel:     rel,
-		}
-
-		if !info.IsDir() {
-			h, err := hashFile(p)
-			if err == nil {
-				meta.Hash = h
-			} else {
-				// if hashing fails, continue without hash
-				fmt.Fprintf(os.Stderr, "warning: failed to hash %s: %v\n", p, err)
-			}
-		}
-
-		idx[meta.Path] = meta
-		return nil
-	})
-
-	// If start is a single file and not a directory, ensure it was included
-	if !stInfo.IsDir() {
-		// WalkDir above will still handle the file, so nothing special
-	}
+	// Emit a final update so callers can log the totals.
+	report(lastPath, true)
 
 	return idx, err
 }

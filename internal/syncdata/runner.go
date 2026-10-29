@@ -293,7 +293,7 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 	return nil
 }
 
-func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool, prefixes []string) (string, error) {
+func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool, prefixes []string, idleTimeout time.Duration) (string, error) {
 	isWin := strings.Contains(strings.ToLower(osTarget), "win")
 
 	// Get unique agent binary name from local config
@@ -367,37 +367,71 @@ func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget str
 		return "", fmt.Errorf("failed to start remote indexing command: %v", err)
 	}
 
-	var output strings.Builder
-	timeout := time.After(60 * time.Second) // 60 second timeout for indexing
+	if idleTimeout <= 0 {
+		idleTimeout = config.DefaultIndexIdleTimeout
+	}
 
 	fmt.Printf("🔍 DEBUG: Streaming command output...\n")
+
+	result, streamErr := streamOutputWithIdleTimeout(outputChan, errorChan, idleTimeout, func(chunk string) {
+		fmt.Printf("🔍 DEBUG: Output chunk: %s", chunk) // Real-time output
+	}, "remote indexing")
+
+	duration := time.Since(start)
+	if streamErr != nil {
+		fmt.Printf("🔍 DEBUG: Command failed after %v: %v\n", duration, streamErr)
+		return result, streamErr
+	}
+
+	fmt.Printf("🔍 DEBUG: Command completed in %v\n", duration)
+	fmt.Printf("🔍 DEBUG: Final output (%d bytes): %s\n", len(result), result)
+	return result, nil
+}
+
+// streamOutputWithIdleTimeout drains a streamed command's output until it
+// completes, aborts on a reported error, or aborts when no chunk arrives within
+// idleTimeout. The timer is reset on every received chunk, so a long-running
+// command that keeps producing output is never killed by a total-duration cap.
+// onChunk, when non-nil, is invoked for each received chunk.
+func streamOutputWithIdleTimeout(outputChan <-chan string, errorChan <-chan error, idleTimeout time.Duration, onChunk func(string), label string) (string, error) {
+	if idleTimeout <= 0 {
+		idleTimeout = config.DefaultIndexIdleTimeout
+	}
+
+	var output strings.Builder
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(idleTimeout)
+	}
 
 	for {
 		select {
 		case out, ok := <-outputChan:
 			if !ok {
 				// Command finished
-				duration := time.Since(start)
-				fmt.Printf("🔍 DEBUG: Command completed in %v\n", duration)
-
-				result := output.String()
-				fmt.Printf("🔍 DEBUG: Final output (%d bytes): %s\n", len(result), result)
-				return result, nil
+				return output.String(), nil
 			}
 			output.WriteString(out)
-			fmt.Printf("🔍 DEBUG: Output chunk: %s", out) // Real-time output
+			resetTimer()
+			if onChunk != nil {
+				onChunk(out)
+			}
 
 		case err := <-errorChan:
 			if err != nil {
-				duration := time.Since(start)
-				fmt.Printf("🔍 DEBUG: Command failed after %v: %v\n", duration, err)
-				return output.String(), fmt.Errorf("remote indexing failed: %v", err)
+				return output.String(), fmt.Errorf("%s failed: %v", label, err)
 			}
 
-		case <-timeout:
-			duration := time.Since(start)
-			fmt.Printf("🔍 DEBUG: Command timed out after %v\n", duration)
-			return output.String(), fmt.Errorf("remote indexing timed out after 60 seconds")
+		case <-timer.C:
+			return output.String(), fmt.Errorf("%s idle timeout after %s (no output received)", label, idleTimeout)
 		}
 	}
 } // shellQuote quotes a POSIX path using single quotes, escaping existing single quotes
@@ -580,7 +614,7 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIg
 
 	// Run remote indexing
 	util.Default.Println("🔍 Running remote agent indexing...")
-	out, err := RemoteRunAgentIndexing(sshCli, remoteSyncTemp, osTarget, bypassIgnore, prefixes)
+	out, err := RemoteRunAgentIndexing(sshCli, remoteSyncTemp, osTarget, bypassIgnore, prefixes, cfg.Devsync.IndexIdleTimeoutDuration())
 	if err != nil {
 		return "", out, fmt.Errorf("remote indexing failed: %v", err)
 	}
