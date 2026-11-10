@@ -179,11 +179,15 @@ make-sync exec <command...>
 
 ### Cara Kerja (POSIX / Linux / Unix)
 
-Semua token setelah `exec` digabung menjadi satu command string lalu diteruskan **secara mentah** ke remote. Di remote, command dijalankan oleh `bash -lc` (bukan lagi `base64`/`bash -s`), sehingga kutipan (tunggal/ganda/tanpa kutip), variabel, dan operator (`&&`, `|`, `>`, dsb.) diinterpretasikan secara natural — persis seperti Anda mengetik langsung di terminal server.
+Teks setelah `exec` diteruskan **secara mentah (verbatim)** ke remote. Di remote, command dijalankan oleh `bash -lc` (bukan lagi `base64`/`bash -s`), sehingga kutipan (tunggal/ganda/tanpa kutip), variabel, dan operator (`&&`, `|`, `>`, `>>`, `;`, dsb.) diinterpretasikan oleh shell remote secara natural — persis seperti Anda mengetik langsung di terminal server. make-sync **tidak meng-escape** operator milik user.
 
-Jika `devsync.auth.remote_path` (fallback `remote_path`) diisi, command dibungkus dengan prefix `cd <remotePath> &&` sehingga Anda otomatis bekerja dari direktori kerja remote.
+Sumber teks mentah adalah argumen proses asli: `os.Args` pada POSIX dan command line native Windows (`CommandLineToArgvW`) pada Windows, dibaca tepat setelah token `exec`. Bila raw tidak tersedia, dipakai gabungan argumen hasil parsing sebagai fallback.
+
+Jika `devsync.auth.remote_path` (fallback `remote_path`) diisi, command dibungkus dengan prefix `cd <remotePath> &&` sehingga Anda otomatis bekerja dari direktori kerja remote. Hanya path ini yang di-escape, bukan command user.
 
 Untuk remote Windows, client mencoba fallback `cmd.exe /C`.
+
+> **Perubahan perilaku:** karena operator kini benar-benar diteruskan, input seperti `make-sync exec foo;bar` diinterpretasikan shell sebagai dua command (`foo` lalu `bar`), bukan satu kata literal seperti sebelumnya.
 
 ### Mode Interaktif (PTY)
 

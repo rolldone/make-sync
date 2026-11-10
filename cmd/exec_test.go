@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -22,93 +23,183 @@ func TestShellEscapePOSIX(t *testing.T) {
 	}
 }
 
-func TestShellQuoteArgsPOSIX(t *testing.T) {
+func TestSplitInteractiveFlags(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want string
+		name            string
+		args            []string
+		wantRest        []string
+		wantInteractive bool
 	}{
 		{
-			name: "args with space",
-			args: []string{"echo", "hello world"},
-			want: "echo 'hello world'",
+			name:            "no flag",
+			args:            []string{"echo", "hi"},
+			wantRest:        []string{"echo", "hi"},
+			wantInteractive: false,
 		},
 		{
-			name: "args with semicolon only",
-			args: []string{"echo", "a;b"},
-			want: "echo 'a;b'",
+			name:            "leading -it",
+			args:            []string{"-it", "docker", "compose", "exec", "app", "bash"},
+			wantRest:        []string{"docker", "compose", "exec", "app", "bash"},
+			wantInteractive: true,
 		},
 		{
-			name: "plain args",
-			args: []string{"ls", "-la"},
-			want: "ls -la",
+			name:            "stacked leading flags",
+			args:            []string{"-it", "--interactive", "-i", "ls"},
+			wantRest:        []string{"ls"},
+			wantInteractive: true,
 		},
 		{
-			name: "args with single quote",
-			args: []string{"echo", "it's"},
-			want: "echo 'it'\\''s'",
+			name:            "only flags",
+			args:            []string{"-it"},
+			wantRest:        nil,
+			wantInteractive: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shellQuoteArgsPOSIX(tt.args)
-			if got != tt.want {
-				t.Errorf("shellQuoteArgsPOSIX(%v)\n  got  = %q\n  want = %q", tt.args, got, tt.want)
+			rest, interactive := splitInteractiveFlags(tt.args)
+			if interactive != tt.wantInteractive {
+				t.Errorf("interactive = %t, want %t", interactive, tt.wantInteractive)
+			}
+			if !reflect.DeepEqual(rest, tt.wantRest) {
+				t.Errorf("rest = %v, want %v", rest, tt.wantRest)
 			}
 		})
 	}
 }
 
-func TestShellQuoteArgsPOSIX_SemicolonPreserved(t *testing.T) {
-	// The critical test case: make-sync exec docker exec container php -r "echo 'PHP_OK';"
-	// restArgs after PowerShell splitting:
-	restArgs := []string{"docker", "exec", "artywiz_wp_wordpress", "php", "-r", "echo 'PHP_OK';"}
-
-	rawCmd := shellQuoteArgsPOSIX(restArgs)
-
-	// The rawCmd must NOT be a naive join which would lose argument boundaries.
-	naiveJoin := "docker exec artywiz_wp_wordpress php -r echo 'PHP_OK';"
-	if rawCmd == naiveJoin {
-		t.Fatalf("rawCmd must NOT be naive join; got %q (semicolons + single quotes would break bash)", rawCmd)
-	}
-
-	// The semicolon and single quotes must be inside a shell-quoted segment
-	t.Logf("restArgs = %v", restArgs)
-	t.Logf("rawCmd   = %q", rawCmd)
-
-	// Build the final bash command as exec.go does
-	combined := rawCmd
-	bashCmd := "bash -lc " + shellEscapePOSIX(combined)
-	t.Logf("bashCmd  = %q", bashCmd)
-}
-
-func TestShellQuoteArgsWindows(t *testing.T) {
+func TestRawCommandFromArgv(t *testing.T) {
 	tests := []struct {
 		name string
-		args []string
+		argv []string
 		want string
 	}{
 		{
-			name: "simple args",
-			args: []string{"docker", "exec", "container", "php", "-r", "echo OK"},
-			want: `docker exec container php -r "echo OK"`,
+			name: "redirect tokens preserved",
+			argv: []string{"make-sync", "exec", "echo", "hi", ">", "/tmp/f"},
+			want: "echo hi > /tmp/f",
 		},
 		{
-			name: "args with semicolon",
-			args: []string{"php", "-r", "echo 'PHP_OK';"},
-			want: `php -r "echo 'PHP_OK';"`,
+			name: "quoted compound command from a single os.Arg",
+			argv: []string{"make-sync", "exec", "cat /etc/hostname | head -1; echo ok"},
+			want: "cat /etc/hostname | head -1; echo ok",
 		},
 		{
-			name: "plain args",
-			args: []string{"ls", "-la"},
+			name: "leading interactive flag stripped, inner -it kept",
+			argv: []string{"make-sync", "exec", "-it", "docker", "compose", "exec", "-it", "app", "bash"},
+			want: "docker compose exec -it app bash",
+		},
+		{
+			name: "global flag before subcommand",
+			argv: []string{"make-sync", "--config", "x.yaml", "exec", "ls", "-la"},
 			want: "ls -la",
+		},
+		{
+			name: "no exec token",
+			argv: []string{"make-sync", "pull"},
+			want: "",
+		},
+		{
+			name: "exec token but empty command",
+			argv: []string{"make-sync", "exec"},
+			want: "",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shellQuoteArgsWindows(tt.args)
-			if got != tt.want {
-				t.Errorf("shellQuoteArgsWindows(%v)\n  got  = %q\n  want = %q", tt.args, got, tt.want)
+			if got := rawCommandFromArgv(tt.argv); got != tt.want {
+				t.Errorf("rawCommandFromArgv(%v) = %q, want %q", tt.argv, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRawCommandTextFromArgv(t *testing.T) {
+	// Raw command available: argv wins, restArgs is ignored.
+	got := rawCommandTextFromArgv(
+		[]string{"make-sync", "exec", "echo hi > /tmp/f"},
+		[]string{"echo", "hi", ">", "/tmp/f"},
+	)
+	if got != "echo hi > /tmp/f" {
+		t.Errorf("raw from argv = %q, want %q", got, "echo hi > /tmp/f")
+	}
+
+	// No raw available: fall back to joining the parsed args.
+	got = rawCommandTextFromArgv(
+		[]string{"make-sync", "pull"},
+		[]string{"echo", "hi", ">", "/tmp/f"},
+	)
+	if got != "echo hi > /tmp/f" {
+		t.Errorf("fallback = %q, want %q", got, "echo hi > /tmp/f")
+	}
+}
+
+func TestBuildPosixExecCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		rawCmd     string
+		remotePath string
+		want       string
+	}{
+		{
+			name:   "redirect forwarded verbatim",
+			rawCmd: "echo hi > /tmp/f",
+			want:   `bash -lc 'echo hi > /tmp/f'`,
+		},
+		{
+			name:   "pipeline and compound not escaped",
+			rawCmd: "cat /etc/hostname | head -1; echo ok",
+			want:   `bash -lc 'cat /etc/hostname | head -1; echo ok'`,
+		},
+		{
+			name:   "double ampersand preserved",
+			rawCmd: "docker compose down && docker compose up",
+			want:   `bash -lc 'docker compose down && docker compose up'`,
+		},
+		{
+			name:       "remote path prefix escaped, command verbatim",
+			rawCmd:     "echo hi > /tmp/f",
+			remotePath: "/home/u/proj",
+			want:       `bash -lc 'cd '\''/home/u/proj'\'' && echo hi > /tmp/f'`,
+		},
+		{
+			name:   "single quotes in command escaped safely",
+			rawCmd: "echo 'hi'",
+			want:   `bash -lc 'echo '\''hi'\'''`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildPosixExecCommand(tt.rawCmd, tt.remotePath); got != tt.want {
+				t.Errorf("buildPosixExecCommand(%q, %q)\n  got  = %q\n  want = %q", tt.rawCmd, tt.remotePath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildWindowsExecCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		rawCmd     string
+		remotePath string
+		want       string
+	}{
+		{
+			name:   "redirect forwarded verbatim",
+			rawCmd: `echo hi > C:\tmp\f`,
+			want:   `cmd.exe /C echo hi > C:\tmp\f`,
+		},
+		{
+			name:       "remote path quoted, operators untouched",
+			rawCmd:     `dir | findstr x`,
+			remotePath: `C:\proj`,
+			want:       `cmd.exe /C cd /d "C:\proj" && dir | findstr x`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildWindowsExecCommand(tt.rawCmd, tt.remotePath); got != tt.want {
+				t.Errorf("buildWindowsExecCommand(%q, %q)\n  got  = %q\n  want = %q", tt.rawCmd, tt.remotePath, got, tt.want)
 			}
 		})
 	}

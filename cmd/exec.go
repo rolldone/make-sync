@@ -21,60 +21,10 @@ func shellEscapePOSIX(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// shellQuoteArgsPOSIX re-quotes each argument for safe inclusion in a POSIX
-// shell command string. Special characters that have meaning in shell (spaces,
-// semicolons, single-quotes, pipes, etc.) are wrapped via shellEscapePOSIX.
-// Plain tokens without special chars pass through unchanged.
-func shellQuoteArgsPOSIX(args []string) string {
-	var parts []string
-	for _, a := range args {
-		needsQuote := false
-		for _, c := range a {
-			if c == ' ' || c == '\t' || c == '\'' || c == '"' || c == ';' ||
-				c == '|' || c == '&' || c == '(' || c == ')' || c == '<' ||
-				c == '>' || c == '$' || c == '`' || c == '\\' || c == '!' ||
-				c == '*' || c == '?' || c == '#' || c == '~' || c == '\n' {
-				needsQuote = true
-				break
-			}
-		}
-		if needsQuote {
-			parts = append(parts, shellEscapePOSIX(a))
-		} else {
-			parts = append(parts, a)
-		}
-	}
-	return strings.Join(parts, " ")
-}
-
 // quoteWindows wraps a string in double quotes for cmd.exe and escapes embedded quotes by doubling them.
 // In cmd.exe, the way to include a literal double quote inside a quoted string is to double it: "".
 func quoteWindows(s string) string {
 	return "\"" + strings.ReplaceAll(s, "\"", "\"\"") + "\""
-}
-
-// shellQuoteArgsWindows re-quotes each argument for safe inclusion in a
-// cmd.exe /C command string. Arguments containing spaces, special cmd.exe
-// characters (semicolons, pipes, etc.) are wrapped in double quotes.
-func shellQuoteArgsWindows(args []string) string {
-	var parts []string
-	for _, a := range args {
-		needsQuote := false
-		for _, c := range a {
-			if c == ' ' || c == '\t' || c == '"' || c == '&' || c == '|' ||
-				c == '<' || c == '>' || c == '^' || c == '%' || c == '!' ||
-				c == '(' || c == ')' || c == ';' || c == '\n' {
-				needsQuote = true
-				break
-			}
-		}
-		if needsQuote {
-			parts = append(parts, quoteWindows(a))
-		} else {
-			parts = append(parts, a)
-		}
-	}
-	return strings.Join(parts, " ")
 }
 
 type shellKind int
@@ -139,18 +89,7 @@ var execCmd = &cobra.Command{
 		// Because DisableFlagParsing is true, cobra hands us everything verbatim,
 		// so we strip leading interactive flags manually and keep the rest as the
 		// command to run.
-		interactive := false
-		var restArgs []string
-		for len(args) > 0 {
-			switch args[0] {
-			case "-it", "--it", "-i", "--interactive":
-				interactive = true
-				args = args[1:]
-			default:
-				restArgs = args
-				args = nil
-			}
-		}
+		restArgs, interactive := splitInteractiveFlags(args)
 
 		if !interactive && wantsInteractiveShell(restArgs) {
 			interactive = true
@@ -173,45 +112,29 @@ var execCmd = &cobra.Command{
 		remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemotePath)
 
 		// --- Teruskan mentah (forward raw) ---
-		// User memilih: teks setelah 'exec' diperlakukan persis seperti diketik
-		// langsung ke terminal server (bebas pakai petik tunggal/ganda, $var,
-		// perintah majemuk, dll). Cobra dengan DisableFlagParsing memberi kita
-		// args yang nilainya sudah dipecah oleh shell lokal (petik asli dibuang,
-		// nilai arg sudah benar). Kita gabung dengan spasi menjadi satu baris
-		// perintah, lalu serahkan ke remote `bash -lc '<baris>'`. Bash remote-lah
-		// yang menginterpretasi petik/variabel/operator secara natural.
+		// Teks setelah 'exec' diperlakukan persis seperti diketik langsung ke
+		// terminal server: operator shell (`|`, `>`, `>>`, `<`, `&&`, `||`, `;`),
+		// variabel, backtick, dan kutipan diinterpretasikan oleh shell remote.
+		//
+		// Sumber teks mentah: argumen proses asli (os.Args di POSIX,
+		// wincmdline.WindowsRawArgs() di Windows) yang dibaca tepat setelah token
+		// `exec`, sehingga struktur yang diketik user tidak di-escape ulang oleh
+		// make-sync. Bila raw tidak tersedia, kita jatuh ke
+		// strings.Join(restArgs, " ") sebagai teks command.
 		//
 		// Catatan: kami TIDAK lagi memakai base64 + `bash -s`. Uji nyata
 		// menunjukkan `bash -s` (script via stdin) gagal untuk `'bash -c echo hi'`
 		// dan `'ls && echo done'` karena seluruh perintah dibungkus petik tunggal
 		// menjadi satu kata (command not found). Sebaliknya `bash -lc '<raw>'`
 		// memenuhi persis perilaku "seperti akses server langsung".
-		//
-		// Kita menggunakan shellQuoteArgsPOSIX/Windows untuk merekonstruksi
-		// command dengan benar: setiap arg yang mengandung karakter spesial
-		// (spasi, semicolon, kutip, pipe, dll) akan di-quote ulang agar
-		// boundary antar argumen tetap terjaga di remote shell.
-		// Contoh: php -r "echo 'PHP_OK';" → php -r 'echo '"'"'PHP_OK'"'"';'
-		// sehingga remote menerima arg persis seperti yang user ketik.
-		rawCmd := shellQuoteArgsPOSIX(restArgs)
+		rawCmd := rawCommandText(restArgs)
 
 		// Build both POSIX and Windows variants so we can run regardless of remote OS
 		buildPosix := func() string {
-			// bash -lc '<combined>' — seluruh baris dibungkus petik tunggal aman via
-			// shellEscapePOSIX. Bash remote-lah yang menginterpretasi petik/variabel
-			// yang diketik user, persis seperti terminal langsung.
-			combined := rawCmd
-			if remotePath != "" {
-				combined = "cd " + shellEscapePOSIX(remotePath) + " && " + rawCmd
-			}
-			return "bash -lc " + shellEscapePOSIX(combined)
+			return buildPosixExecCommand(rawCmd, remotePath)
 		}
 		buildWindows := func() string {
-			winCmd := shellQuoteArgsWindows(restArgs)
-			if remotePath != "" {
-				return fmt.Sprintf("cmd.exe /C cd /d %s && %s", quoteWindows(remotePath), winCmd)
-			}
-			return fmt.Sprintf("cmd.exe /C %s", winCmd)
+			return buildWindowsExecCommand(rawCmd, remotePath)
 		}
 
 		// Prefer order based on config, but fall back to the other if the shell is unavailable.
@@ -245,10 +168,9 @@ var execCmd = &cobra.Command{
 				return
 			}
 
-			// For interactive PTY, we pass args joined with proper quoting
-			// to preserve argument boundaries (e.g. semicolons in php -r "echo 'OK';")
-			userCmd := shellQuoteArgsPOSIX(restArgs)
-			userCmd = strings.TrimSpace(userCmd)
+			// For interactive PTY we forward the same raw command text so the
+			// remote shell interprets quoting and operators naturally.
+			userCmd := strings.TrimSpace(rawCmd)
 			// Build the command that lands in remotePath (and runs the user's command if any).
 			var initCmd string
 			switch {
@@ -402,4 +324,127 @@ func wantsInteractiveShell(args []string) bool {
 	}
 
 	return false
+}
+
+// execSubcommandName is the token that separates the local make-sync arguments
+// from the raw remote command inside the process argument vector.
+const execSubcommandName = "exec"
+
+// splitInteractiveFlags removes leading interactive-mode flags (e.g. `-it`)
+// from args and reports whether any were present. Because DisableFlagParsing is
+// enabled, cobra hands us the raw arguments; we strip these flags manually so
+// they are not forwarded to the remote shell.
+func splitInteractiveFlags(args []string) (rest []string, interactive bool) {
+	for len(args) > 0 {
+		switch args[0] {
+		case "-it", "--it", "-i", "--interactive":
+			interactive = true
+			args = args[1:]
+		default:
+			return args, interactive
+		}
+	}
+	return nil, interactive
+}
+
+// rawCommandText returns the raw command text the user typed after the `exec`
+// token, preserving shell operators (`|`, `>`, `>>`, `<`, `&&`, `||`, `;`),
+// variables, backticks, and quoting so the remote shell interprets them
+// naturally.
+//
+// It prefers the OS-provided raw argv (os.Args on POSIX, the native Windows
+// command line on Windows) and falls back to joining the already-parsed
+// restArgs when no raw text is available.
+func rawCommandText(restArgs []string) string {
+	return rawCommandTextFromArgv(rawArgv(), restArgs)
+}
+
+// rawCommandTextFromArgv is the pure, testable core of rawCommandText: it
+// returns the raw command text found after the `exec` token in argv, or the
+// joined restArgs when argv carries no usable raw command.
+func rawCommandTextFromArgv(argv, restArgs []string) string {
+	if tail, ok := rawTailFromArgv(argv, restArgs); ok {
+		if raw := strings.Join(tail, " "); strings.TrimSpace(raw) != "" {
+			return raw
+		}
+	}
+	return strings.Join(restArgs, " ")
+}
+
+// rawCommandFromArgv extracts the command text that follows the `exec` token in
+// argv, dropping any leading interactive flags. It returns "" when argv does
+// not contain an `exec` token so callers can fall back to parsed args.
+func rawCommandFromArgv(argv []string) string {
+	tail, ok := rawTailFromArgv(argv, nil)
+	if !ok {
+		return ""
+	}
+	return strings.Join(tail, " ")
+}
+
+// rawTailFromArgv returns the argv tokens after the `exec` subcommand.
+//
+// Several candidate `exec` positions may exist (a user command can itself
+// contain the word `exec`, and a global flag value could be "exec"), so when
+// restArgs is provided we prefer the candidate whose remaining tokens match
+// restArgs exactly. Otherwise the first candidate is used, which is the normal
+// `<program> exec <command...>` layout. ok is false when there is no `exec`
+// token at all.
+func rawTailFromArgv(argv, restArgs []string) (tail []string, ok bool) {
+	var candidates []int
+	for i, a := range argv {
+		if a == execSubcommandName {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, false
+	}
+
+	if restArgs != nil {
+		for _, idx := range candidates {
+			candidate, _ := splitInteractiveFlags(argv[idx+1:])
+			if sameArgs(candidate, restArgs) {
+				return candidate, true
+			}
+		}
+	}
+
+	first, _ := splitInteractiveFlags(argv[candidates[0]+1:])
+	return first, true
+}
+
+// sameArgs reports whether a and b hold the same tokens in the same order.
+func sameArgs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// buildPosixExecCommand builds the remote POSIX command that runs the user's
+// raw command text. The raw text is forwarded verbatim (operators are NOT
+// escaped) so the remote `bash -lc` interprets it exactly like direct typing.
+// Only the injected remotePath prefix is escaped.
+func buildPosixExecCommand(rawCmd, remotePath string) string {
+	combined := rawCmd
+	if remotePath != "" {
+		combined = "cd " + shellEscapePOSIX(remotePath) + " && " + rawCmd
+	}
+	return "bash -lc " + shellEscapePOSIX(combined)
+}
+
+// buildWindowsExecCommand builds the remote Windows command that runs the
+// user's raw command text via cmd.exe /C. The raw text is forwarded verbatim,
+// without re-quoting shell operators; only the injected remotePath is quoted.
+func buildWindowsExecCommand(rawCmd, remotePath string) string {
+	if remotePath != "" {
+		return "cmd.exe /C cd /d " + quoteWindows(remotePath) + " && " + rawCmd
+	}
+	return "cmd.exe /C " + rawCmd
 }
