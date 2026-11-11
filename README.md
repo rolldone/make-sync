@@ -179,15 +179,24 @@ make-sync exec <command...>
 
 ### Cara Kerja (POSIX / Linux / Unix)
 
-Teks setelah `exec` diteruskan **secara mentah (verbatim)** ke remote. Di remote, command dijalankan oleh `bash -lc` (bukan lagi `base64`/`bash -s`), sehingga kutipan (tunggal/ganda/tanpa kutip), variabel, dan operator (`&&`, `|`, `>`, `>>`, `;`, dsb.) diinterpretasikan oleh shell remote secara natural — persis seperti Anda mengetik langsung di terminal server. make-sync **tidak meng-escape** operator milik user.
+Teks setelah `exec` dikirim ke remote dan dijalankan oleh `bash -lc` (bukan lagi `base64`/`bash -s`), sehingga kutipan, variabel, dan operator (`&&`, `|`, `>`, `>>`, `;`, dsb.) diinterpretasikan oleh shell remote secara natural — persis seperti Anda mengetik langsung di terminal server.
 
-Sumber teks mentah adalah argumen proses asli: `os.Args` pada POSIX dan command line native Windows (`CommandLineToArgvW`) pada Windows, dibaca tepat setelah token `exec`. Bila raw tidak tersedia, dipakai gabungan argumen hasil parsing sebagai fallback.
+Karena shell lokal sudah membuang quoting sebelum argumen sampai ke make-sync, command **dibangun ulang dari token argv dengan re-quote**:
+
+- Argumen yang mengandung spasi/tab, kutipan, atau metakarakter shell dibungkus ulang secara POSIX-safe (`'…'`, dengan `'` menjadi `'\''`). Jadi argumen ber-spasi tetap **satu token utuh** di remote.
+- Operator shell mandiri (`|`, `>`, `>>`, `<`, `&&`, `||`, `;`, `&`, termasuk bentuk seperti `2>&1`) dan argumen polos dibiarkan **telanjang**, agar tetap diinterpretasikan shell remote.
+- Token tunggal yang mengandung spasi dianggap satu baris command utuh yang Anda tulis dalam satu kutipan, mis. `make-sync exec 'echo hi > /tmp/x'`, dan diteruskan apa adanya.
+- Pengecualian: `;` yang menjadi terminator `find -exec`/`-execdir` di-quote karena di posisi itu ia adalah data untuk `find`, bukan pemisah command.
+
+Token argv diambil dari argumen proses asli: `os.Args` pada POSIX dan command line native Windows (`CommandLineToArgvW`) pada Windows, dibaca tepat setelah token `exec`. Bila raw tidak tersedia, dipakai argumen hasil parsing cobra.
 
 Jika `devsync.auth.remote_path` (fallback `remote_path`) diisi, command dibungkus dengan prefix `cd <remotePath> &&` sehingga Anda otomatis bekerja dari direktori kerja remote. Hanya path ini yang di-escape, bukan command user.
 
-Untuk remote Windows, client mencoba fallback `cmd.exe /C`.
+Untuk remote Windows, client mencoba fallback `cmd.exe /C` dengan strategi setara (argumen ber-spasi dibungkus kutip ganda, operator tetap telanjang).
 
-> **Perubahan perilaku:** karena operator kini benar-benar diteruskan, input seperti `make-sync exec foo;bar` diinterpretasikan shell sebagai dua command (`foo` lalu `bar`), bukan satu kata literal seperti sebelumnya.
+> **Catatan representasi:** `make-sync exec echo "a b"` dikirim ke remote sebagai `echo 'a b'`. Output eksekusinya sama — hanya representasi command string yang berbeda, karena kutip tunggal adalah bentuk yang aman untuk seluruh isi argumen.
+
+> **Perubahan perilaku:** operator kini benar-benar diteruskan. Token operator yang berdiri sendiri tetap diinterpretasikan shell, sedangkan argumen ber-spasi/kutipan tetap utuh sebagai satu token.
 
 ### Mode Interaktif (PTY)
 
@@ -206,9 +215,18 @@ Saat mode interaktif aktif, sesi PTY akan dibuka di remote. Ketik `exit` untuk k
   - `make-sync exec ls -a -l`
 - Docker compose restart (tanpa escaping tambahan):
   - `make-sync exec docker compose down && docker compose up`
+- Argumen ber-spasi tetap satu token (mis. `--format` docker):
+  - `make-sync exec docker inspect registry --format '{{.Config.Image}} {{.State.Status}}'`
+  - `make-sync exec printf '[%s]\n' '{{.Image}} {{.State.Status}}'`
+  - `make-sync exec awk 'BEGIN { FS=":" } { print $1 }' /etc/passwd`
+- Redirect dan pipeline:
+  - `make-sync exec 'echo hi > /tmp/x'`
+  - `make-sync exec echo hi '>' /tmp/x`
+  - `make-sync exec 'cat /etc/hostname | head -1; echo ok'`
 - Kutipan dan variabel bekerja natural:
   - `make-sync exec echo 'halo dunia'`
-  - `make-sync exec echo $HOME`
+  - `make-sync exec echo $HOME` (diekspansi shell lokal)
+  - `make-sync exec 'echo $HOME'` (diekspansi shell remote)
 - Masuk ke shell interaktif di dalam container:
   - `make-sync exec docker compose exec -it app bash`
 

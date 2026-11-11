@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -68,69 +70,236 @@ func TestSplitInteractiveFlags(t *testing.T) {
 	}
 }
 
-func TestRawCommandFromArgv(t *testing.T) {
+func TestRawTailFromArgv(t *testing.T) {
 	tests := []struct {
-		name string
-		argv []string
-		want string
+		name     string
+		argv     []string
+		restArgs []string
+		want     []string
+		wantOK   bool
 	}{
 		{
-			name: "redirect tokens preserved",
-			argv: []string{"make-sync", "exec", "echo", "hi", ">", "/tmp/f"},
-			want: "echo hi > /tmp/f",
+			name:   "redirect tokens preserved as separate tokens",
+			argv:   []string{"make-sync", "exec", "echo", "hi", ">", "/tmp/f"},
+			want:   []string{"echo", "hi", ">", "/tmp/f"},
+			wantOK: true,
 		},
 		{
-			name: "quoted compound command from a single os.Arg",
-			argv: []string{"make-sync", "exec", "cat /etc/hostname | head -1; echo ok"},
-			want: "cat /etc/hostname | head -1; echo ok",
+			name:   "leading interactive flag stripped, inner -it kept",
+			argv:   []string{"make-sync", "exec", "-it", "docker", "compose", "exec", "-it", "app", "bash"},
+			want:   []string{"docker", "compose", "exec", "-it", "app", "bash"},
+			wantOK: true,
 		},
 		{
-			name: "leading interactive flag stripped, inner -it kept",
-			argv: []string{"make-sync", "exec", "-it", "docker", "compose", "exec", "-it", "app", "bash"},
-			want: "docker compose exec -it app bash",
+			name:     "global flag value exec prefers the candidate matching restArgs",
+			argv:     []string{"make-sync", "--config", "exec", "exec", "ls", "-la"},
+			restArgs: []string{"ls", "-la"},
+			want:     []string{"ls", "-la"},
+			wantOK:   true,
 		},
 		{
-			name: "global flag before subcommand",
-			argv: []string{"make-sync", "--config", "x.yaml", "exec", "ls", "-la"},
-			want: "ls -la",
+			name:   "no exec token",
+			argv:   []string{"make-sync", "pull"},
+			want:   nil,
+			wantOK: false,
 		},
 		{
-			name: "no exec token",
-			argv: []string{"make-sync", "pull"},
-			want: "",
-		},
-		{
-			name: "exec token but empty command",
-			argv: []string{"make-sync", "exec"},
-			want: "",
+			name:   "exec token but empty command",
+			argv:   []string{"make-sync", "exec"},
+			want:   nil,
+			wantOK: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := rawCommandFromArgv(tt.argv); got != tt.want {
-				t.Errorf("rawCommandFromArgv(%v) = %q, want %q", tt.argv, got, tt.want)
+			got, ok := rawTailFromArgv(tt.argv, tt.restArgs)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %t, want %t", ok, tt.wantOK)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("rawTailFromArgv(%v, %v) = %v, want %v", tt.argv, tt.restArgs, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestRawCommandTextFromArgv(t *testing.T) {
-	// Raw command available: argv wins, restArgs is ignored.
-	got := rawCommandTextFromArgv(
-		[]string{"make-sync", "exec", "echo hi > /tmp/f"},
-		[]string{"echo", "hi", ">", "/tmp/f"},
-	)
-	if got != "echo hi > /tmp/f" {
-		t.Errorf("raw from argv = %q, want %q", got, "echo hi > /tmp/f")
+func TestIsBareShellOperator(t *testing.T) {
+	bare := []string{">", ">>", "<", "<<", "|", "||", "&&", ";", "&", "2>", "2>&1", "1>>", "2>>"}
+	quoted := []string{"", "a;b", "a|b", "echo", "-la", "--format={{.Image}}", "a>b", "1", "x&y"}
+	for _, tok := range bare {
+		if !isBareShellOperator(tok) {
+			t.Errorf("isBareShellOperator(%q) = false, want true", tok)
+		}
+	}
+	for _, tok := range quoted {
+		if isBareShellOperator(tok) {
+			t.Errorf("isBareShellOperator(%q) = true, want false", tok)
+		}
+	}
+}
+
+// TestRequoteArgvPOSIX is the issue #2 regression suite: quoted multi-word
+// arguments must survive as a single token while operators stay interpretable.
+func TestRequoteArgvPOSIX(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "issue 2: docker inspect --format with spaced template",
+			args: []string{"docker", "inspect", "registry", "--format", "{{.Config.Image}} {{.State.Status}}"},
+			want: "docker inspect registry --format '{{.Config.Image}} {{.State.Status}}'",
+		},
+		{
+			name: "arg with double space is preserved",
+			args: []string{"echo", "a b  c"},
+			want: "echo 'a b  c'",
+		},
+		{
+			name: "arg with tab is quoted",
+			args: []string{"echo", "a\tb"},
+			want: "echo 'a\tb'",
+		},
+		{
+			name: "single quotes inside a double-quoted local arg",
+			args: []string{"echo", "docker inspect --format '{{.Config.Image}}'"},
+			want: "echo 'docker inspect --format '\\''{{.Config.Image}}'\\'''",
+		},
+		{
+			name: "plain args stay bare",
+			args: []string{"ls", "-la"},
+			want: "ls -la",
+		},
+		{
+			name: "standalone operators stay bare",
+			args: []string{"echo", "hi", ">", "/tmp/f"},
+			want: "echo hi > /tmp/f",
+		},
+		{
+			name: "compound and pipeline stay bare",
+			args: []string{"docker", "compose", "down", "&&", "docker", "compose", "up"},
+			want: "docker compose down && docker compose up",
+		},
+		{
+			name: "fd redirect operator stays bare",
+			args: []string{"cmd", "2>&1"},
+			want: "cmd 2>&1",
+		},
+		{
+			name: "empty argument becomes empty quotes",
+			args: []string{"echo", ""},
+			want: "echo ''",
+		},
+		{
+			name: "arg containing semicolon is quoted to stay literal",
+			args: []string{"echo", "a;b"},
+			want: "echo 'a;b'",
+		},
+		{
+			name: "single token with spaces is a whole command line",
+			args: []string{"echo hi > /tmp/f"},
+			want: "echo hi > /tmp/f",
+		},
+		{
+			name: "single plain token untouched",
+			args: []string{"pwd"},
+			want: "pwd",
+		},
+		{
+			name: "mixed: quoted arg plus redirect plus compound",
+			args: []string{"printf", "[%s]\\n", "{{.Image}} {{.State.Status}}", ">", "/tmp/out", "&&", "cat", "/tmp/out"},
+			want: "printf '[%s]\\n' '{{.Image}} {{.State.Status}}' > /tmp/out && cat /tmp/out",
+		},
+		{
+			name: "find -exec terminator is quoted (data, not separator)",
+			args: []string{"find", "/tmp", "-maxdepth", "0", "-exec", "echo", "found", "{}", ";"},
+			want: "find /tmp -maxdepth 0 -exec echo found '{}' ';'",
+		},
+		{
+			name: "find -execdir terminator is quoted",
+			args: []string{"find", ".", "-execdir", "ls", "{}", ";"},
+			want: "find . -execdir ls '{}' ';'",
+		},
+		{
+			name: "semicolon separator without -exec stays bare",
+			args: []string{"echo", "a", ";", "echo", "b"},
+			want: "echo a ; echo b",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := requoteArgvPOSIX(tt.args)
+			if got != tt.want {
+				t.Errorf("requoteArgvPOSIX(%v)\n  got  = %q\n  want = %q", tt.args, got, tt.want)
+			}
+			// A re-quoted command must be safe to embed in bash -lc '...'.
+			if strings.Contains(got, "\n") {
+				t.Errorf("re-quoted command must not contain a raw newline: %q", got)
+			}
+		})
+	}
+}
+
+// TestRequoteArgvWindows covers the cmd.exe equivalent of the POSIX rules.
+func TestRequoteArgvWindows(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "spaced arg is double quoted",
+			args: []string{"docker", "inspect", "registry", "--format", "{{.Config.Image}} {{.State.Status}}"},
+			want: `docker inspect registry --format "{{.Config.Image}} {{.State.Status}}"`,
+		},
+		{
+			name: "plain args stay bare",
+			args: []string{"dir", "/b"},
+			want: "dir /b",
+		},
+		{
+			name: "standalone operator stays bare",
+			args: []string{"dir", "|", "findstr", "x"},
+			want: "dir | findstr x",
+		},
+		{
+			name: "embedded quote is doubled",
+			args: []string{"echo", `say "hi"`},
+			want: `echo "say ""hi"""`,
+		},
+		{
+			name: "single token with spaces is a whole command line",
+			args: []string{`dir | findstr x`},
+			want: `dir | findstr x`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := requoteArgvWindows(tt.args); got != tt.want {
+				t.Errorf("requoteArgvWindows(%v)\n  got  = %q\n  want = %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCommandArgv(t *testing.T) {
+	// restore os.Args so the real raw tail is not used by accident.
+	orig := os.Args
+	defer func() { os.Args = orig }()
+
+	os.Args = []string{"make-sync", "exec", "printf", "%s", "a b"}
+	restArgs := []string{"printf", "%s", "a b"}
+	got := commandArgv(restArgs)
+	if !reflect.DeepEqual(got, restArgs) {
+		t.Errorf("commandArgv with raw tail = %v, want %v", got, restArgs)
 	}
 
-	// No raw available: fall back to joining the parsed args.
-	got = rawCommandTextFromArgv(
-		[]string{"make-sync", "pull"},
-		[]string{"echo", "hi", ">", "/tmp/f"},
-	)
-	if got != "echo hi > /tmp/f" {
-		t.Errorf("fallback = %q, want %q", got, "echo hi > /tmp/f")
+	// No exec token in argv -> fall back to restArgs.
+	os.Args = []string{"make-sync", "pull"}
+	got = commandArgv(restArgs)
+	if !reflect.DeepEqual(got, restArgs) {
+		t.Errorf("commandArgv fallback = %v, want %v", got, restArgs)
 	}
 }
 
