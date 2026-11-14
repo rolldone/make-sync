@@ -191,9 +191,24 @@ func uploadAgentBinary(client SSHClient, localAgentPath, remoteSyncTemp, targetO
 
 	util.Default.Printf("📦 Uploading agent: %s -> %s\n", absAgentPath, remoteAgentPath)
 
+	// Delta pre-check: the binary is ~6.7 MB and rarely changes, so ask the
+	// remote for the existing file's SHA-256 first. Skipping the transfer keeps
+	// the previous behavior otherwise (unique naming, mkdir, chmod, log order).
+	// Windows has no standard sha256sum → blind upload, like deploy.
+	uploadNeeded := true
+	if !strings.Contains(strings.ToLower(targetOS), "win") {
+		same, checked := agentBinaryUnchanged(client, absAgentPath, remoteAgentPath)
+		if checked && same {
+			uploadNeeded = false
+			util.Default.Printf("⏭️  Agent unchanged — skip upload\n")
+		}
+	}
+
 	// Upload agent binary
-	if err := client.UploadFile(absAgentPath, remoteAgentPath); err != nil {
-		return fmt.Errorf("failed to upload agent: %v", err)
+	if uploadNeeded {
+		if err := client.UploadFile(absAgentPath, remoteAgentPath); err != nil {
+			return fmt.Errorf("failed to upload agent: %v", err)
+		}
 	}
 
 	// Set execute permission on Unix
@@ -212,7 +227,11 @@ func uploadAgentBinary(client SSHClient, localAgentPath, remoteSyncTemp, targetO
 		log.Println("[deployagent_unified.go] DEBUG: chmod command succeeded")
 	}
 
-	util.Default.Printf("✅ Agent uploaded successfully\n")
+	if uploadNeeded {
+		util.Default.Printf("✅ Agent uploaded successfully\n")
+	} else {
+		util.Default.Printf("✅ Agent verified on remote (chmod refreshed)\n")
+	}
 	return nil
 }
 
