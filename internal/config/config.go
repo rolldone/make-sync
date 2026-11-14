@@ -217,6 +217,37 @@ type Auth struct {
 	Port       string `yaml:"port"`
 	LocalPath  string `yaml:"localPath,omitempty"`
 	RemotePath string `yaml:"remotePath"`
+
+	// Mode selects the sync transport.
+	// Empty or "ssh" keeps the legacy SSH behaviour; "local" syncs directly
+	// between two local filesystem paths without SSH.
+	Mode string `yaml:"mode,omitempty"`
+	// LocalTargetPath is the destination directory used when Mode is "local".
+	// It is required and must be an absolute path in local mode.
+	LocalTargetPath string `yaml:"localTargetPath,omitempty"`
+}
+
+// Transport mode constants for devsync.auth.mode.
+const (
+	// AuthModeSSH is the default transport mode (backward compatible).
+	AuthModeSSH = "ssh"
+	// AuthModeLocal syncs between two local paths without SSH.
+	AuthModeLocal = "local"
+)
+
+// EffectiveMode resolves the configured transport mode, defaulting to ssh when
+// unset. Values are normalised to lower-case and trimmed.
+func (a Auth) EffectiveMode() string {
+	mode := strings.ToLower(strings.TrimSpace(a.Mode))
+	if mode == "" {
+		return AuthModeSSH
+	}
+	return mode
+}
+
+// IsLocal reports whether the auth configuration selects the local transport.
+func (a Auth) IsLocal() bool {
+	return a.EffectiveMode() == AuthModeLocal
 }
 
 type Script struct {
@@ -349,6 +380,56 @@ func (pf *PortForward) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// validateDevsyncAuth validates devsync.auth according to the selected transport
+// mode. Mode ssh (default) keeps the legacy requirements untouched, while mode
+// local only requires an absolute localTargetPath.
+func validateDevsyncAuth(auth Auth) []string {
+	var validationErrors []string
+
+	switch auth.EffectiveMode() {
+	case AuthModeLocal:
+		target := strings.TrimSpace(auth.LocalTargetPath)
+		if target == "" {
+			validationErrors = append(validationErrors, "devsync.auth.localTargetPath cannot be empty when mode is local")
+		} else if !filepath.IsAbs(target) {
+			validationErrors = append(validationErrors, "devsync.auth.localTargetPath must be an absolute path when mode is local")
+		}
+		// host/remotePath are irrelevant in local mode, so they are not required.
+		return validationErrors
+
+	case AuthModeSSH:
+		if strings.TrimSpace(auth.Username) == "" {
+			validationErrors = append(validationErrors, "devsync.auth.username cannot be empty")
+		}
+		if strings.TrimSpace(auth.Host) == "" {
+			validationErrors = append(validationErrors, "devsync.auth.host cannot be empty")
+		}
+		if strings.TrimSpace(auth.Port) == "" {
+			validationErrors = append(validationErrors, "devsync.auth.port cannot be empty")
+		} else {
+			// Validate port is a valid number
+			if port, err := strconv.Atoi(auth.Port); err != nil || port <= 0 || port > 65535 {
+				validationErrors = append(validationErrors, "devsync.auth.port must be a valid number between 1-65535")
+			}
+		}
+		if strings.TrimSpace(auth.RemotePath) == "" {
+			validationErrors = append(validationErrors, "devsync.auth.remotePath cannot be empty")
+		}
+		// Validate private key file exists (if not empty)
+		if strings.TrimSpace(auth.PrivateKey) != "" {
+			if _, err := os.Stat(auth.PrivateKey); os.IsNotExist(err) {
+				validationErrors = append(validationErrors, fmt.Sprintf("devsync.auth.privateKey file does not exist: %s", auth.PrivateKey))
+			}
+		}
+		return validationErrors
+
+	default:
+		validationErrors = append(validationErrors, fmt.Sprintf(
+			"devsync.auth.mode must be %q or %q, got %q", AuthModeSSH, AuthModeLocal, strings.TrimSpace(auth.Mode)))
+		return validationErrors
+	}
+}
+
 // ValidateConfig validates the configuration for required fields and file paths
 func ValidateConfig(cfg *Config) error {
 	var validationErrors []string
@@ -359,30 +440,7 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	// Validate auth configuration in devsync.auth
-	devsyncAuth := cfg.Devsync.Auth
-	if strings.TrimSpace(devsyncAuth.Username) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.username cannot be empty")
-	}
-	if strings.TrimSpace(devsyncAuth.Host) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.host cannot be empty")
-	}
-	if strings.TrimSpace(devsyncAuth.Port) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.port cannot be empty")
-	} else {
-		// Validate port is a valid number
-		if port, err := strconv.Atoi(devsyncAuth.Port); err != nil || port <= 0 || port > 65535 {
-			validationErrors = append(validationErrors, "devsync.auth.port must be a valid number between 1-65535")
-		}
-	}
-	if strings.TrimSpace(devsyncAuth.RemotePath) == "" {
-		validationErrors = append(validationErrors, "devsync.auth.remotePath cannot be empty")
-	}
-	// Validate private key file exists (if not empty)
-	if strings.TrimSpace(devsyncAuth.PrivateKey) != "" {
-		if _, err := os.Stat(devsyncAuth.PrivateKey); os.IsNotExist(err) {
-			validationErrors = append(validationErrors, fmt.Sprintf("devsync.auth.privateKey file does not exist: %s", devsyncAuth.PrivateKey))
-		}
-	}
+	validationErrors = append(validationErrors, validateDevsyncAuth(cfg.Devsync.Auth)...)
 
 	// Validate local path exists
 	// if strings.TrimSpace(cfg.LocalPath) != "" {
@@ -800,6 +858,12 @@ func renderTemplateVariablesInMemory(cfg *Config, quiet bool) (*Config, error) {
 		oldValue := renderedCfg.Devsync.Auth.RemotePath
 		renderedCfg.Devsync.Auth.RemotePath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.RemotePath)
 		printer.Printf("🔧 Rendered Devsync.Auth.RemotePath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.RemotePath)
+		renderCount++
+	}
+	if strings.HasPrefix(renderedCfg.Devsync.Auth.LocalTargetPath, "=") {
+		oldValue := renderedCfg.Devsync.Auth.LocalTargetPath
+		renderedCfg.Devsync.Auth.LocalTargetPath = renderer.RenderComplexTemplates(renderedCfg.Devsync.Auth.LocalTargetPath)
+		printer.Printf("🔧 Rendered Devsync.Auth.LocalTargetPath: %s → %s\n", oldValue, renderedCfg.Devsync.Auth.LocalTargetPath)
 		renderCount++
 	}
 

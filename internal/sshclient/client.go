@@ -428,6 +428,17 @@ func (c *SSHClient) SyncFile(localPath, remotePath string) error {
 	return c.UploadFile(localPath, remotePath)
 }
 
+// NewSFTPClient opens a new SFTP subsystem client over the active SSH
+// connection. The caller is responsible for closing the returned client.
+// It is used by the transport package to implement directory/stat operations
+// without changing existing upload/download behaviour.
+func (c *SSHClient) NewSFTPClient() (*sftp.Client, error) {
+	if c.client == nil {
+		return nil, fmt.Errorf("SSH client not connected")
+	}
+	return sftp.NewClient(c.client)
+}
+
 // registerSCPSession registers a session in the activeSCP registry.
 func (c *SSHClient) registerSCPSession(s *ssh.Session) {
 	if s == nil {
