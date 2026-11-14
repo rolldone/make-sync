@@ -7,7 +7,7 @@ PERINGATAN: Fitur "Pipeline System" telah dihapus dari rilis saat ini. Bagian pi
 ## Fitur Utama
 - Safe Pull/Push: indeks remote (SQLite) dibuat dulu, lalu bandingkan hash untuk unduh/unggah yang berubah saja.
 - One-Shot Push/Pull (CLI): perintah `make-sync push` / `make-sync pull` untuk sinkronisasi sekali jalan — mendukung `--path` (scoped), `--force`, dan `--bypass-ignore`. (`--git-changes` sementara dinonaktifkan.)
-- Deploy by Commit Range (CLI): `make-sync deploy --since-commit <rev>` mengirim hanya file yang tersentuh rentang commit (delta push — hanya file dengan hash berbeda yang ditransfer, tanpa indexing remote) dan menghapus file yang dihapus dalam rentang tersebut setelah konfirmasi.
+- Deploy by Commit Range (CLI): `make-sync deploy --since-commit <rev>` mengirim hanya file yang tersentuh rentang commit (delta push — hanya file dengan hash berbeda yang ditransfer, tanpa indexing remote) dan menghapus file yang dihapus dalam rentang tersebut setelah konfirmasi; `make-sync deploy --to-commit <rev>` mengembalikan remote ke isi commit tertentu (revert-style, working tree diabaikan).
 - Manual/Single Sync Menu:
   - Download/Upload
   - Pilih folder: salah satu path terdaftar atau semua yang terdaftar
@@ -178,13 +178,21 @@ lalu **satu** exec SSH menjalankan `sha256sum` untuk semua path remote sekaligus
 (tanpa agent, tanpa file DB — manifest hanya di memori). File yang hash-nya
 identik di-skip; hanya file yang berbeda atau belum ada di remote yang dikirim.
 
+Ada dua mode yang **saling eksklusif**:
+
 ```bash
+# Mode maju: kirim file yang berubah sejak <rev> (termasuk working tree)
 make-sync deploy --since-commit HEAD~1   # file yang berubah di commit terakhir
 make-sync deploy --since-commit v1.2.0   # sejak tag v1.2.0
 make-sync deploy --since-commit 8d9020b  # sejak commit hash tertentu
+
+# Mode mundur: buat remote sama dengan isi tree <rev> (working tree diabaikan)
+make-sync deploy --to-commit HEAD~3
+make-sync deploy --to-commit v1.2.0
+make-sync deploy --to-commit 8d9020b
 ```
 
-Cakupan file yang dikirim:
+Cakupan file yang dikirim (`--since-commit`):
 - Semua file yang berubah pada `<rev>..HEAD` (union seluruh commit dalam rentang),
   **ditambah** perubahan working tree yang belum di-commit (modified/added/untracked).
 - Hanya file tersebut yang di-hash; file lain di remote tidak disentuh.
@@ -194,7 +202,43 @@ Cakupan file yang dikirim:
   penghapusan dilewati.
 - Rename diperlakukan seperti git: hapus path lama, unggah path baru.
 
-Contoh output:
+Cakupan file `--to-commit` (revert remote ke commit tertentu):
+
+| Kondisi antara tree `<rev>` dan tree HEAD | Aksi di remote |
+|---|---|
+| ada di keduanya, isi berbeda | unggah isi versi `<rev>` |
+| ada di HEAD, tidak ada di `<rev>` (dibuat setelahnya) | **hapus** (captcha) |
+| ada di `<rev>`, tidak ada di HEAD (dihapus setelahnya) | unggah kembali |
+| tidak ada di keduanya / file manual di server | tidak disentuh |
+
+- Perbandingan **murni git**: `tree <rev>` vs `tree HEAD`. Working tree
+  (modified/deleted/untracked/staged) **diabaikan** — bila ada perubahan
+  uncommitted, deploy mencetak warning satu baris dan tetap memakai tree commit.
+- Hash delta diambil dari **blob git versi `<rev>`**, bukan file di disk, lalu
+  file `<rev>` di-materialize ke direktori sementara untuk diunggah. Setelah
+  selesai, direktori sementara dibersihkan.
+- Sifat idempotent: menjalankan ulang `--to-commit <rev>` yang sama → semua SKIP
+  + `✅ up-to-date`.
+- Mudah dibalik: `deploy --since-commit <rev>` setelah revert mengembalikan
+  remote ke isi HEAD, karena rentang `<rev>..HEAD` menutup semua perubahan.
+
+Contoh output mode revert (sebagian file remote sudah sesuai):
+
+```
+🚀 Deploy to HEAD~3 (revert remote to this commit)
+   Remote root : /srv/app
+   Upload files: 3
+   Delete files: 1
+⚠️  These files will be DELETED on the remote:
+   - src/added-after.php
+Type the token to confirm [IZ48QY]:
+   Delta check : SKIP 2 / SEND 1
+⬆️  Uploaded 1 files.
+🗑️  Deleted 1 files on remote.
+✅ Deploy finished.
+```
+
+Contoh output mode maju:
 
 ```
 🚀 Deploy since HEAD~2
@@ -225,6 +269,8 @@ Catatan perilaku penting:
   tanpa commit baru), seluruh perubahan working tree — termasuk folder untracked
   besar seperti `vendor/` atau `docs/` — masuk kandidat. Tambahkan pola ke
   `.sync_ignore` bila tidak ingin ikut terunggah.
+- **Mutual exclusive.** `--since-commit` dan `--to-commit` tidak boleh dipakai
+  bersamaan; salah satunya wajib diisi.
 - **Validasi lebih dulu.** Rev yang tidak valid, config hilang, atau bukan repo
   git akan gagal sebelum koneksi SSH dibuka.
 - Jika tidak ada file berubah maupun terhapus, perintah selesai dengan pesan

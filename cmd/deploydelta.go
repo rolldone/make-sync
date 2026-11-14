@@ -174,12 +174,22 @@ type deployDelta struct {
 	Fallback bool     // true when the pre-check could not run: everything is sent
 }
 
-// planDeployDelta hashes the candidates locally, runs one remote sha256sum exec,
-// and decides which files actually need transferring. It never fails the deploy:
-// a missing sha256sum, an exec error, or output that yields no usable hash all
-// degrade to the blind-push fallback (send everything). POSIX targets only —
-// Windows falls back directly in runDeploy.
+// planDeployDelta hashes the candidates from disk, runs one remote sha256sum
+// exec, and decides which files actually need transferring. It never fails the
+// deploy: a missing sha256sum, an exec error, or output that yields no usable
+// hash all degrade to the blind-push fallback (send everything). POSIX targets
+// only — Windows falls back directly in runDeploy.
 func planDeployDelta(client *sshclient.SSHClient, absRoot, remoteRoot string, uploads []string) deployDelta {
+	if len(uploads) == 0 {
+		return deployDelta{Send: uploads}
+	}
+	return planDeployDeltaWithHashes(client, remoteRoot, uploads, hashLocalFiles(absRoot, uploads))
+}
+
+// planDeployDeltaWithHashes is planDeployDelta with a caller-provided local hash
+// map. `deploy --to-commit` uses it to compare the remote against the blob
+// content of a git revision instead of the working-tree files.
+func planDeployDeltaWithHashes(client *sshclient.SSHClient, remoteRoot string, uploads []string, localHashes map[string]string) deployDelta {
 	delta := deployDelta{Send: uploads}
 	if len(uploads) == 0 {
 		return delta
@@ -190,8 +200,6 @@ func planDeployDelta(client *sshclient.SSHClient, absRoot, remoteRoot string, up
 		delta.Fallback = true
 		return delta
 	}
-
-	localHashes := hashLocalFiles(absRoot, uploads)
 
 	out, err := client.RunCommandWithOutput(cmd)
 	if err != nil {

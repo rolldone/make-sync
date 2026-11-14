@@ -114,13 +114,23 @@ func TestBuildDeployDeleteCommands_Empty(t *testing.T) {
 	}
 }
 
-func TestRunDeploy_RequiresSinceCommit(t *testing.T) {
-	err := runDeploy("   ")
+func TestRunDeploy_RequiresAMode(t *testing.T) {
+	err := runDeploy("   ", "   ")
 	if err == nil {
-		t.Fatal("expected error for empty --since-commit")
+		t.Fatal("expected error when no deploy mode is given")
 	}
-	if !strings.Contains(err.Error(), "--since-commit is required") {
-		t.Errorf("error = %q, want mention of --since-commit", err)
+	if !strings.Contains(err.Error(), "--since-commit or --to-commit") {
+		t.Errorf("error = %q, want mention of --since-commit/--to-commit", err)
+	}
+}
+
+func TestRunDeploy_RejectsBothModes(t *testing.T) {
+	err := runDeploy("HEAD~1", "HEAD~2")
+	if err == nil {
+		t.Fatal("expected error when both modes are given")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("error = %q, want mention of mutual exclusivity", err)
 	}
 }
 
