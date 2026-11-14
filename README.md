@@ -66,6 +66,60 @@ Catatan:
 - `manual_transfer` object memakai `ignores` lokal ke path tersebut; pattern negasi `!pattern` sebaiknya di-quote di YAML, misalnya `"!test/kokok.txt"`.
 - `.sync_ignore` di root tetap dipakai oleh flow global, tetapi Manual/Single Sync memakai ignore dari `devsync.manual_transfer`.
 
+## Mode Sync: SSH (default) vs Local (path-to-path)
+
+`devsync.auth.mode` memilih transport yang dipakai semua perintah sync
+(`push`, `pull`, deploy, manual transfer, watcher).
+
+```yaml
+devsync:
+  auth:
+    mode: local                    # "ssh" (default) | "local"
+    localTargetPath: /srv/deploy   # wajib & harus absolut jika mode: local
+```
+
+Aturan:
+
+- `mode` **tidak diset** atau `mode: ssh` → perilaku lama 100% utuh
+  (`host`, `port`, `username`, `remotePath` wajib; agent dijalankan di remote).
+- `mode: local` → `localTargetPath` wajib dan harus path absolut.
+  `host`/`port`/`remotePath` diabaikan (tidak wajib).
+- Source selalu `local_path` / working directory project saat ini.
+
+### Perbedaan perilaku local vs ssh
+
+| Aspek | `mode: ssh` | `mode: local` |
+|---|---|---|
+| Koneksi | SSH (SFTP/SCP) ke `host` | Tidak ada koneksi jaringan |
+| Agent remote | Di-upload & dijalankan di remote | **Tidak** di-upload; binary agent dijalankan langsung di mesin ini (`os/exec`) dengan working dir = `localTargetPath` |
+| Config agent | Di-upload ke `<remote>/.sync_temp/config.json` | Ditulis lokal ke `<localTargetPath>/.sync_temp/config.json` |
+| Index DB target | Diunduh via SFTP ke `.sync_temp/` | Sudah lokal di `<localTargetPath>/.sync_temp/indexing_files.db`; bila sisi source butuh salinan, disimpan sebagai `.sync_temp/indexing_files_target.db` (penanda `-target`) |
+| `os_target` | Dipakai apa adanya (cross-OS) | Selalu OS host — target adalah direktori lokal |
+| Overhead | Jaringan + enkripsi SSH | Hanya I/O filesystem lokal |
+| Ignore | `.sync_ignore` + ignores dari config agent | Sama, karena agent tetap membaca `.sync_temp/config.json` |
+
+Yang **tetap sama** di kedua mode: algoritma delta berbasis hash (xxhash) +
+SQLite index, arti `.sync_ignore`, `manual_transfer` per-path, mode Soft/Force,
+dan flag CLI (`--path`, `--force`, `--bypass-ignore`).
+
+Contoh pemakaian:
+
+```bash
+make-sync push                 # initial + delta upload ke localTargetPath
+make-sync push --path src      # scoped (manual transfer) push
+make-sync pull                 # unduh perubahan dari localTargetPath
+```
+
+> Catatan: mode `local` tidak memerlukan agent yang berjalan di target, tetapi
+> binary agent tetap harus bisa di-build/ditemukan (dipakai untuk indexing).
+> Fallback binary `sync-agent-*` di root project tetap berlaku seperti mode ssh.
+
+Test integrasi path-to-path (tanpa SSH):
+
+```bash
+go test -tags integration -timeout 15m -v ./test/
+```
+
 ## Konfigurasi Direct Access (SSH Config)
 
 make-sync mendukung pembuatan file SSH config otomatis untuk akses langsung ke remote server. Konfigurasi ini memungkinkan koneksi SSH yang lebih mudah tanpa perlu mengetik kredensial berulang.

@@ -34,6 +34,24 @@ devsync:
     host: =var.auth.host
     port: =var.auth.port
     remotePath: =var.auth.remotePath
+  # --- Mode transport -------------------------------------------------------
+  # mode: ssh (default, backward compatible) | local (path-to-path, tanpa SSH)
+  #
+  # mode: local memerlukan localTargetPath (path absolut). Saat mode local,
+  # host/remotePath diabaikan, agent TIDAK di-upload ke remote, dan config agent
+  # ditulis lokal ke <localTargetPath>/.sync_temp/config.json.
+  #
+  # Contoh mode local:
+  # auth:
+  #   mode: local
+  #   localTargetPath: /srv/deploy/my-project
+  #
+  # Contoh eksplisit mode ssh (sama dengan default):
+  # auth:
+  #   mode: ssh
+  #   host: =var.auth.host
+  #   remotePath: =var.auth.remotePath
+  # -------------------------------------------------------------------------
   ignores: []
   agent_watchs:
     - artywiz_hotfix/storage/logs/
