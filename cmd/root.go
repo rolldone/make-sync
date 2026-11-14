@@ -291,7 +291,7 @@ func init() {
 	// register one-shot push/pull commands
 	rootCmd.AddCommand(pushCmd)
 	rootCmd.AddCommand(pullCmd)
-	// register deploy command (blind push by commit range)
+	// register deploy command (delta push by commit range)
 	rootCmd.AddCommand(deployCmd)
 }
 

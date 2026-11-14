@@ -23,17 +23,23 @@ var deploySinceCommit string
 
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
-	Short: "Deploy files changed since a git commit (blind push, no indexing)",
+	Short: "Deploy files changed since a git commit (delta push, no indexing)",
 	Long: `Deploy the files touched by a commit range to the remote server.
 
-Unlike 'push', deploy does not index the remote or compare file hashes: git is
-the source of truth. Files changed in <rev>..HEAD (plus uncommitted working
-tree changes) are uploaded directly, and files deleted in that range are
-deleted on the remote after an explicit confirmation.
+Unlike 'push', deploy does not index the remote and git is the source of truth:
+files changed in <rev>..HEAD (plus uncommitted working tree changes) are the
+candidates, and files deleted in that range are deleted on the remote after an
+explicit confirmation.
 
-This is a blind push: a file identical on the remote is still uploaded, and
-manual edits made directly on the server are overwritten. Deletions are scoped
-to the commit range only — deploy never sweeps "missing locally" files.
+This is a delta push: a single SSH exec hashes the candidate files with
+sha256sum and files already identical on the remote are skipped, so only files
+whose content differs are transferred. Manual edits made directly on the server
+are still overwritten. Deletions are scoped to the commit range only — deploy
+never sweeps "missing locally" files.
+
+If the remote pre-check cannot run (sha256sum unavailable, exec error, or
+unparseable output) deploy falls back to a blind push, and Windows targets are
+uploaded blindly because sha256sum is not standard on cmd.exe.
 
 Examples:
   make-sync deploy --since-commit HEAD~1
@@ -120,22 +126,38 @@ func runDeploy(sinceCommit string) error {
 	}
 	defer sshClient.Close()
 
-	// 1. Blind upload of every file in the range.
+	// 1. Delta pre-check, then upload only the files that need transferring.
+	// POSIX targets hash the remote in one exec; Windows (no standard
+	// sha256sum on cmd.exe) falls back directly to a blind upload.
 	if len(lists.Upload) > 0 {
-		pairs := buildDeployUploadPairs(absRoot, remotePath, osTarget, lists.Upload)
+		uploadList := lists.Upload
 		if strings.Contains(osTarget, "win") {
-			for _, pair := range pairs {
-				if uerr := sshClient.UploadFile(pair.Local, pair.Remote); uerr != nil {
-					return fmt.Errorf("upload %s failed: %w", pair.Local, uerr)
-				}
-				util.Default.Printf("⬆️  %s\n", pair.Remote)
-			}
+			util.Default.Println("   Delta check : skipped (Windows target → blind upload)")
 		} else {
-			uploaded, uerr := sshClient.UploadFilesSFTP(pairs, 4)
-			if uerr != nil {
-				return fmt.Errorf("upload failed (%d/%d ok): %w", len(uploaded), len(pairs), uerr)
+			delta := planDeployDelta(sshClient, absRoot, remotePath, lists.Upload)
+			uploadList = delta.Send
+			util.Default.Printf("   Delta check : SKIP %d / SEND %d\n", len(delta.Skip), len(delta.Send))
+			if len(delta.Send) == 0 {
+				util.Default.Println("✅ up-to-date (semua hash sama) — tidak ada file yang perlu dikirim.")
 			}
-			util.Default.Printf("⬆️  Uploaded %d files.\n", len(uploaded))
+		}
+
+		if len(uploadList) > 0 {
+			pairs := buildDeployUploadPairs(absRoot, remotePath, osTarget, uploadList)
+			if strings.Contains(osTarget, "win") {
+				for _, pair := range pairs {
+					if uerr := sshClient.UploadFile(pair.Local, pair.Remote); uerr != nil {
+						return fmt.Errorf("upload %s failed: %w", pair.Local, uerr)
+					}
+					util.Default.Printf("⬆️  %s\n", pair.Remote)
+				}
+			} else {
+				uploaded, uerr := sshClient.UploadFilesSFTP(pairs, 4)
+				if uerr != nil {
+					return fmt.Errorf("upload failed (%d/%d ok): %w", len(uploaded), len(pairs), uerr)
+				}
+				util.Default.Printf("⬆️  Uploaded %d files.\n", len(uploaded))
+			}
 		}
 	}
 

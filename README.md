@@ -7,7 +7,7 @@ PERINGATAN: Fitur "Pipeline System" telah dihapus dari rilis saat ini. Bagian pi
 ## Fitur Utama
 - Safe Pull/Push: indeks remote (SQLite) dibuat dulu, lalu bandingkan hash untuk unduh/unggah yang berubah saja.
 - One-Shot Push/Pull (CLI): perintah `make-sync push` / `make-sync pull` untuk sinkronisasi sekali jalan — mendukung `--path` (scoped), `--force`, dan `--bypass-ignore`. (`--git-changes` sementara dinonaktifkan.)
-- Deploy by Commit Range (CLI): `make-sync deploy --since-commit <rev>` mengirim hanya file yang tersentuh rentang commit (blind push, tanpa indexing remote) dan menghapus file yang dihapus dalam rentang tersebut setelah konfirmasi.
+- Deploy by Commit Range (CLI): `make-sync deploy --since-commit <rev>` mengirim hanya file yang tersentuh rentang commit (delta push — hanya file dengan hash berbeda yang ditransfer, tanpa indexing remote) dan menghapus file yang dihapus dalam rentang tersebut setelah konfirmasi.
 - Manual/Single Sync Menu:
   - Download/Upload
   - Pilih folder: salah satu path terdaftar atau semua yang terdaftar
@@ -168,11 +168,15 @@ Catatan perilaku:
 - `--force` selalu dilindungi konfirmasi captcha untuk mencegah penghapusan tidak sengaja.
 - Tanpa flag scope (`--path`), perintah berjalan sebagai full-project sync memakai mode Safe/Bypass/Force dari mesin pull/push.
 
-## Deploy by Commit Range (blind push)
+## Deploy by Commit Range (delta push)
 
 `make-sync deploy` mengirim ke remote hanya file yang tersentuh oleh sebuah
-rentang commit git. Berbeda dari `push`, `deploy` **tidak** meng-index remote
-dan **tidak** membandingkan hash: git adalah sumber kebenaran.
+rentang commit git. Berbeda dari `push`, `deploy` **tidak** meng-index remote:
+git adalah sumber kebenaran untuk menentukan kandidat file. Sebelum transfer,
+`deploy` melakukan **delta pre-check**: SHA-256 setiap kandidat dihitung lokal,
+lalu **satu** exec SSH menjalankan `sha256sum` untuk semua path remote sekaligus
+(tanpa agent, tanpa file DB — manifest hanya di memori). File yang hash-nya
+identik di-skip; hanya file yang berbeda atau belum ada di remote yang dikirim.
 
 ```bash
 make-sync deploy --since-commit HEAD~1   # file yang berubah di commit terakhir
@@ -183,6 +187,7 @@ make-sync deploy --since-commit 8d9020b  # sejak commit hash tertentu
 Cakupan file yang dikirim:
 - Semua file yang berubah pada `<rev>..HEAD` (union seluruh commit dalam rentang),
   **ditambah** perubahan working tree yang belum di-commit (modified/added/untracked).
+- Hanya file tersebut yang di-hash; file lain di remote tidak disentuh.
 - File yang dihapus dalam rentang tersebut **dihapus di remote** (per-path, bukan
   sweep). Daftar file yang akan dihapus ditampilkan lebih dulu dan wajib
   dikonfirmasi captcha; bila konfirmasi ditolak, uploaded tetap berjalan dan
@@ -199,15 +204,22 @@ Contoh output:
 ⚠️  These files will be DELETED on the remote:
    - src/obsolete.php
 Type the token to confirm [IZ48QY]:
-⬆️  Uploaded 3 files.
+   Delta check : SKIP 2 / SEND 1
+⬆️  Uploaded 1 files.
 🗑️  Deleted 1 files on remote.
 ✅ Deploy finished.
 ```
 
 Catatan perilaku penting:
-- **Blind push.** File yang isinya identik di remote tetap diunggah, dan
-  perubahan yang dilakukan langsung di server akan **tertimpa**. Ini perilaku
-  deployment yang disengaja (remote = mirror git).
+- **Delta push.** File yang isinya identik di remote (hash SHA-256 sama) tidak
+  ditransfer, sehingga mtime di server tetap stabil. Perubahan yang dilakukan
+  langsung di server pada file yang disentuh rentang akan **tertimpa** karena
+  hash-nya berbeda — perilaku deployment yang disengaja (remote = mirror git).
+- **Fallback blind push.** Bila `sha256sum` tidak tersedia di remote, exec gagal,
+  atau output tidak bisa di-parse, deploy memberi warning lalu mengirim semua
+  file rentang (perilaku v1) — tidak gagal keras.
+- **Target Windows.** `sha256sum` tidak standar di cmd.exe, jadi deploy langsung
+  blind upload untuk target Windows.
 - **Scope unit.** Yang dikirim adalah union rentang, bukan per-commit terpisah.
 - **Untracked ikut terkirim.** Saat rentang kosong (mis. `--since-commit HEAD`
   tanpa commit baru), seluruh perubahan working tree — termasuk folder untracked
