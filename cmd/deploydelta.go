@@ -30,6 +30,17 @@ var sha256SumLineRE = regexp.MustCompile(`^([0-9a-fA-F]{64})  (.+)$`)
 // everything.
 var sha256SumUnavailableRE = regexp.MustCompile(`(?i)['"]?sha256sum(?:\.exe)?['"]?: (?:command not found|not found)|['"]?sha256sum(?:\.exe)?['"]? is not recognized`)
 
+// sha256SumCommandOverhead is the fixed part of every generated command
+// ("sha256sum -- " prefix plus " 2>&1; true" suffix), excluding the paths.
+const sha256SumCommandOverhead = len("sha256sum -- ") + len(" 2>&1; true")
+
+// sha256SumBatchBudget caps the byte length of a single sha256sum command. A
+// 1272-file deploy used to build a ~135 KB argv and the SSH exec failed with an
+// empty output ("Process exited with status 1"). Measured limit is ~130 KB ok /
+// >=138 KB failing, so 32 KB per batch leaves a wide safety margin and keeps
+// each command line small.
+const sha256SumBatchBudget = 32 * 1024
+
 // hashLocalFiles computes the SHA-256 of every upload-list entry (relative,
 // forward-slash) under absRoot. Entries that are missing or unreadable are
 // omitted: the caller treats "no local hash" as "must send", never as failure.
@@ -73,10 +84,16 @@ func hashFileSHA256(path string) (string, error) {
 // parseSha256SumOutput, and the trailing "; true" normalises the exit status:
 // sha256sum already exits non-zero when a path is missing, which is an expected
 // ("file not present") case rather than a failure.
+//
+// Use splitSha256SumBatches for large candidate lists: one command per batch
+// keeps the argv far below the SSH exec limit.
 func buildSha256SumCommand(remoteRoot string, rels []string) string {
 	quoted := make([]string, 0, len(rels))
 	seen := make(map[string]struct{}, len(rels))
 	for _, rel := range rels {
+		if strings.TrimSpace(rel) == "" {
+			continue
+		}
 		remote := deployRemotePath(remoteRoot, rel, "")
 		if remote == "" {
 			continue
@@ -91,6 +108,50 @@ func buildSha256SumCommand(remoteRoot string, rels []string) string {
 		return ""
 	}
 	return "sha256sum -- " + strings.Join(quoted, " ") + " 2>&1; true"
+}
+
+// splitSha256SumBatches groups relative paths into batches whose generated
+// command stays within budget bytes. Paths are never split across batches; a
+// single path larger than the budget occupies its own batch (progress is
+// guaranteed because at least one path is always consumed per iteration).
+//
+// Order and de-duplication match buildSha256SumCommand so the batches are
+// deterministic.
+func splitSha256SumBatches(remoteRoot string, rels []string, budget int) [][]string {
+	if budget <= 0 {
+		budget = sha256SumBatchBudget
+	}
+	batches := make([][]string, 0, len(rels)/64+1)
+	current := make([]string, 0, len(rels))
+	currentLen := sha256SumCommandOverhead
+	seen := make(map[string]struct{}, len(rels))
+
+	for _, rel := range rels {
+		if strings.TrimSpace(rel) == "" {
+			continue
+		}
+		remote := deployRemotePath(remoteRoot, rel, "")
+		if remote == "" {
+			continue
+		}
+		if _, dup := seen[remote]; dup {
+			continue
+		}
+		seen[remote] = struct{}{}
+
+		tokenLen := len(shellEscapePOSIX(remote)) + 1 // + separating space
+		if len(current) > 0 && currentLen+tokenLen > budget {
+			batches = append(batches, current)
+			current = make([]string, 0, len(rels))
+			currentLen = sha256SumCommandOverhead
+		}
+		current = append(current, rel)
+		currentLen += tokenLen
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches
 }
 
 // parseSha256SumOutput extracts "<hash>  <path>" pairs keyed by remote path.
@@ -190,34 +251,62 @@ func planDeployDelta(client *sshclient.SSHClient, absRoot, remoteRoot string, up
 // map. `deploy --to-commit` uses it to compare the remote against the blob
 // content of a git revision instead of the working-tree files.
 func planDeployDeltaWithHashes(client *sshclient.SSHClient, remoteRoot string, uploads []string, localHashes map[string]string) deployDelta {
+	return planDeltaWithRunner(client.RunCommandWithOutput, remoteRoot, uploads, localHashes)
+}
+
+// commandRunner executes one remote command and returns its combined output.
+// It is a seam for tests: production always passes SSHClient.RunCommandWithOutput.
+type commandRunner func(cmd string) (string, error)
+
+// planDeltaWithRunner hashes the remote in sequential batches (see
+// sha256SumBatchBudget) on the same connection: a single exec would exceed the
+// SSH argv limit for large deploys. Any failing batch degrades to the blind-push
+// fallback.
+func planDeltaWithRunner(run commandRunner, remoteRoot string, uploads []string, localHashes map[string]string) deployDelta {
 	delta := deployDelta{Send: uploads}
 	if len(uploads) == 0 {
 		return delta
 	}
 
-	cmd := buildSha256SumCommand(remoteRoot, uploads)
-	if cmd == "" {
+	batches := splitSha256SumBatches(remoteRoot, uploads, sha256SumBatchBudget)
+	if len(batches) == 0 {
 		delta.Fallback = true
 		return delta
 	}
 
-	out, err := client.RunCommandWithOutput(cmd)
-	if err != nil {
-		util.Default.Printf("⚠️  Delta pre-check failed (%v) — falling back to blind push.\n", err)
-		delta.Fallback = true
-		return delta
-	}
+	merged := make(map[string]string, len(uploads))
+	for i, batch := range batches {
+		cmd := buildSha256SumCommand(remoteRoot, batch)
+		if cmd == "" {
+			continue
+		}
+		out, err := run(cmd)
+		if err != nil {
+			if len(batches) > 1 {
+				util.Default.Printf("⚠️  Delta pre-check failed on batch %d/%d (%v) — falling back to blind push.\n", i+1, len(batches), err)
+			} else {
+				util.Default.Printf("⚠️  Delta pre-check failed (%v) — falling back to blind push.\n", err)
+			}
+			delta.Fallback = true
+			return delta
+		}
 
-	parsed := parseSha256SumOutput(out, "")
-	if len(parsed) == 0 && sha256SumUnavailable(out) {
-		util.Default.Println("⚠️  sha256sum is unavailable on the remote — falling back to blind push.")
-		delta.Fallback = true
-		return delta
+		// sha256sum itself missing is a remote capability problem, not a
+		// partial failure: report once and fall back immediately.
+		if i == 0 && sha256SumUnavailable(out) {
+			util.Default.Println("⚠️  sha256sum is unavailable on the remote — falling back to blind push.")
+			delta.Fallback = true
+			return delta
+		}
+
+		for remote, sum := range parseSha256SumOutput(out, "") {
+			merged[remote] = sum
+		}
 	}
 
 	byRemote := remoteHashesByRel(remoteRoot, uploads)
-	remoteHashes := make(map[string]string, len(parsed))
-	for remote, sum := range parsed {
+	remoteHashes := make(map[string]string, len(merged))
+	for remote, sum := range merged {
 		if rel, ok := byRemote[remote]; ok {
 			remoteHashes[rel] = sum
 		}
