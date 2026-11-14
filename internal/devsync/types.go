@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"make-sync/internal/config"
-	"make-sync/internal/sshclient"
 	"make-sync/internal/syncdata"
+	"make-sync/internal/transport"
 	"make-sync/internal/util"
 
 	"github.com/asaskevich/EventBus"
@@ -95,7 +95,7 @@ type Watcher struct {
 	done              chan bool
 	eventChan         chan FileEvent
 	lastEvents        map[string]FileEvent // For debouncing
-	sshClient         *sshclient.SSHClient
+	sshClient         transport.Client
 	extendedIgnores   []string              // Cached extended ignore patterns
 	ignoreFileModTime time.Time             // Last modification time of .sync_ignore file
 	ignoreCache       *syncdata.IgnoreCache // Cached IgnoreCache instance for .sync_ignore patterns

@@ -270,7 +270,7 @@ func ForceSingleSyncMenu(cfg *config.Config, localRoot string) {
 // If bypassIgnore is true, remote .sync_ignore is skipped.
 func RunRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool, prefixes []string) error {
 	// Determine target OS
-	targetOS := cfg.Devsync.OSTarget
+	targetOS := cfg.EffectiveOSTarget()
 	if strings.TrimSpace(targetOS) == "" {
 		targetOS = "linux"
 	}
@@ -294,7 +294,7 @@ func RunRemoteIndexingForPull(cfg *config.Config, bypassIgnore bool, prefixes []
 	// Ensure close after build
 	defer sshClient.Close()
 
-	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
+	sshAdapter := sshClient
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
 		TargetOS:    targetOS,

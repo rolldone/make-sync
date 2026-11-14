@@ -309,7 +309,7 @@ func BuildAndDeployAgent(ctx context.Context, cfg *config.Config, ssh SSHClient,
 	log.Printf("✅ DEBUG: Agent built successfully at: %s", builtAgentPath)
 
 	// Determine remote directory
-	remoteDir := cfg.Devsync.Auth.RemotePath
+	remoteDir := cfg.Devsync.Auth.RemoteRoot()
 	log.Printf("📁 DEBUG: RemotePath from config: '%s'", remoteDir)
 
 	if remoteDir == "" {

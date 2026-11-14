@@ -88,7 +88,7 @@ func (m *PTYManager) OpenRemoteSlot(slot int, remoteCmd string) error {
 		return fmt.Errorf("slot %d already exists", slot)
 	}
 
-	bridge, err := CreateSSHBridgeWithCommand(m.w.sshClient, remoteCmd)
+	bridge, err := CreateBridgeWithCommand(m.w.sshClient, remoteCmd)
 	if err != nil {
 		return fmt.Errorf("failed to create bridge: %w", err)
 	}

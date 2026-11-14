@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"make-sync/internal/sshclient"
+	"make-sync/internal/transport"
 	"make-sync/internal/util"
 )
 
@@ -240,7 +240,7 @@ type deployDelta struct {
 // deploy: a missing sha256sum, an exec error, or output that yields no usable
 // hash all degrade to the blind-push fallback (send everything). POSIX targets
 // only — Windows falls back directly in runDeploy.
-func planDeployDelta(client *sshclient.SSHClient, absRoot, remoteRoot string, uploads []string) deployDelta {
+func planDeployDelta(client transport.Client, absRoot, remoteRoot string, uploads []string) deployDelta {
 	if len(uploads) == 0 {
 		return deployDelta{Send: uploads}
 	}
@@ -250,7 +250,7 @@ func planDeployDelta(client *sshclient.SSHClient, absRoot, remoteRoot string, up
 // planDeployDeltaWithHashes is planDeployDelta with a caller-provided local hash
 // map. `deploy --to-commit` uses it to compare the remote against the blob
 // content of a git revision instead of the working-tree files.
-func planDeployDeltaWithHashes(client *sshclient.SSHClient, remoteRoot string, uploads []string, localHashes map[string]string) deployDelta {
+func planDeployDeltaWithHashes(client transport.Client, remoteRoot string, uploads []string, localHashes map[string]string) deployDelta {
 	return planDeltaWithRunner(client.RunCommandWithOutput, remoteRoot, uploads, localHashes)
 }
 

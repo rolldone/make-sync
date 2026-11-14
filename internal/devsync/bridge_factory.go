@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"make-sync/internal/devsync/localclient"
 	"make-sync/internal/sshclient"
+	"make-sync/internal/transport"
 )
 
 // CreateSSHBridgeWithCommand constructs an SSH-backed Bridge using an existing
@@ -39,4 +40,17 @@ func CreateLocalBridge(initialCmd string) (Bridge, error) {
 		return nil, err
 	}
 	return b, nil
+}
+
+// CreateBridgeWithCommand builds a PTY bridge according to the transport mode
+// behind client: SSH mode produces an SSH-backed bridge, local mode produces a
+// local bridge. This keeps PTY behaviour identical in both modes.
+func CreateBridgeWithCommand(client transport.Client, initialCmd string) (Bridge, error) {
+	if client == nil {
+		return nil, fmt.Errorf("nil client")
+	}
+	if sshCli, err := transport.AsSSHClient(client); err == nil && sshCli != nil {
+		return CreateSSHBridgeWithCommand(sshCli, initialCmd)
+	}
+	return CreateLocalBridge(initialCmd)
 }

@@ -6,8 +6,8 @@ import (
 	"log"
 	"make-sync/internal/config"
 	"make-sync/internal/events"
-	"make-sync/internal/sshclient"
 	"make-sync/internal/syncdata"
+	"make-sync/internal/transport"
 	"make-sync/internal/tui"
 	"make-sync/internal/util"
 	"os"
@@ -284,48 +284,36 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	if err != nil {
 		util.Default.Printf("❌ Failed to enable raw mode: %v\n", err)
 	}
-	// Get absolute path for private key
-	privateKeyPath := strings.TrimSpace(cfg.Devsync.Auth.PrivateKey)
-	// Only resolve to absolute path if a private key path is actually provided
-	if privateKeyPath != "" && !filepath.IsAbs(privateKeyPath) {
-		absPath, err := filepath.Abs(privateKeyPath)
-		if err != nil {
-			util.Default.Printf("❌ Failed to get absolute path for private key: %v\n", err)
-			// continue to menu
-			return err
+
+	// Resolve the private key path only when SSH mode actually needs it.
+	if !cfg.Devsync.Auth.IsLocal() {
+		privateKeyPath := strings.TrimSpace(cfg.Devsync.Auth.PrivateKey)
+		// Only resolve to absolute path if a private key path is actually provided
+		if privateKeyPath != "" && !filepath.IsAbs(privateKeyPath) {
+			absPath, err := filepath.Abs(privateKeyPath)
+			if err != nil {
+				util.Default.Printf("❌ Failed to get absolute path for private key: %v\n", err)
+				// continue to menu
+				return err
+			}
+			privateKeyPath = absPath
+			cfg.Devsync.Auth.PrivateKey = privateKeyPath
 		}
-		privateKeyPath = absPath
 	}
 
-	// Create SSH client directly
-	sshClient, err := sshclient.NewPersistentSSHClient(
-		cfg.Devsync.Auth.Username,
-		privateKeyPath,
-		cfg.Devsync.Auth.Password,
-		cfg.Devsync.Auth.Host,
-		cfg.Devsync.Auth.Port,
-	)
+	// Create the transport client for the configured mode (ssh or local)
+	sshClient, err := createSSHClient(cfg)
 	if err != nil {
-		util.Default.Printf("❌ Failed to initialize SSH client: %v\n", err)
-		// continue to menu
-		os.Exit(1)
-		return err
-	}
-
-	// Connect to SSH server
-	if err := sshClient.Connect(); err != nil {
-		util.Default.Printf("❌ Failed to connect SSH server: %v\n", err)
-		sshClient.Close()
-		os.Exit(1)
+		util.Default.Printf("❌ Failed to initialize transport client: %v\n", err)
 		// continue to menu
 		return err
 	}
-	util.Default.Printf("🔗 SSH client connected successfully\n")
+	util.Default.Printf("🔗 Transport client connected successfully\n")
 	util.Default.ClearLine()
 
 	// Build the remote command that sets working directory and launches a shell
-	remotePath := cfg.Devsync.Auth.RemotePath
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	remotePath := cfg.Devsync.Auth.RemoteRoot()
+	osTarget := cfg.EffectiveOSTarget()
 	if remotePath == "" {
 		if strings.Contains(osTarget, "win") {
 			// use temp on remote Windows if not provided
@@ -336,7 +324,13 @@ func basicNewSessionSSH(cfg *config.Config) error {
 	}
 
 	var remoteCommand string
-	if strings.Contains(osTarget, "win") {
+	switch {
+	case cfg.Devsync.Auth.IsLocal() && strings.Contains(osTarget, "win"):
+		remoteCommand = fmt.Sprintf("cd /d \"%s\"", remotePath)
+	case cfg.Devsync.Auth.IsLocal():
+		// Local mode: open a shell inside the local target directory.
+		remoteCommand = fmt.Sprintf("mkdir -p %q && cd %q && exec ${SHELL:-bash}", remotePath, remotePath)
+	case strings.Contains(osTarget, "win"):
 		// Build a robust cmd.exe command:
 		// Try to change directory first (handles existing directory and drive changes).
 		// If that fails, create the directory and cd into it. Avoid wrapping the whole
@@ -347,23 +341,22 @@ func basicNewSessionSSH(cfg *config.Config) error {
 		// cmd.exe /K cd /d "C:\path\to\dir" 2>nul || (mkdir "C:\path\to\dir" && cd /d "C:\path\to\dir")
 		remoteCommand = fmt.Sprintf("cmd.exe /K cd /d \"%s\" 2>nul || (mkdir \"%s\" && cd /d \"%s\")", remotePath, remotePath, remotePath)
 		log.Printf("DEBUG: remoteCommand=%s\n", remoteCommand)
-	} else {
+	default:
 		// Unix-like: mkdir + cd + bash
 		remoteCommand = fmt.Sprintf("mkdir -p %s || true && cd %s && exec bash", remotePath, remotePath)
 	}
-	// Create PTY-SSH bridge with initial command so working dir is set
-	bridge, err := sshclient.NewPTYSSHBridgeWithCommand(sshClient, remoteCommand)
+	// Create PTY bridge with initial command so working dir is set
+	bridge, err := CreateBridgeWithCommand(sshClient, remoteCommand)
 	if err != nil {
-		util.Default.Printf("❌ Failed to create PTY-SSH bridge: %v\n", err)
+		util.Default.Printf("❌ Failed to create PTY bridge: %v\n", err)
 
-		os.Exit(1)
 		sshClient.Close()
 		// continue to menu
 
 		return err
 	}
 	// Start the interactive shell
-	util.Default.Println("🔗 Starting interactive SSH session with PTY bridge...")
+	util.Default.Println("🔗 Starting interactive session with PTY bridge...")
 
 	bridge.SetOnExitListener(func() {
 		// close(routerStop)
@@ -400,25 +393,13 @@ func basicNewSessionSSH(cfg *config.Config) error {
 // platform-specific implementations of flushStdin() and sendEnter()
 // are provided in separate files with build tags (termio_windows.go / termio_unix.go)
 
-// createSSHClient creates and connects an SSH client using values from cfg.Devsync.Auth
-func createSSHClient(cfg *config.Config) (*sshclient.SSHClient, error) {
-	auth := cfg.Devsync.Auth
-	username := auth.Username
-	privateKey := auth.PrivateKey
-	password := auth.Password
-	host := auth.Host
-	port := auth.Port
-	if port == "" {
-		port = "22"
-	}
-
-	client, err := sshclient.NewPersistentSSHClient(username, privateKey, password, host, port)
+// createSSHClient creates and connects a transport client according to
+// cfg.Devsync.Auth.mode. In local mode it returns a LocalClient rooted at
+// localTargetPath; in SSH mode it keeps the previous persistent SSH behaviour.
+func createSSHClient(cfg *config.Config) (transport.Client, error) {
+	client, err := transport.NewClient(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ssh client: %v", err)
-	}
-	if err := client.Connect(); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("failed to connect ssh client: %v", err)
+		return nil, fmt.Errorf("failed to create transport client: %v", err)
 	}
 	return client, nil
 }

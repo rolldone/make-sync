@@ -312,15 +312,15 @@ menuLoop:
 		// PTY slot handling (3..9) or run once
 		if *slot >= 3 && *slot <= 9 && w != nil && w.ptyMgr != nil {
 			remotePath := "/tmp"
-			if cfg != nil && cfg.Devsync.Auth.RemotePath != "" {
-				remotePath = cfg.Devsync.Auth.RemotePath
+			if cfg != nil && cfg.Devsync.Auth.RemoteRoot() != "" {
+				remotePath = cfg.Devsync.Auth.RemoteRoot()
 			}
 			// Parse optional local log capture marker in the selected command
 			baseCmd, logFile := parseCommandLogSpec(result)
 			// choose remote command template based on target OS
 			targetOS := ""
 			if cfg != nil {
-				targetOS = strings.ToLower(cfg.Devsync.OSTarget)
+				targetOS = cfg.EffectiveOSTarget()
 			}
 			isWindowsTarget := strings.Contains(targetOS, "windows")
 			var initialCmd string
@@ -527,14 +527,14 @@ func (w *Watcher) enterShellNonCommand() {
 	cfg := w.config
 	remotePath := "/tmp"
 	if cfg != nil {
-		if cfg.Devsync.Auth.RemotePath != "" {
-			remotePath = cfg.Devsync.Auth.RemotePath
+		if cfg.Devsync.Auth.RemoteRoot() != "" {
+			remotePath = cfg.Devsync.Auth.RemoteRoot()
 		}
 	}
 	isExist := false
 	targetOS := ""
 	if cfg != nil {
-		targetOS = strings.ToLower(cfg.Devsync.OSTarget)
+		targetOS = cfg.EffectiveOSTarget()
 	}
 	isWindowsTarget := strings.Contains(targetOS, "windows")
 	var initialCmd string

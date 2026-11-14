@@ -3,7 +3,7 @@ package syncdata
 import (
 	"make-sync/internal/config"
 	"make-sync/internal/deployagent"
-	"make-sync/internal/sshclient"
+	"make-sync/internal/transport"
 	"make-sync/internal/util"
 	"os"
 	"strings"
@@ -30,14 +30,11 @@ type SafePushResult struct {
 // 2. Deploy agent and run remote indexing
 // 3. Download remote index DB
 // 4. Compare and download changed files by hash
-func RunSafePull(cfg *config.Config, sshClient *sshclient.SSHClient) SafePullResult {
+func RunSafePull(cfg *config.Config, sshClient transport.Client) SafePullResult {
 	util.Default.Println("🔁 safe_pull_sync selected — checking remote agent status...")
 
 	// Determine target OS from config
-	targetOS := cfg.Devsync.OSTarget
-	if targetOS == "" {
-		targetOS = "linux"
-	}
+	targetOS := cfg.EffectiveOSTarget()
 
 	projectRoot, projectErr := util.GetProjectRoot()
 	if projectErr != nil {
@@ -45,7 +42,7 @@ func RunSafePull(cfg *config.Config, sshClient *sshclient.SSHClient) SafePullRes
 		return SafePullResult{Success: false, Error: projectErr}
 	}
 
-	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
+	sshAdapter := sshClient
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
 		TargetOS:    targetOS,
@@ -133,14 +130,11 @@ func RunSafePull(cfg *config.Config, sshClient *sshclient.SSHClient) SafePullRes
 // RunPullWithMode performs the pull workflow but selects the compare/download
 // strategy based on mode. mode strings expected to contain substrings:
 // "Force" (enable delete semantics), "Bypass" (bypass local ignore patterns).
-func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode string) SafePullResult {
+func RunPullWithMode(cfg *config.Config, sshClient transport.Client, mode string) SafePullResult {
 	util.Default.Println("🔁 pull selected — checking remote agent status...")
 
 	// Determine target OS from config
-	targetOS := cfg.Devsync.OSTarget
-	if targetOS == "" {
-		targetOS = "linux"
-	}
+	targetOS := cfg.EffectiveOSTarget()
 
 	bypassIgnore := strings.Contains(mode, "Bypass")
 
@@ -151,7 +145,7 @@ func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 		return SafePullResult{Success: false, Error: projectErr}
 	}
 
-	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
+	sshAdapter := sshClient
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
 		TargetOS:    targetOS,
@@ -255,14 +249,11 @@ func RunPullWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 // 2. Deploy agent and run remote indexing
 // 3. Download remote index DB
 // 4. Compare and upload changed files by hash
-func RunSafePush(cfg *config.Config, sshClient *sshclient.SSHClient) SafePushResult {
+func RunSafePush(cfg *config.Config, sshClient transport.Client) SafePushResult {
 	util.Default.Println("🔁 safe_push_sync selected — checking remote agent status...")
 
 	// Determine target OS from config
-	targetOS := cfg.Devsync.OSTarget
-	if targetOS == "" {
-		targetOS = "linux"
-	}
+	targetOS := cfg.EffectiveOSTarget()
 
 	projectRoot, projectErr := util.GetProjectRoot()
 	if projectErr != nil {
@@ -270,7 +261,7 @@ func RunSafePush(cfg *config.Config, sshClient *sshclient.SSHClient) SafePushRes
 		return SafePushResult{Success: false, Error: projectErr}
 	}
 
-	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
+	sshAdapter := sshClient
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
 		TargetOS:    targetOS,
@@ -355,14 +346,11 @@ func RunSafePush(cfg *config.Config, sshClient *sshclient.SSHClient) SafePushRes
 // RunPushWithMode performs the push workflow but selects the compare/upload
 // strategy based on mode. mode strings expected to contain substrings:
 // "Force" (enable delete semantics), "Bypass" (bypass local ignore patterns).
-func RunPushWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode string) SafePushResult {
+func RunPushWithMode(cfg *config.Config, sshClient transport.Client, mode string) SafePushResult {
 	util.Default.Println("🔁 push selected — checking remote agent status...")
 
 	// Determine target OS from config
-	targetOS := cfg.Devsync.OSTarget
-	if targetOS == "" {
-		targetOS = "linux"
-	}
+	targetOS := cfg.EffectiveOSTarget()
 
 	bypassIgnore := strings.Contains(mode, "Bypass")
 
@@ -373,7 +361,7 @@ func RunPushWithMode(cfg *config.Config, sshClient *sshclient.SSHClient, mode st
 		return SafePushResult{Success: false, Error: projectErr}
 	}
 
-	sshAdapter := deployagent.NewSSHClientAdapter(sshClient)
+	sshAdapter := sshClient
 	buildOpts := deployagent.BuildOptions{
 		ProjectRoot: projectRoot,
 		TargetOS:    targetOS,

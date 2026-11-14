@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"make-sync/internal/config"
-	"make-sync/internal/sshclient"
+	"make-sync/internal/devsync"
 	"make-sync/internal/syncdata"
 	"make-sync/internal/util"
 
@@ -109,7 +109,7 @@ var execCmd = &cobra.Command{
 		}
 
 		// Determine remote working directory
-		remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemotePath)
+		remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemoteRoot())
 
 		// --- Re-quote argv (issue #2) ---
 		// Shell lokal sudah menghapus quoting sebelum argv sampai ke make-sync,
@@ -141,7 +141,7 @@ var execCmd = &cobra.Command{
 
 		// Prefer order based on config, but fall back to the other if the shell is unavailable.
 		// If user wants to ignore os_target, we still use it only as a hint for the first try.
-		osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+		osTarget := cfg.EffectiveOSTarget()
 		tryOrder := []string{buildPosix(), buildWindows()}
 		shellKinds := []shellKind{shellPOSIX, shellWindows}
 		if strings.Contains(osTarget, "win") {
@@ -187,7 +187,7 @@ var execCmd = &cobra.Command{
 			}
 
 			fmt.Fprintf(os.Stdout, "🔗 Interactive shell (make-sync exec). Type 'exit' to quit.\n")
-			bridge, err := sshclient.NewPTYSSHBridgeWithCommand(sshCli, initCmd)
+			bridge, err := devsync.CreateBridgeWithCommand(sshCli, initCmd)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "❌ Failed to create PTY bridge: %v\n", err)
 				util.ResetRaw(oldState)

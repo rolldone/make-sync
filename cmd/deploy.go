@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"make-sync/internal/config"
-	"make-sync/internal/sshclient"
 	"make-sync/internal/syncdata"
+	"make-sync/internal/transport"
 	"make-sync/internal/tui"
 	"make-sync/internal/util"
 
@@ -124,11 +124,11 @@ func runDeploy(sinceCommit, toCommit string) error {
 		return nil
 	}
 
-	remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemotePath)
+	remotePath := strings.TrimSpace(cfg.Devsync.Auth.RemoteRoot())
 	if remotePath == "" {
 		return fmt.Errorf("remotePath is empty in config — cannot deploy")
 	}
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	osTarget := cfg.EffectiveOSTarget()
 
 	util.Default.Println(plan.header)
 	util.Default.Printf("   Remote root : %s\n", remotePath)
@@ -265,14 +265,14 @@ func prepareDeployPlan(absRoot, sinceCommit, toCommit string) (deployPlan, error
 
 // buildDeployUploadPairs maps local absolute paths to remote paths under
 // remotePath, preserving the relative structure.
-func buildDeployUploadPairs(absRoot, remotePath, osTarget string, uploads []string) []sshclient.UploadPair {
-	pairs := make([]sshclient.UploadPair, 0, len(uploads))
+func buildDeployUploadPairs(absRoot, remotePath, osTarget string, uploads []string) []transport.UploadPair {
+	pairs := make([]transport.UploadPair, 0, len(uploads))
 	for _, rel := range uploads {
 		rel = filepath.ToSlash(strings.TrimSpace(rel))
 		if rel == "" {
 			continue
 		}
-		pairs = append(pairs, sshclient.UploadPair{
+		pairs = append(pairs, transport.UploadPair{
 			Local:  filepath.Join(absRoot, filepath.FromSlash(rel)),
 			Remote: deployRemotePath(remotePath, rel, osTarget),
 		})

@@ -11,8 +11,8 @@ import (
 	"make-sync/internal/config"
 	"make-sync/internal/deployagent"
 	"make-sync/internal/events"
-	"make-sync/internal/sshclient"
 	"make-sync/internal/syncdata"
+	"make-sync/internal/transport"
 	"make-sync/internal/util"
 	"os"
 	"path"
@@ -54,36 +54,35 @@ func NewWatcherBasic(cfg *config.Config) (*Watcher, error) {
 		absWatchPath = watchPath
 	}
 
-	// Initialize SSH client if auth is configured
-	var sshClient *sshclient.SSHClient
-	if cfg.Devsync.Auth.Username != "" && (cfg.Devsync.Auth.PrivateKey != "" || cfg.Devsync.Auth.Password != "") {
-		var err error
-		// Use persistent SSH client for better performance
-		sshClient, err = sshclient.NewPersistentSSHClient(
-			cfg.Devsync.Auth.Username,
-			cfg.Devsync.Auth.PrivateKey,
-			cfg.Devsync.Auth.Password,
-			cfg.Devsync.Auth.Host,
-			cfg.Devsync.Auth.Port,
-		)
-		if err != nil {
-			util.Default.Printf("⚠️  Failed to initialize SSH client: %v\n", err)
+	// Initialize the transport client according to devsync.auth.mode.
+	// Local mode needs no credentials: the client simply operates on
+	// localTargetPath. SSH mode requires credentials and keeps the previous
+	// guarded behaviour.
+	var sshClient transport.Client
+	auth := cfg.Devsync.Auth
+	if auth.IsLocal() {
+		client, cerr := transport.NewClient(cfg)
+		if cerr != nil {
+			util.Default.Printf("⚠️  Failed to initialize local transport: %v\n", cerr)
 		} else {
-			// Connect to SSH server
-			if err := sshClient.Connect(); err != nil {
-				util.Default.Printf("⚠️  Failed to connect SSH server: %v\n", err)
-				sshClient = nil
-			} else {
-				util.Default.Printf("🔗 SSH client connected successfully\n")
-				util.Default.ClearLine()
+			util.Default.Printf("🗂️  Local transport ready at %s\n", auth.RemoteRoot())
+			sshClient = client
+		}
+	} else if auth.Username != "" && (auth.PrivateKey != "" || auth.Password != "") {
+		client, cerr := transport.NewClient(cfg)
+		if cerr != nil {
+			util.Default.Printf("⚠️  Failed to initialize SSH client: %v\n", cerr)
+		} else {
+			util.Default.Printf("🔗 SSH client connected successfully\n")
+			util.Default.ClearLine()
 
-				// Start persistent session for continuous monitoring
-				if err := sshClient.StartPersistentSession(); err != nil {
-					util.Default.Printf("⚠️  Failed to start persistent session: %v\n", err)
-					sshClient = nil
-				} else {
-					util.Default.Printf("🔄 Persistent SSH session started\n")
-				}
+			// Start persistent session for continuous monitoring
+			if err := client.StartPersistentSession(); err != nil {
+				util.Default.Printf("⚠️  Failed to start persistent session: %v\n", err)
+				_ = client.Close()
+			} else {
+				util.Default.Printf("🔄 Persistent SSH session started\n")
+				sshClient = client
 			}
 		}
 	}
@@ -185,18 +184,25 @@ func NewWatcher(cfg *config.Config) (*Watcher, error) {
 	watcher.handlePidSingleton()
 
 	// build & deploy
-	if err := watcher.buildAndDeployAgent(); err != nil {
-		util.Default.Printf("⚠️  Failed to build/deploy agent: %v\n", err)
-	}
+	if cfg.Devsync.Auth.IsLocal() {
+		// Local mode: the target directory is reachable directly, so there is no
+		// remote agent to build, deploy, configure or monitor. File events are
+		// pushed through the local transport instead.
+		util.Default.Println("🗂️  Mode local: agent remote tidak diperlukan — target diakses langsung.")
+	} else {
+		if err := watcher.buildAndDeployAgent(); err != nil {
+			util.Default.Printf("⚠️  Failed to build/deploy agent: %v\n", err)
+		}
 
-	// sync config
-	if err := watcher.syncConfigToRemote(); err != nil {
-		util.Default.Printf("⚠️  Failed to sync config to remote: %v\n", err)
-	}
+		// sync config
+		if err := watcher.syncConfigToRemote(); err != nil {
+			util.Default.Printf("⚠️  Failed to sync config to remote: %v\n", err)
+		}
 
-	// start monitoring
-	if err := watcher.startAgentMonitoring(); err != nil {
-		util.Default.Printf("⚠️  Failed to start agent monitoring: %v\n", err)
+		// start monitoring
+		if err := watcher.startAgentMonitoring(); err != nil {
+			util.Default.Printf("⚠️  Failed to start agent monitoring: %v\n", err)
+		}
 	}
 
 	// Setup persistent EventBus subscription for cleanup (survives Start/Stop cycles)
@@ -238,9 +244,12 @@ func (w *Watcher) Start() error {
 
 	// Ensure agent monitoring is started when entering watcher; startAgentMonitoring is
 	// idempotent-ish but we guard against multiple starts in its implementation.
-	go func() {
-		_ = w.startAgentMonitoring()
-	}()
+	// Local mode has no target-side agent to monitor.
+	if !w.config.Devsync.Auth.IsLocal() {
+		go func() {
+			_ = w.startAgentMonitoring()
+		}()
+	}
 	// ensure we reset running flag when Start returns
 	defer func() {
 		w.runningMu.Lock()
@@ -427,7 +436,7 @@ func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
 	cfg.Devsync.Ignores = agg
 	cfg.Devsync.AgentWatchs = newCfg.Devsync.AgentWatchs
 	cfg.Devsync.ManualTransfer = newCfg.Devsync.ManualTransfer
-	cfg.Devsync.WorkingDir = newCfg.Devsync.Auth.RemotePath
+	cfg.Devsync.WorkingDir = newCfg.Devsync.Auth.RemoteRoot()
 	cfg.Devsync.SizeLimit = newCfg.Devsync.SizeLimit
 
 	// Also mirror essential fields into local .sync_temp/config.json for easier local inspection
@@ -436,8 +445,8 @@ func (w *Watcher) generateRemoteConfig() *RemoteAgentConfig {
 	if lc, lcErr := config.GetOrCreateLocalConfig(); lcErr == nil {
 		changed := false
 		// Always update working dir to current remote path
-		if lc.Devsync.WorkingDir != newCfg.Devsync.Auth.RemotePath {
-			lc.Devsync.WorkingDir = newCfg.Devsync.Auth.RemotePath
+		if lc.Devsync.WorkingDir != newCfg.Devsync.Auth.RemoteRoot() {
+			lc.Devsync.WorkingDir = newCfg.Devsync.Auth.RemoteRoot()
 			changed = true
 		}
 		// Mirror aggregated ignores for visibility; avoid nulls
@@ -614,12 +623,12 @@ func (w *Watcher) startAgentMonitoring() error {
 	w.safePrintln("👀 Starting continuous agent monitoring...")
 
 	// Get the remote agent path
-	remoteBase := w.config.Devsync.Auth.RemotePath
+	remoteBase := w.config.Devsync.Auth.RemoteRoot()
 	if remoteBase == "" {
 		return fmt.Errorf("remote base path is empty or not configured")
 	}
 	// Use OS-aware joins for remote paths
-	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
+	remoteSyncTemp := w.joinRemotePathOS(w.config.EffectiveOSTarget(), remoteBase, ".sync_temp")
 
 	// Get unique agent binary name from local config
 	localConfig, err := config.GetOrCreateLocalConfig()
@@ -628,13 +637,13 @@ func (w *Watcher) startAgentMonitoring() error {
 		return err // Can't proceed without agent name
 	}
 
-	targetOS := strings.ToLower(w.config.Devsync.OSTarget)
+	targetOS := w.config.EffectiveOSTarget()
 	remoteExecName := localConfig.GetAgentBinaryName(targetOS)
-	remoteAgentPath := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, remoteExecName)
+	remoteAgentPath := w.joinRemotePathOS(w.config.EffectiveOSTarget(), remoteSyncTemp, remoteExecName)
 
 	// Start agent watch command in background - run once and keep it running
 	var watchCmd string
-	if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+	if strings.Contains(w.config.EffectiveOSTarget(), "win") {
 		// Windows: just run agent watch (PID will be printed by agent itself)
 		watchCmd = fmt.Sprintf(`cmd.exe /C "cd /d "%s" && "%s" watch"`, remoteBase, remoteAgentPath)
 	} else {
@@ -662,7 +671,7 @@ func (w *Watcher) startAgentMonitoring() error {
 			default:
 			}
 
-			if w.sshClient.GetSession() == nil {
+			if !w.sshClient.HasSession() {
 				w.safePrintln("⚠️  SSH session lost, attempting to restart...")
 				if err := w.sshClient.StartPersistentSession(); err != nil {
 					w.safePrintf("❌ Failed to restart SSH session: %v\n", err)
@@ -683,7 +692,7 @@ func (w *Watcher) startAgentMonitoring() error {
 			// Execute the watch command - this should run continuously
 			// Before starting the long-running watch, run a quick identity check to verify the executable can run
 			var identityCmd string
-			if strings.Contains(strings.ToLower(w.config.Devsync.OSTarget), "win") {
+			if strings.Contains(w.config.EffectiveOSTarget(), "win") {
 				identityCmd = fmt.Sprintf("cmd.exe /C cd /d \"%s\" && \"%s\" identity", remoteBase, remoteAgentPath)
 			} else {
 				identityCmd = fmt.Sprintf("%s identity", remoteAgentPath)
@@ -933,7 +942,7 @@ func (w *Watcher) processAgentOutput(output string) {
 					hashValue := hashParts[2]
 
 					// Determine remote base and try to compute relative path
-					localPath, lerr := util.RemoteToLocal(w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath, filePath)
+					localPath, lerr := util.RemoteToLocal(w.config.Devsync.Auth.RemoteRoot(), w.config.Devsync.Auth.LocalPath, filePath)
 					if lerr != nil {
 						w.safePrintf("⚠️  Could not map remote path to local: %v\n", lerr)
 						continue
@@ -957,7 +966,7 @@ func (w *Watcher) processAgentOutput(output string) {
 						return
 					} else {
 						// Try to download the file from remote to local
-						remoteBase := w.config.Devsync.Auth.RemotePath
+						remoteBase := w.config.Devsync.Auth.RemoteRoot()
 						if remoteBase == "" {
 							remoteBase = "."
 						}
@@ -991,7 +1000,7 @@ func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 		w.safePrintf("🗑️  Received delete event for %s\n", filePath)
 
 		// Map remote path to local path
-		relPath, rerr := util.RemoteToLocal(w.config.Devsync.Auth.RemotePath, w.config.Devsync.Auth.LocalPath, filePath)
+		relPath, rerr := util.RemoteToLocal(w.config.Devsync.Auth.RemoteRoot(), w.config.Devsync.Auth.LocalPath, filePath)
 		if rerr != nil {
 			w.safePrintf("⚠️  Could not map remote delete path to local: %v\n", rerr)
 			return
@@ -1017,6 +1026,10 @@ func (w *Watcher) handleFileDownloadEvent(eventType, filePath string) {
 
 // StopAgentMonitoring stops the continuous agent monitoring
 func (w *Watcher) StopAgentMonitoring() error {
+	if w.config.Devsync.Auth.IsLocal() {
+		// Local mode has no target-side agent process to kill.
+		return nil
+	}
 	if w.sshClient != nil {
 		// First, try to kill remote agent processes explicitly
 		util.Default.ClearLine()
@@ -1029,7 +1042,7 @@ func (w *Watcher) StopAgentMonitoring() error {
 			return w.sshClient.StopAgentSession()
 		}
 
-		targetOS := strings.ToLower(w.config.Devsync.OSTarget)
+		targetOS := w.config.EffectiveOSTarget()
 		agentBinaryName := localConfig.GetAgentBinaryName(targetOS)
 		w.safePrintf("🎯 Looking for agent process: %s\n", agentBinaryName)
 
@@ -1070,9 +1083,16 @@ func (w *Watcher) StopAgentMonitoring() error {
 		return w.sshClient.StopAgentSession()
 	}
 	return nil
-} // syncConfigToRemote syncs the current configuration to remote .sync_temp/config.json
+}
+
+// syncConfigToRemote syncs the current configuration to remote .sync_temp/config.json
 func (w *Watcher) syncConfigToRemote() error {
 	if w.sshClient == nil {
+		return nil
+	}
+
+	if w.config.Devsync.Auth.IsLocal() {
+		// Local mode does not upload a config to a target-side agent.
 		return nil
 	}
 
@@ -1084,12 +1104,12 @@ func (w *Watcher) syncConfigToRemote() error {
 	}
 
 	// compute remote path for .sync_temp/config.json (OS-aware)
-	remoteBase := w.config.Devsync.Auth.RemotePath
+	remoteBase := w.config.Devsync.Auth.RemoteRoot()
 	if remoteBase == "" {
 		remoteBase = "."
 	}
-	remoteSyncTemp := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteBase, ".sync_temp")
-	remoteConfigPath := w.joinRemotePathOS(w.config.Devsync.OSTarget, remoteSyncTemp, "config.json")
+	remoteSyncTemp := w.joinRemotePathOS(w.config.EffectiveOSTarget(), remoteBase, ".sync_temp")
+	remoteConfigPath := w.joinRemotePathOS(w.config.EffectiveOSTarget(), remoteSyncTemp, "config.json")
 
 	// Print remote path and dump config atomically. Add one blank line before the block
 	util.Default.Printf("📤 Syncing config to: %s\n", remoteConfigPath)
@@ -1150,6 +1170,13 @@ func (w *Watcher) buildAndDeployAgent() error {
 		return nil
 	}
 
+	if w.config.Devsync.Auth.IsLocal() {
+		// Local mode: the target is reachable directly, so the agent binary and
+		// config are not uploaded/booted there (see WO-02).
+		w.safePrintln("🗂️  Mode local: skipping remote agent deployment")
+		return nil
+	}
+
 	// Get project root using proper detection (handles symlinks and cross-directory execution)
 	projectRoot, err := util.GetProjectRoot()
 	if err != nil {
@@ -1161,7 +1188,7 @@ func (w *Watcher) buildAndDeployAgent() error {
 	// Prepare unified deployment options
 	deployOpts := deployagent.UnifiedDeployOptions{
 		ProjectRoot:    projectRoot,
-		TargetOS:       w.config.Devsync.OSTarget,
+		TargetOS:       w.config.EffectiveOSTarget(),
 		Config:         w.config,
 		SSHClient:      w.sshClient,
 		BuildIfMissing: true,
@@ -1372,7 +1399,7 @@ func (w *Watcher) handleEvent(event notify.EventInfo) {
 			// the tree and upload nested files.
 			if dispatched == 0 {
 				// compute remote mapping for directory if possible
-				remoteBase := w.config.Devsync.Auth.RemotePath
+				remoteBase := w.config.Devsync.Auth.RemoteRoot()
 				if remoteBase == "" {
 					remoteBase = "."
 				}
@@ -1433,7 +1460,7 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 		if event.EventType == EventRename {
 			// If we have an old path, attempt to delete it on remote
 			if event.OldPath != "" {
-				remoteBase := w.config.Devsync.Auth.RemotePath
+				remoteBase := w.config.Devsync.Auth.RemoteRoot()
 				if remoteBase == "" {
 					remoteBase = "."
 				}
@@ -1476,7 +1503,7 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 		}
 		if event.EventType == EventRemove {
 			// Map local path to remote path using POSIX join (preserve forward slashes)
-			remoteBase := w.config.Devsync.Auth.RemotePath
+			remoteBase := w.config.Devsync.Auth.RemoteRoot()
 			if remoteBase == "" {
 				remoteBase = "."
 			}
@@ -1533,7 +1560,7 @@ func (w *Watcher) ExecuteScripts(event FileEvent) {
 				// If the file no longer exists locally (common after rename/move),
 				// try to remove the corresponding remote path and clear cache metadata.
 				if os.IsNotExist(err) || strings.Contains(strings.ToLower(err.Error()), "no such file") {
-					remoteBase := w.config.Devsync.Auth.RemotePath
+					remoteBase := w.config.Devsync.Auth.RemoteRoot()
 					if remoteBase == "" {
 						remoteBase = "."
 					}
@@ -1677,8 +1704,8 @@ func (w *Watcher) syncFileViaSSH(event FileEvent) {
 		}
 	}
 
-	targetOS := strings.ToLower(w.config.Devsync.OSTarget)
-	remoteBase := w.config.Devsync.Auth.RemotePath
+	targetOS := w.config.EffectiveOSTarget()
+	remoteBase := w.config.Devsync.Auth.RemoteRoot()
 	if remoteBase == "" {
 		remoteBase = "."
 	}
@@ -1888,7 +1915,7 @@ func (w *Watcher) processQueuedEvent(ev FileEvent) {
 		if remote == "" && ev.Path != "" {
 			// compute if not provided
 			if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, ev.Path); rerr == nil {
-				remote = w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+				remote = w.joinRemotePath(w.config.Devsync.Auth.RemoteRoot(), filepath.ToSlash(rel))
 			}
 		}
 		if remote == "" {
@@ -1943,7 +1970,7 @@ func (w *Watcher) processQueuedEvent(ev FileEvent) {
 					w.safePrintf("⚠️  Skipping upload for %s: cannot compute relative path: %v\n", p, rerr)
 					return nil
 				}
-				remote := w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+				remote := w.joinRemotePath(w.config.Devsync.Auth.RemoteRoot(), filepath.ToSlash(rel))
 
 				// Acquire slot and upload
 				w.uploadSlots <- struct{}{}
@@ -1997,7 +2024,7 @@ func (w *Watcher) processQueuedEvent(ev FileEvent) {
 						w.safePrintf("⚠️  Skipping upload for %s: cannot compute relative path: %v\n", p, rerr)
 						return nil
 					}
-					remote := w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+					remote := w.joinRemotePath(w.config.Devsync.Auth.RemoteRoot(), filepath.ToSlash(rel))
 					w.uploadSlots <- struct{}{}
 					wid := atomic.AddInt64(&w.uploadCounter, 1)
 					util.Default.Printf("⬆️  %d -> Uploading %s -> %s\n", wid, p, remote)
@@ -2044,13 +2071,13 @@ func (w *Watcher) processQueuedEvent(ev FileEvent) {
 		oldRemote := ev.OldRemote
 		if oldRemote == "" && ev.OldPath != "" {
 			if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, ev.OldPath); rerr == nil {
-				oldRemote = w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+				oldRemote = w.joinRemotePath(w.config.Devsync.Auth.RemoteRoot(), filepath.ToSlash(rel))
 			}
 		}
 		newRemote := ev.Remote
 		if newRemote == "" && ev.Path != "" {
 			if rel, rerr := filepath.Rel(w.config.Devsync.Auth.LocalPath, ev.Path); rerr == nil {
-				newRemote = w.joinRemotePath(w.config.Devsync.Auth.RemotePath, filepath.ToSlash(rel))
+				newRemote = w.joinRemotePath(w.config.Devsync.Auth.RemoteRoot(), filepath.ToSlash(rel))
 			}
 		}
 

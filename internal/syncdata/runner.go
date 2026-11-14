@@ -16,7 +16,7 @@ import (
 	"database/sql"
 	"make-sync/internal/config"
 	"make-sync/internal/deployagent"
-	"make-sync/internal/sshclient"
+	"make-sync/internal/transport"
 	"make-sync/internal/util"
 
 	"github.com/cespare/xxhash/v2"
@@ -122,17 +122,17 @@ func generateRemoteConfig(cfg *config.Config) *RemoteAgentConfig {
 	remoteConfig.Devsync.Ignores = cfg.Devsync.Ignores
 	remoteConfig.Devsync.AgentWatchs = cfg.Devsync.AgentWatchs
 	remoteConfig.Devsync.ManualTransfer = cfg.Devsync.ManualTransfer
-	remoteConfig.Devsync.WorkingDir = cfg.Devsync.Auth.RemotePath
+	remoteConfig.Devsync.WorkingDir = cfg.Devsync.Auth.RemoteRoot()
 
 	return remoteConfig
 }
 
-// uploadConfigToRemote creates and uploads config.json to remote .sync_temp directory
-func uploadConfigToRemote(client *sshclient.SSHClient, cfg *config.Config, remoteSyncTemp, osTarget string) error {
-	// Generate remote config
+// buildAgentConfigJSON renders the agent config (ignores + watch paths + manual
+// transfer prefixes + working dir) exactly as it is delivered to the agent,
+// whether that delivery happens over SSH or on the local filesystem.
+func buildAgentConfigJSON(cfg *config.Config) ([]byte, *RemoteAgentConfig, error) {
 	remoteConfig := generateRemoteConfig(cfg)
 
-	// Collect preprocessed ignores from project root and populate remoteConfig.Devsync.Ignores
 	root := cfg.LocalPath
 	if root == "" {
 		wd, err := os.Getwd()
@@ -146,10 +146,19 @@ func uploadConfigToRemote(client *sshclient.SSHClient, cfg *config.Config, remot
 		}
 	}
 
-	// Convert to JSON
 	configJSON, err := json.MarshalIndent(remoteConfig, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal config to JSON: %v", err)
+		return nil, nil, fmt.Errorf("failed to marshal config to JSON: %v", err)
+	}
+	return configJSON, remoteConfig, nil
+}
+
+// uploadConfigToRemote creates and uploads config.json to remote .sync_temp directory
+func uploadConfigToRemote(client transport.Client, cfg *config.Config, remoteSyncTemp, osTarget string) error {
+	// Generate remote config
+	configJSON, remoteConfig, err := buildAgentConfigJSON(cfg)
+	if err != nil {
+		return err
 	}
 
 	util.Default.Printf("📤 Uploading config.json with working_dir: %s\n", remoteConfig.Devsync.WorkingDir)
@@ -170,7 +179,7 @@ func uploadConfigToRemote(client *sshclient.SSHClient, cfg *config.Config, remot
 	tempFile.Close()
 
 	// Always use absolute remotePath for .sync_temp/config.json, but avoid double .sync_temp
-	remoteBase := cfg.Devsync.Auth.RemotePath
+	remoteBase := cfg.Devsync.Auth.RemoteRoot()
 	var remoteConfigPath string
 	if strings.Contains(strings.ToLower(osTarget), "win") {
 		base := strings.ReplaceAll(remoteBase, "/", "\\")
@@ -197,25 +206,14 @@ func uploadConfigToRemote(client *sshclient.SSHClient, cfg *config.Config, remot
 	return nil
 }
 
-// ConnectSSH creates and connects an SSH client using values from cfg.Devsync.Auth
-func ConnectSSH(cfg *config.Config) (*sshclient.SSHClient, error) {
-	auth := cfg.Devsync.Auth
-	username := auth.Username
-	privateKey := auth.PrivateKey
-	password := auth.Password
-	host := auth.Host
-	port := auth.Port
-	if port == "" {
-		port = "22"
-	}
-
-	client, err := sshclient.NewPersistentSSHClient(username, privateKey, password, host, port)
+// ConnectSSH returns the transport client selected by devsync.auth.mode.
+//
+// Kept under its historical name so existing call sites keep working; in local
+// mode it returns a LocalClient and no SSH connection is opened.
+func ConnectSSH(cfg *config.Config) (transport.Client, error) {
+	client, err := transport.NewClient(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ssh client: %v", err)
-	}
-	if err := client.Connect(); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("failed to connect ssh client: %v", err)
+		return nil, err
 	}
 	return client, nil
 }
@@ -224,7 +222,7 @@ func ConnectSSH(cfg *config.Config) (*sshclient.SSHClient, error) {
 // localBinaryPath: path to local binary (e.g., built sync-agent or sync-agent.exe)
 // remoteDir: absolute remote directory where to place binary (usually <project>/.sync_temp)
 // osTarget: string indicating remote OS (contains "win" for windows)
-func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, osTarget string) error {
+func UploadAgentBinary(client transport.Client, localBinaryPath, remoteDir, osTarget string) error {
 	// Create .sync_temp directory on remote first (like watcher does)
 	if strings.Contains(strings.ToLower(osTarget), "win") {
 		// Use consistent backslash paths for Windows
@@ -293,7 +291,7 @@ func UploadAgentBinary(client *sshclient.SSHClient, localBinaryPath, remoteDir, 
 	return nil
 }
 
-func RemoteRunAgentIndexing(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool, prefixes []string, idleTimeout time.Duration) (string, error) {
+func RemoteRunAgentIndexing(client transport.Client, remoteDir, osTarget string, bypassIgnore bool, prefixes []string, idleTimeout time.Duration) (string, error) {
 	isWin := strings.Contains(strings.ToLower(osTarget), "win")
 
 	// Get unique agent binary name from local config
@@ -442,7 +440,7 @@ func shellQuote(s string) string {
 
 // RemoteRunAgentPrune runs the agent's prune command on the remote .sync_temp agent
 // remoteDir should be the remote .sync_temp directory (same as used for agent binary)
-func RemoteRunAgentPrune(client *sshclient.SSHClient, remoteDir, osTarget string, bypassIgnore bool, prefixes []string, dryRun bool) (string, error) {
+func RemoteRunAgentPrune(client transport.Client, remoteDir, osTarget string, bypassIgnore bool, prefixes []string, dryRun bool) (string, error) {
 	isWin := strings.Contains(strings.ToLower(osTarget), "win")
 
 	// Get unique agent binary name from local config
@@ -562,9 +560,17 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIg
 		return "", "", fmt.Errorf("agent binary not found in candidates: %v", localCandidates)
 	}
 
+	// Local mode: the target directory is reachable directly, so no agent is
+	// uploaded and no remote watch agent is booted. The index of the target is
+	// produced by running the agent binary on this machine (see localmode.go).
+	if isLocalMode(cfg) {
+		out, lerr := runLocalAgentIndexing(cfg, localBinary, bypassIgnore, prefixes)
+		return "", out, lerr
+	}
+
 	// determine remote base path
-	remotePath := cfg.Devsync.Auth.RemotePath
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	remotePath := cfg.Devsync.Auth.RemoteRoot()
+	osTarget := cfg.EffectiveOSTarget()
 	var remoteSyncTemp string
 	if remotePath == "" {
 		if strings.Contains(osTarget, "win") {
@@ -627,9 +633,15 @@ func RunAgentIndexingFlow(cfg *config.Config, localCandidates []string, bypassIg
 // empty, it will default to cfg.LocalPath or current working directory's .sync_temp.
 // Returns the local file path or an error.
 func DownloadIndexDB(cfg *config.Config, localDestFolder string) (string, error) {
+	// Local mode: the target index DB is already on this machine. Store/return it
+	// locally instead of transferring it over SFTP (see localmode.go).
+	if isLocalMode(cfg) {
+		return localTargetIndexDB(cfg, localDestFolder)
+	}
+
 	// determine remote base path
-	remotePath := cfg.Devsync.Auth.RemotePath
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	remotePath := cfg.Devsync.Auth.RemoteRoot()
+	osTarget := cfg.EffectiveOSTarget()
 	var remoteSyncTemp string
 	if remotePath == "" {
 		if strings.Contains(osTarget, "win") {
@@ -793,7 +805,7 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 	}
 
 	// Collect download pairs for SFTP bulk download
-	var pairs []sshclient.UploadPair
+	var pairs []transport.UploadPair
 
 	for _, rel := range rels {
 		rm := remoteByRel[rel]
@@ -825,7 +837,7 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 			remotePath := buildRemotePath(cfg, relNorm)
 			rp := remotePath
 			lp := localPath
-			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
+			pairs = append(pairs, transport.UploadPair{Local: lp, Remote: rp})
 			continue
 		}
 		if info.IsDir() {
@@ -847,7 +859,7 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 			remotePath := buildRemotePath(cfg, relNorm)
 			rp := remotePath
 			lp := localPath
-			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
+			pairs = append(pairs, transport.UploadPair{Local: lp, Remote: rp})
 			continue
 		}
 
@@ -908,8 +920,8 @@ func CompareAndDownloadByHash(cfg *config.Config, localRoot string) ([]string, e
 
 // buildRemotePath constructs an absolute remote path for a given rel using cfg
 func buildRemotePath(cfg *config.Config, rel string) string {
-	remoteBase := cfg.Devsync.Auth.RemotePath
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	remoteBase := cfg.Devsync.Auth.RemoteRoot()
+	osTarget := cfg.EffectiveOSTarget()
 	if strings.Contains(osTarget, "win") {
 		// prefer backslashes on windows remote
 		p := filepath.ToSlash(filepath.Join(remoteBase, rel))
@@ -1091,7 +1103,7 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 	}
 
 	// Second pass: collect upload pairs for files that need uploading
-	pairs := make([]sshclient.UploadPair, 0, len(filesToProcess))
+	pairs := make([]transport.UploadPair, 0, len(filesToProcess))
 	for _, file := range filesToProcess {
 		// decide upload
 		rm, exists := remoteByRel[file.rel]
@@ -1105,7 +1117,7 @@ func CompareAndUploadByHash(cfg *config.Config, localRoot string) ([]string, err
 		if needUpload {
 			lp := file.path
 			rp := buildRemotePath(cfg, file.rel)
-			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
+			pairs = append(pairs, transport.UploadPair{Local: lp, Remote: rp})
 		} else {
 			mu.Lock()
 			skippedUpToDate++

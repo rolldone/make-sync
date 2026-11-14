@@ -13,7 +13,7 @@ import (
 	"sync"
 
 	"make-sync/internal/config"
-	"make-sync/internal/sshclient"
+	"make-sync/internal/transport"
 	"make-sync/internal/util"
 
 	"github.com/cespare/xxhash/v2"
@@ -354,7 +354,7 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
 
 	// collect upload pairs for bulk SFTP
-	var pairs []sshclient.UploadPair
+	var pairs []transport.UploadPair
 
 	// Helper function to check if a relative path belongs to an explicit manual transfer endpoint
 	// If it does, ignore patterns should NOT be applied to this path
@@ -429,7 +429,7 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 			if needUpload {
 				lp := start
 				rp := buildRemotePath(cfg, rel)
-				pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
+				pairs = append(pairs, transport.UploadPair{Local: lp, Remote: rp})
 			} else {
 				skippedUpToDate++
 			}
@@ -511,7 +511,7 @@ func CompareAndUploadManualTransfer(cfg *config.Config, localRoot string, prefix
 			if needUpload {
 				lp := p
 				rp := buildRemotePath(cfg, rel)
-				pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
+				pairs = append(pairs, transport.UploadPair{Local: lp, Remote: rp})
 			} else {
 				skippedUpToDate++
 			}
@@ -654,10 +654,26 @@ func pruneEmptyDirsLocal(absRoot string, prefixes []string, ic *IgnoreCache) int
 
 // pruneRemoteEmptyDirs attempts to rmdir empty directories under remote prefixes.
 // Currently implemented for POSIX remotes only; Windows remotes are skipped.
-func pruneRemoteEmptyDirs(sshCli *sshclient.SSHClient, cfg *config.Config, prefixes []string) int {
+func pruneRemoteEmptyDirs(sshCli transport.Client, cfg *config.Config, prefixes []string) int {
+	// Local mode: the target is a local directory, so shed its empty dirs directly
+	// instead of delegating to a target-side agent.
+	if isLocalMode(cfg) {
+		targetRoot := strings.TrimSpace(cfg.Devsync.Auth.RemoteRoot())
+		if targetRoot == "" {
+			util.Default.Println("⚠️  localTargetPath empty; skipping target prune")
+			return 0
+		}
+		ic := NewIgnoreCache(targetRoot)
+		deleted := pruneEmptyDirsLocal(targetRoot, prefixes, ic)
+		if deleted > 0 {
+			util.Default.Printf("🧹 Pruned %d empty dirs in target %s\n", deleted, targetRoot)
+		}
+		return deleted
+	}
+
 	// Delegate to agent-side prune (Run the agent's prune command in remote .sync_temp)
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
-	remoteBase := cfg.Devsync.Auth.RemotePath
+	osTarget := cfg.EffectiveOSTarget()
+	remoteBase := cfg.Devsync.Auth.RemoteRoot()
 	if strings.TrimSpace(remoteBase) == "" {
 		util.Default.Println("⚠️  Remote base path empty; skipping remote prune")
 		return 0
@@ -1504,7 +1520,7 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 	if concurrency <= 0 {
 		concurrency = 5
 	}
-	var pairs []sshclient.UploadPair
+	var pairs []transport.UploadPair
 
 	// Helper to mark checked in DB and memory
 	markChecked := func(rel string) {
@@ -1568,7 +1584,7 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 				// File doesn't exist remotely or is different, needs upload
 				localPath := start
 				remotePath := buildRemotePath(cfg, rel)
-				pairs = append(pairs, sshclient.UploadPair{Local: localPath, Remote: remotePath})
+				pairs = append(pairs, transport.UploadPair{Local: localPath, Remote: remotePath})
 			} else {
 				mu.Lock()
 				skippedUpToDate++
@@ -1643,7 +1659,7 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 				// File doesn't exist remotely or is different, needs upload
 				localPath := p
 				remotePath := buildRemotePath(cfg, rel)
-				pairs = append(pairs, sshclient.UploadPair{Local: localPath, Remote: remotePath})
+				pairs = append(pairs, transport.UploadPair{Local: localPath, Remote: remotePath})
 			} else {
 				mu.Lock()
 				skippedUpToDate++
@@ -1774,7 +1790,7 @@ func CompareAndUploadManualTransferForce(cfg *config.Config, localRoot string, p
 	// Execute remote deletions
 	deleted := 0
 	deleteErrors := 0
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	osTarget := cfg.EffectiveOSTarget()
 	for _, rel := range toDelete {
 		remotePath := buildRemotePath(cfg, rel)
 		var cmd string
@@ -1905,7 +1921,7 @@ func CompareAndUploadManualTransferBypassParallel(cfg *config.Config, localRoot 
 	if concurrency <= 0 {
 		concurrency = 5
 	}
-	var pairs []sshclient.UploadPair
+	var pairs []transport.UploadPair
 
 	for _, pr := range normPrefixes {
 		start := filepath.Join(absRoot, filepath.FromSlash(pr))
@@ -1958,7 +1974,7 @@ func CompareAndUploadManualTransferBypassParallel(cfg *config.Config, localRoot 
 			rm, exists := remoteByRel[relNorm]
 			if !exists || strings.TrimSpace(rm.Hash) == "" || rm.Hash != localHash {
 				// File doesn't exist remotely or is different, needs upload
-				pairs = append(pairs, sshclient.UploadPair{Local: localPath, Remote: remotePath})
+				pairs = append(pairs, transport.UploadPair{Local: localPath, Remote: remotePath})
 				return nil
 			}
 

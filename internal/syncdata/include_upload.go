@@ -12,7 +12,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 
 	"make-sync/internal/config"
-	"make-sync/internal/sshclient"
+	"make-sync/internal/transport"
 	"make-sync/internal/util"
 )
 
@@ -99,7 +99,7 @@ func CompareAndUploadByIgnoreIncludes(cfg *config.Config, localRoot string, negP
 
 	uploaded := make([]string, 0)
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
-	var pairs []sshclient.UploadPair
+	var pairs []transport.UploadPair
 
 	// Walk local files (local-first)
 	err = filepath.WalkDir(absRoot, func(p string, d fs.DirEntry, walkErr error) error {
@@ -162,7 +162,7 @@ func CompareAndUploadByIgnoreIncludes(cfg *config.Config, localRoot string, negP
 		if needUpload {
 			lp := p
 			rp := buildRemotePath(cfg, rel)
-			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
+			pairs = append(pairs, transport.UploadPair{Local: lp, Remote: rp})
 		} else {
 			skippedUpToDate++
 		}
@@ -316,7 +316,7 @@ func CompareAndUploadByIgnoreIncludesForce(cfg *config.Config, localRoot string,
 	uploaded := make([]string, 0)
 	checkedSet := make(map[string]struct{})
 	var examined, skippedIgnored, skippedUpToDate, uploadErrors int
-	var pairs []sshclient.UploadPair
+	var pairs []transport.UploadPair
 
 	// Helper to mark checked in DB and memory
 	markChecked := func(rel string) {
@@ -383,7 +383,7 @@ func CompareAndUploadByIgnoreIncludesForce(cfg *config.Config, localRoot string,
 		if needUpload {
 			lp := p
 			rp := buildRemotePath(cfg, rel)
-			pairs = append(pairs, sshclient.UploadPair{Local: lp, Remote: rp})
+			pairs = append(pairs, transport.UploadPair{Local: lp, Remote: rp})
 		} else {
 			skippedUpToDate++
 		}
@@ -476,7 +476,7 @@ func CompareAndUploadByIgnoreIncludesForce(cfg *config.Config, localRoot string,
 	// Execute remote deletions
 	deleted := 0
 	deleteErrors := 0
-	osTarget := strings.ToLower(strings.TrimSpace(cfg.Devsync.OSTarget))
+	osTarget := cfg.EffectiveOSTarget()
 	for _, rel := range toDelete {
 		remotePath := buildRemotePath(cfg, rel)
 		var cmd string

@@ -57,7 +57,7 @@ func (rcm *RemoteCommandManager) HandleDeployAgentCommand() {
 		fmt.Printf("❌ Failed to build/deploy agent: %v\n", err)
 		return
 	}
-	remoteBase := rcm.watcher.config.Devsync.Auth.RemotePath
+	remoteBase := rcm.watcher.config.Devsync.Auth.RemoteRoot()
 	if remoteBase == "" {
 		remoteBase = "." // fallback to current directory
 	}

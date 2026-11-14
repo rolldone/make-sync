@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -102,5 +103,39 @@ func TestEffectiveModeNormalisesValue(t *testing.T) {
 	}
 	if !auth.IsLocal() {
 		t.Fatal("expected IsLocal() true")
+	}
+}
+
+// TestEffectiveOSTargetLocalModeUsesHostOS verifies that local mode targets this
+// machine: a misleading devsync.os_target must not produce cross-OS command
+// syntax for a local directory.
+func TestEffectiveOSTargetLocalModeUsesHostOS(t *testing.T) {
+	cfg := &Config{ProjectName: "test"}
+	cfg.Devsync.OSTarget = "windows"
+	cfg.Devsync.Auth.Mode = AuthModeLocal
+	cfg.Devsync.Auth.LocalTargetPath = "/tmp/target"
+
+	want := "linux"
+	if runtime.GOOS == "windows" {
+		want = "windows"
+	}
+	if got := cfg.EffectiveOSTarget(); got != want {
+		t.Fatalf("expected host OS %s in local mode, got %s", want, got)
+	}
+}
+
+// TestEffectiveOSTargetSSHModeKeepsConfiguredValue verifies the ssh regression
+// path: devsync.os_target is passed through untouched.
+func TestEffectiveOSTargetSSHModeKeepsConfiguredValue(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Devsync.OSTarget = "Windows"
+
+	if got := cfg.EffectiveOSTarget(); got != "windows" {
+		t.Fatalf("expected windows, got %s", got)
+	}
+
+	cfg.Devsync.OSTarget = ""
+	if got := cfg.EffectiveOSTarget(); got != "linux" {
+		t.Fatalf("expected linux default, got %s", got)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -248,6 +249,42 @@ func (a Auth) EffectiveMode() string {
 // IsLocal reports whether the auth configuration selects the local transport.
 func (a Auth) IsLocal() bool {
 	return a.EffectiveMode() == AuthModeLocal
+}
+
+// RemoteRoot returns the destination root used to build target paths.
+//
+// In ssh mode it is the configured remotePath. In local mode the "remote" side
+// is a local directory, so remotePath is mapped onto localTargetPath. Callers
+// that only build/compare paths therefore work unchanged across both modes.
+func (a Auth) RemoteRoot() string {
+	if a.IsLocal() {
+		return strings.TrimSpace(a.LocalTargetPath)
+	}
+	return strings.TrimSpace(a.RemotePath)
+}
+
+// EffectiveOSTarget returns the target OS used to pick agent binary names and
+// OS-specific command/path syntax.
+//
+// In local mode the target is this machine, so the host OS is returned
+// regardless of devsync.os_target: cross-OS command syntax would be wrong for a
+// local directory. In ssh mode devsync.os_target is returned unchanged
+// (defaulting to linux), preserving existing behaviour.
+func (c *Config) EffectiveOSTarget() string {
+	if c == nil {
+		return "linux"
+	}
+	if c.Devsync.Auth.IsLocal() {
+		if runtime.GOOS == "windows" {
+			return "windows"
+		}
+		return "linux"
+	}
+	target := strings.ToLower(strings.TrimSpace(c.Devsync.OSTarget))
+	if target == "" {
+		return "linux"
+	}
+	return target
 }
 
 type Script struct {

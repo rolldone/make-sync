@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"make-sync/internal/config"
-	"make-sync/internal/sshclient"
 	"make-sync/internal/util"
 )
 
@@ -18,7 +17,7 @@ import (
 type UnifiedDeployOptions struct {
 	Config         *config.Config
 	ProjectRoot    string
-	SSHClient      *sshclient.SSHClient
+	SSHClient      SSHClient
 	TargetOS       string
 	BuildIfMissing bool // Whether to build agent if not found
 	UploadAgent    bool // Whether to upload agent binary
@@ -59,7 +58,7 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 	}
 
 	// Get remote base path
-	remoteBase := opts.Config.Devsync.Auth.RemotePath
+	remoteBase := opts.Config.Devsync.Auth.RemoteRoot()
 	if remoteBase == "" {
 		return "", fmt.Errorf("remote path is required in config")
 	}
@@ -95,7 +94,7 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 		buildOpts := BuildOptions{
 			ProjectRoot: opts.ProjectRoot,
 			TargetOS:    targetOS,
-			SSHClient:   NewSSHClientAdapter(opts.SSHClient),
+			SSHClient:   opts.SSHClient,
 			Config:      opts.Config, // Pass config for unique agent naming
 		}
 
@@ -148,7 +147,7 @@ func DeployAgentAndConfig(opts UnifiedDeployOptions) (remoteAgentPath string, er
 }
 
 // createRemoteSyncTempDir creates the .sync_temp directory on remote server
-func createRemoteSyncTempDir(client *sshclient.SSHClient, remoteSyncTemp, targetOS string) error {
+func createRemoteSyncTempDir(client SSHClient, remoteSyncTemp, targetOS string) error {
 	if strings.Contains(strings.ToLower(targetOS), "win") {
 		winRemoteDir := strings.ReplaceAll(remoteSyncTemp, "/", "\\")
 		createCmd := fmt.Sprintf("cmd.exe /C if not exist \"%s\" mkdir \"%s\"", winRemoteDir, winRemoteDir)
@@ -165,7 +164,7 @@ func createRemoteSyncTempDir(client *sshclient.SSHClient, remoteSyncTemp, target
 }
 
 // uploadAgentBinary uploads the agent binary to remote .sync_temp directory
-func uploadAgentBinary(client *sshclient.SSHClient, localAgentPath, remoteSyncTemp, targetOS string) error {
+func uploadAgentBinary(client SSHClient, localAgentPath, remoteSyncTemp, targetOS string) error {
 	// Get absolute path if relative
 	var absAgentPath string
 	if filepath.IsAbs(localAgentPath) {
@@ -193,7 +192,7 @@ func uploadAgentBinary(client *sshclient.SSHClient, localAgentPath, remoteSyncTe
 	util.Default.Printf("📦 Uploading agent: %s -> %s\n", absAgentPath, remoteAgentPath)
 
 	// Upload agent binary
-	if err := client.SyncFile(absAgentPath, remoteAgentPath); err != nil {
+	if err := client.UploadFile(absAgentPath, remoteAgentPath); err != nil {
 		return fmt.Errorf("failed to upload agent: %v", err)
 	}
 
@@ -218,13 +217,13 @@ func uploadAgentBinary(client *sshclient.SSHClient, localAgentPath, remoteSyncTe
 }
 
 // uploadConfigJSON uploads the config.json to remote .sync_temp directory
-func uploadConfigJSON(client *sshclient.SSHClient, cfg *config.Config, remoteSyncTemp, targetOS string) error {
+func uploadConfigJSON(client SSHClient, cfg *config.Config, remoteSyncTemp, targetOS string) error {
 	// Generate remote config
 	remoteConfig := &RemoteAgentConfig{}
 	remoteConfig.Devsync.Ignores = cfg.Devsync.Ignores
 	remoteConfig.Devsync.AgentWatchs = cfg.Devsync.AgentWatchs
 	remoteConfig.Devsync.ManualTransfer = cfg.Devsync.ManualTransfer
-	remoteConfig.Devsync.WorkingDir = cfg.Devsync.Auth.RemotePath
+	remoteConfig.Devsync.WorkingDir = cfg.Devsync.Auth.RemoteRoot()
 
 	// Convert to JSON
 	configJSON, err := json.MarshalIndent(remoteConfig, "", "  ")
@@ -257,7 +256,7 @@ func uploadConfigJSON(client *sshclient.SSHClient, cfg *config.Config, remoteSyn
 	}
 
 	// Upload config to remote
-	if err := client.SyncFile(tempFile.Name(), remoteConfigPath); err != nil {
+	if err := client.UploadFile(tempFile.Name(), remoteConfigPath); err != nil {
 		return fmt.Errorf("failed to upload config: %v", err)
 	}
 
@@ -266,7 +265,7 @@ func uploadConfigJSON(client *sshclient.SSHClient, cfg *config.Config, remoteSyn
 }
 
 // KillExistingAgent kills any running agent with the same agent name before deployment
-func KillExistingAgent(client *sshclient.SSHClient, agentName, targetOS string) error {
+func KillExistingAgent(client SSHClient, agentName, targetOS string) error {
 	if agentName == "" {
 		return nil // No agent name to kill
 	}

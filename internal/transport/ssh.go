@@ -21,7 +21,7 @@ type SSHTransport struct {
 }
 
 // NewSSHTransport wraps an already connected SSH client with the given remote
-// root directory (typically cfg.Devsync.Auth.RemotePath).
+// root directory (typically cfg.Devsync.Auth.RemoteRoot()).
 func NewSSHTransport(client *sshclient.SSHClient, remoteRoot string) *SSHTransport {
 	return &SSHTransport{client: client, root: strings.TrimSpace(remoteRoot)}
 }
