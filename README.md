@@ -7,6 +7,7 @@ PERINGATAN: Fitur "Pipeline System" telah dihapus dari rilis saat ini. Bagian pi
 ## Fitur Utama
 - Safe Pull/Push: indeks remote (SQLite) dibuat dulu, lalu bandingkan hash untuk unduh/unggah yang berubah saja.
 - One-Shot Push/Pull (CLI): perintah `make-sync push` / `make-sync pull` untuk sinkronisasi sekali jalan — mendukung `--path` (scoped), `--force`, dan `--bypass-ignore`. (`--git-changes` sementara dinonaktifkan.)
+- Deploy by Commit Range (CLI): `make-sync deploy --since-commit <rev>` mengirim hanya file yang tersentuh rentang commit (blind push, tanpa indexing remote) dan menghapus file yang dihapus dalam rentang tersebut setelah konfirmasi.
 - Manual/Single Sync Menu:
   - Download/Upload
   - Pilih folder: salah satu path terdaftar atau semua yang terdaftar
@@ -162,10 +163,61 @@ make-sync pull --path data --bypass-ignore  # Pull scoped + bypass
 ```
 
 Catatan perilaku:
-- `--git-changes` sementara dinonaktifkan — jika dipakai, perintah ditolak dengan pesan error. Gunakan `--path` untuk scope.
+- `--git-changes` sementara dinonaktifkan — jika dipakai, perintah ditolak dengan pesan error. Gunakan `--path` untuk scope, atau `deploy` untuk scope berbasis commit range.
 - `--bypass-ignore` menonaktifkan seluruh filter ignore — hati-hati karena file sensitif (mis. `.env`, `.ssh_encrypto`, `.sync_collections/**`) ikut ditransfer.
 - `--force` selalu dilindungi konfirmasi captcha untuk mencegah penghapusan tidak sengaja.
 - Tanpa flag scope (`--path`), perintah berjalan sebagai full-project sync memakai mode Safe/Bypass/Force dari mesin pull/push.
+
+## Deploy by Commit Range (blind push)
+
+`make-sync deploy` mengirim ke remote hanya file yang tersentuh oleh sebuah
+rentang commit git. Berbeda dari `push`, `deploy` **tidak** meng-index remote
+dan **tidak** membandingkan hash: git adalah sumber kebenaran.
+
+```bash
+make-sync deploy --since-commit HEAD~1   # file yang berubah di commit terakhir
+make-sync deploy --since-commit v1.2.0   # sejak tag v1.2.0
+make-sync deploy --since-commit 8d9020b  # sejak commit hash tertentu
+```
+
+Cakupan file yang dikirim:
+- Semua file yang berubah pada `<rev>..HEAD` (union seluruh commit dalam rentang),
+  **ditambah** perubahan working tree yang belum di-commit (modified/added/untracked).
+- File yang dihapus dalam rentang tersebut **dihapus di remote** (per-path, bukan
+  sweep). Daftar file yang akan dihapus ditampilkan lebih dulu dan wajib
+  dikonfirmasi captcha; bila konfirmasi ditolak, uploaded tetap berjalan dan
+  penghapusan dilewati.
+- Rename diperlakukan seperti git: hapus path lama, unggah path baru.
+
+Contoh output:
+
+```
+🚀 Deploy since HEAD~2
+   Remote root : /srv/app
+   Upload files: 3
+   Delete files: 1
+⚠️  These files will be DELETED on the remote:
+   - src/obsolete.php
+Type the token to confirm [IZ48QY]:
+⬆️  Uploaded 3 files.
+🗑️  Deleted 1 files on remote.
+✅ Deploy finished.
+```
+
+Catatan perilaku penting:
+- **Blind push.** File yang isinya identik di remote tetap diunggah, dan
+  perubahan yang dilakukan langsung di server akan **tertimpa**. Ini perilaku
+  deployment yang disengaja (remote = mirror git).
+- **Scope unit.** Yang dikirim adalah union rentang, bukan per-commit terpisah.
+- **Untracked ikut terkirim.** Saat rentang kosong (mis. `--since-commit HEAD`
+  tanpa commit baru), seluruh perubahan working tree — termasuk folder untracked
+  besar seperti `vendor/` atau `docs/` — masuk kandidat. Tambahkan pola ke
+  `.sync_ignore` bila tidak ingin ikut terunggah.
+- **Validasi lebih dulu.** Rev yang tidak valid, config hilang, atau bukan repo
+  git akan gagal sebelum koneksi SSH dibuka.
+- Jika tidak ada file berubah maupun terhapus, perintah selesai dengan pesan
+  "already up-to-date" (exit 0).
+- `deploy` tidak mengubah perilaku `push`, `pull`, atau `exec`.
 
 ## Eksekusi Perintah Remote (exec)
 
