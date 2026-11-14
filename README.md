@@ -262,6 +262,11 @@ Catatan perilaku penting:
 - **Fallback blind push.** Bila `sha256sum` tidak tersedia di remote, exec gagal,
   atau output tidak bisa di-parse, deploy memberi warning lalu mengirim semua
   file rentang (perilaku v1) — tidak gagal keras.
+- **Pre-check dibatch.** Daftar kandidat besar dipecah menjadi beberapa exec
+  `sha256sum` (~32 KB per command) agar tidak melewati batas panjang argv SSH —
+  sebelumnya deploy dengan ±1200 file selalu gagal pre-check
+  (`Process exited with status 1`) dan fallback blind push. Hasilnya tidak
+  berubah: SKIP/SEND tetap per file, fallback tetap blind push.
 - **Target Windows.** `sha256sum` tidak standar di cmd.exe, jadi deploy langsung
   blind upload untuk target Windows.
 - **Scope unit.** Yang dikirim adalah union rentang, bukan per-commit terpisah.
