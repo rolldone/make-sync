@@ -118,6 +118,12 @@ func runDeploy(sinceCommit, toCommit string) error {
 		defer plan.cleanup()
 	}
 
+	// The range may have been re-rooted automatically (a revision equal to HEAD
+	// names an empty range). Tell the operator before the file counts.
+	if plan.lists.Notice != "" {
+		util.Default.Println(plan.lists.Notice)
+	}
+
 	if len(plan.lists.Upload) == 0 && len(plan.lists.Deletion) == 0 {
 		util.Default.Println(plan.header)
 		util.Default.Printf("✅ already up-to-date (0 upload, 0 deletion).\n")

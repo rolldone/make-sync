@@ -22,11 +22,17 @@ import (
 //     changes (Modified/Added/Untracked). Paths are relative, forward-slash.
 //   - Deletion: files that existed in <rev> but are gone in HEAD or in the
 //     working tree. Only explicit deletions — never a "missing locally" sweep.
+//   - Baseline: the commit the range was finally rooted at. It equals <rev>
+//     unless auto-fallback kicked in (see resolveSinceBaseline).
+//   - Notice: operator-facing message explaining an auto-fallback; empty when
+//     the caller's revision was used verbatim.
 //
 // Git is the source of truth: no remote comparison, no index, no agent.
 type DeployRangeLists struct {
 	Upload   []string
 	Deletion []string
+	Baseline plumbing.Hash
+	Notice   string
 }
 
 // computeCommitRangeLists resolves the upload/deletion file lists for a commit
@@ -34,6 +40,10 @@ type DeployRangeLists struct {
 //
 // Rules (see spec-push-since-commit.md):
 //   - Range = tree diff <rev>..HEAD ∪ working-tree changes, deduplicated.
+//   - A revision that resolves to HEAD names an empty range, which silently
+//     drops the most recent commits (users get the hash from `git log -1`, so
+//     this is the common mistake). The range is then rooted at HEAD's first
+//     parent instead and Notice explains it — see resolveSinceBaseline.
 //   - Renames surface as delete (old path) + insert (new path): rename
 //     detection is disabled on purpose.
 //   - A working-tree deletion counts only when the path still exists in the
@@ -67,6 +77,10 @@ func computeCommitRangeLists(localRoot, rev string) (DeployRangeLists, error) {
 	if err != nil {
 		return result, err
 	}
+
+	// A revision that IS HEAD would diff to nothing and skip the newest commits.
+	sinceCommit, result.Notice = resolveSinceBaseline(repo, sinceCommit, headCommit)
+	result.Baseline = sinceCommit.Hash
 
 	sinceTree, err := sinceCommit.Tree()
 	if err != nil {
@@ -176,6 +190,112 @@ func resolveCommitForRev(repo *git.Repository, rev string) (*object.Commit, erro
 		return nil, fmt.Errorf("revision %q does not point to a commit: %w", rev, err)
 	}
 	return commit, nil
+}
+
+// resolveSinceBaseline returns the commit the --since-commit range should be
+// rooted at, plus an operator-facing notice when the caller's revision had to
+// be adjusted.
+//
+// A revision that resolves to HEAD names the empty range HEAD..HEAD, so the
+// deploy would contain only uncommitted working-tree changes while looking like
+// a successful deploy of the newest commits. Because the revision is nearly
+// always copied from `git log -1` (which prints HEAD), that mistake is common
+// enough to fix automatically: the range is rooted at HEAD's first parent
+// instead, matching what the operator meant by "deploy the latest change".
+//
+// Nothing is adjusted when the revision is any other commit (an explicit older
+// baseline must be honoured verbatim) or when HEAD has no parent (a repository
+// with a single, root commit cannot fall back to anything).
+func resolveSinceBaseline(repo *git.Repository, since, head *object.Commit) (*object.Commit, string) {
+	if since == nil || head == nil || since.Hash != head.Hash {
+		return since, ""
+	}
+	if head.NumParents() == 0 {
+		return since, ""
+	}
+	parent, err := head.Parent(0)
+	if err != nil || parent == nil {
+		return since, ""
+	}
+	count := countCommitsInRange(repo, head, parent.Hash)
+	return parent, fmt.Sprintf(
+		"ℹ %s adalah HEAD — range kosong. Otomatis pakai parent: %s..%s (%s dalam range)",
+		shortHash(head.Hash), shortHash(parent.Hash), shortHash(head.Hash), pluralCommits(count),
+	)
+}
+
+// countCommitsInRange counts the commits reachable from head but not from
+// baseline, mirroring `git rev-list baseline..HEAD`.
+//
+// The baseline's full ancestor set is collected first and passed to the walker
+// as seenExternal, so the walk prunes at every commit already contained in the
+// baseline. Pruning only the baseline hash itself is not enough: a merge's
+// second parent usually branches off history that predates the baseline, and
+// walking it would inflate the count (observed 349 instead of 2 on a real
+// merge).
+//
+// Failures are non-fatal: the count only decorates the notice, so an
+// unreadable object degrades to 0.
+func countCommitsInRange(repo *git.Repository, head *object.Commit, baseline plumbing.Hash) int {
+	if repo == nil || head == nil {
+		return 0
+	}
+	ancestors, err := ancestorSetOf(repo, baseline)
+	if err != nil {
+		return 0
+	}
+
+	iter := object.NewCommitPreorderIter(head, ancestors, nil)
+	defer iter.Close()
+
+	count := 0
+	if err := iter.ForEach(func(*object.Commit) error {
+		count++
+		return nil
+	}); err != nil {
+		return 0
+	}
+	return count
+}
+
+// ancestorSetOf returns every commit reachable from start, including start
+// itself. A commit already known is never re-walked, so the traversal stays
+// linear in the number of commits.
+func ancestorSetOf(repo *git.Repository, start plumbing.Hash) (map[plumbing.Hash]bool, error) {
+	seen := map[plumbing.Hash]bool{}
+	if start.IsZero() {
+		return seen, nil
+	}
+	commit, err := repo.CommitObject(start)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read commit %s: %w", shortHash(start), err)
+	}
+	iter := object.NewCommitPreorderIter(commit, nil, nil)
+	defer iter.Close()
+	if err := iter.ForEach(func(c *object.Commit) error {
+		seen[c.Hash] = true
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("cannot walk ancestors of %s: %w", shortHash(start), err)
+	}
+	return seen, nil
+}
+
+// shortHash renders a hash as git's default 7-character abbreviation.
+func shortHash(hash plumbing.Hash) string {
+	s := hash.String()
+	if len(s) <= 7 {
+		return s
+	}
+	return s[:7]
+}
+
+// pluralCommits formats a commit count for the fallback notice.
+func pluralCommits(n int) string {
+	if n == 1 {
+		return "1 commit"
+	}
+	return fmt.Sprintf("%d commit", n)
 }
 
 // headCommitOf returns the commit HEAD points at.
