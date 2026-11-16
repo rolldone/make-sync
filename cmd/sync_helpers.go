@@ -79,6 +79,10 @@ func getGitChangedPaths(absRoot string) []string {
 	if err != nil {
 		return nil
 	}
+	// go-git reports CRLF-only and exec-bit-only differences as Modified; git
+	// does not (see gitstatus.go). Filter them out so --git-changes matches
+	// `git status`.
+	status = dropStatusFalsePositives(absRoot, repo, wt, status)
 
 	seen := make(map[string]struct{})
 	var paths []string

@@ -255,5 +255,8 @@ func countUncommitted(localRoot string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Ignore the false Modified entries go-git reports (see gitstatus.go) so the
+	// "uncommitted changes ignored" warning reflects what git would say.
+	status = dropStatusFalsePositives(absRoot, repo, wt, status)
 	return len(status), nil
 }

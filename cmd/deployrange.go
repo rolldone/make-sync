@@ -123,6 +123,11 @@ func computeCommitRangeLists(localRoot, rev string) (DeployRangeLists, error) {
 	if err != nil {
 		return result, fmt.Errorf("cannot read worktree status: %w", err)
 	}
+	// go-git compares raw bytes and the exec bit while git applies its checkin
+	// conversion and honours core.filemode, so a CRLF checkout or a 0755 working
+	// tree makes unchanged files look Modified. Drop those entries before they
+	// reach the upload list.
+	status = dropStatusFalsePositives(absRoot, repo, wt, status)
 	for rawPath, fileStatus := range status {
 		p := normalizeDeployPath(rawPath)
 		if p == "" {
